@@ -1,0 +1,7 @@
+[project]
+name = "flow_asr"
+version = "0.1.0"
+dependencies = [
+    "datasets>=5.0.1",
+    "torchcodec>=0.16.0",
+]

@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Downloaded datasets (LibriSpeech cache is ~64 GB)
+data/
