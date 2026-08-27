@@ -1,0 +1,44 @@
+[project]
+name = "flow_asr"
+version = "0.1.0"
+dependencies = [
+    "datasets>=5.0.1",
+    "ruff>=0.16.4",
+    "torch>=2.11.0",
+    "torchcodec>=0.16",
+    "transformers>=5.16.1",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+
+[tool.uv.sources]
+# Same index for both: torchcodec is ABI-locked to torch and the CUDA major
+# version, and PyPI's build will not load. CUDA 13 needs driver >= 580.
+torch = { index = "pytorch-cu130" }
+torchcodec = { index = "pytorch-cu130" }
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes: undefined names, unused imports and variables
+    "I",   # isort: import ordering
+    "D",   # pydocstyle: docstrings, Google convention (see below)
+    "ANN", # flake8-annotations: type hints on parameters and returns
+    "B",   # bugbear: likely bugs (mutable default args, etc.)
+    "UP",  # pyupgrade: modern syntax for the target Python version
+    "SIM", # simplify: needlessly complex constructs
+    "N",   # pep8-naming
+    "RUF", # ruff-specific rules (unused noqa, etc.)
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
