@@ -22,7 +22,12 @@ import json
 import os
 import sys
 import time
+from collections.abc import Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # runtime import is deferred until after setup_hf_env()
+    from huggingface_hub import HfApi
 
 REPO_ID = "openslr/librispeech_asr"
 
@@ -41,7 +46,8 @@ SNELLIUS_DATA_ROOT = Path("/scratch-shared/cont-flow-asr/data")
 LOCAL_DATA_ROOT = Path(__file__).resolve().parent.parent / "data"
 
 
-def parse_args(argv=None):
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """Parse and validate the command-line arguments."""
     p = argparse.ArgumentParser(
         description="Download LibriSpeech parquet shards into an HF hub cache.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -163,7 +169,12 @@ def setup_hf_env(data_root: Path, no_fast_transfer: bool) -> None:
         os.environ["HF_XET_HIGH_PERFORMANCE"] = "1"
 
 
-def select_files(api, sha: str, configs, splits):
+def select_files(
+    api: "HfApi",
+    sha: str,
+    configs: Sequence[str],
+    splits: Sequence[str],
+) -> tuple[list[str], dict[str, int], list[tuple[str, str]]]:
     """Return (sorted parquet paths, {path: size}, skipped (config, split) pairs).
 
     The config -> split -> path-glob map comes from the dataset card rather than being
@@ -200,7 +211,8 @@ def select_files(api, sha: str, configs, splits):
     return files, sizes, skipped
 
 
-def missing_files(data_root: Path, sha: str, files) -> list[str]:
+def missing_files(data_root: Path, sha: str, files: Sequence[str]) -> list[str]:
+    """Return the subset of ``files`` not yet present in the local cache."""
     snapshot = (
         data_root
         / "hub"
@@ -212,7 +224,7 @@ def missing_files(data_root: Path, sha: str, files) -> list[str]:
     return [f for f in files if not (snapshot / f).exists()]
 
 
-def download(sha: str, files, args) -> list[str]:
+def download(sha: str, files: Sequence[str], args: argparse.Namespace) -> list[str]:
     """Download ``files``, retrying on failure.  Returns what is still missing."""
     from huggingface_hub import snapshot_download
 
@@ -228,7 +240,7 @@ def download(sha: str, files, args) -> list[str]:
                 allow_patterns=files,
                 max_workers=args.workers,
             )
-        except Exception as exc:  # noqa: BLE001 - any failure is worth a retry
+        except Exception as exc:
             print(
                 f"attempt {attempt}/{args.max_retries} failed: {exc}", file=sys.stderr
             )
@@ -250,7 +262,8 @@ def download(sha: str, files, args) -> list[str]:
     return missing_files(args.data_root, sha, files)
 
 
-def main(argv=None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run the download, returning a process exit code."""
     args = parse_args(argv)
     setup_hf_env(args.data_root, args.no_fast_transfer)
 
