@@ -12,7 +12,7 @@ module purge
 module load 2025
 module load Anaconda3/2025.06-1
 
-cd "$HOME/private-grading"
+cd "$HOME/continuous-flow-asr"
 
 conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
 conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
