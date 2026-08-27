@@ -11,6 +11,13 @@ set -euo pipefail
 REPO_DIR="${1:-$(pwd)}"
 ENV_NAME="${ENV_NAME:-flow_asr}"
 
+# FFmpeg is a native library, so it cannot come from pyproject.toml — uv installs
+# Python wheels only. It is pinned here rather than left to resolve, so rebuilding
+# the env months apart gives the same decoder. torchcodec dlopens whichever of its
+# libtorchcodec_core4..core9 matches the installed libavutil, so any major in
+# [4, 9] works; bump this only to a version still inside that range.
+FFMPEG_VERSION="${FFMPEG_VERSION:-7.1.1}"
+
 # Prefer using the env's python directly (avoid relying on activation)
 PY_BIN="$REPO_DIR/.venv/bin/python"
 ACTIVATE="$REPO_DIR/.venv/bin/activate"
@@ -72,9 +79,9 @@ CONDA_YAML_PATH="$REPO_DIR/conda_environment.yaml"
   echo "dependencies:"
   echo "  - python=$PY_VER"
   echo "  - pip"
-  # torchcodec decodes audio through FFmpeg (any of 4-9) and will not import
-  # without those shared libraries present.
-  echo "  - ffmpeg"
+  # torchcodec decodes audio through FFmpeg and will not import without these
+  # shared libraries present.
+  echo "  - ffmpeg=$FFMPEG_VERSION"
   echo "  - pip:"
   echo "    - \"--index-url=https://download.pytorch.org/whl/$CUDA_TAG\""
   echo '    - "--extra-index-url=https://pypi.org/simple"'
