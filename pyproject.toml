@@ -4,7 +4,7 @@ version = "0.1.0"
 dependencies = [
     "datasets>=5.0.1",
     "ruff>=0.16.4",
-    "torch>=2.11.0",
+    "torch>=2.11.0,<2.13.0",
     "torchcodec>=0.16",
     "transformers>=5.16.1",
 ]
