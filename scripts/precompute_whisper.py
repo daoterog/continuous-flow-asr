@@ -289,8 +289,10 @@ def process_shard(
                 "trimmed": not args.no_trim,
                 "source": shard.name,
                 "utts": utts,
-            }
+            },
+            indent=2,
         )
+        + "\n"
     )
     return len(utts)
 
