@@ -46,6 +46,17 @@ cd "$HOME/continuous-flow-asr"
 # ── environment ──────────────────────────────────────────────────────────────
 source activate "${CONDA_ENV:-flow_asr}"
 
+# Conda relies on RPATH and does not set LD_LIBRARY_PATH, but pip wheels such as
+# torchcodec carry no RPATH into the env — so its libtorchcodec_core7.so resolves
+# libstdc++ against Snellius's /lib64, which is too old for the GLIBCXX_3.4.30 that
+# conda's own libicuuc needs. Prepending the env's lib puts conda's newer libstdc++
+# and its libavutil ahead of the system ones.
+export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+# Fail fast on a broken decoder rather than after loading 3 GB of weights and
+# discovering it once per shard.
+python -m scripts.check_ffmpeg
+
 # HF_TOKEN, for authenticated Hub requests (higher rate limits when pulling the
 # Whisper weights). set -a exports everything the file defines.
 if [[ -f .env ]]; then

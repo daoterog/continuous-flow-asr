@@ -91,7 +91,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="store the raw fixed 1500 frames per utterance (2.4x the disk)",
     )
-    p.add_argument("--fp32", action="store_true", help="store float32 instead of float16")
+    p.add_argument(
+        "--dtype",
+        choices=["float16", "float32"],
+        default="float16",
+        help="encoder and storage precision; float32 doubles disk and halves speed",
+    )
     p.add_argument("--limit", type=int, default=None, help="stop after N utts per shard")
     p.add_argument("--overwrite", action="store_true", help="recompute finished shards")
     p.add_argument("--failure-log", type=Path, default=None)
@@ -169,18 +174,25 @@ def count_utterances(shards: list[Path], limit: int | None) -> int:
     return total
 
 
-def is_complete(npy: Path, index: Path) -> bool:
-    """True if both outputs exist and the index agrees with the array's row count."""
+def is_complete(shard: Path, npy: Path, index: Path) -> bool:
+    """True if the outputs exist, are self-consistent, and cover the whole input shard.
+
+    The utterance count is checked against the input parquet, not just against the array:
+    a ``--limit`` run produces a perfectly self-consistent index over a handful of rows,
+    which would otherwise be mistaken for a finished shard and skipped on resume.
+    """
     if not (npy.is_file() and index.is_file()):
         return False
     try:
-        meta = json.loads(index.read_text())
         import numpy as np
+        import pyarrow.parquet as pq
 
+        meta = json.loads(index.read_text())
         rows = np.load(npy, mmap_mode="r").shape[0]
+        expected_utts = pq.ParquetFile(shard).metadata.num_rows
     except (OSError, ValueError, json.JSONDecodeError):
         return False
-    return rows == sum(u["length"] for u in meta["utts"])
+    return rows == sum(u["length"] for u in meta["utts"]) and len(meta["utts"]) == expected_utts
 
 
 def build_loader(
@@ -248,7 +260,7 @@ def process_shard(
     npy, index = output_paths(args.data_root, args.model, shard)
     npy.parent.mkdir(parents=True, exist_ok=True)
 
-    dtype = np.float32 if args.fp32 else np.float16
+    dtype = np.dtype(args.dtype)
     chunks: list[np.ndarray] = []
     utts: list[dict] = []
     offset = 0
@@ -298,21 +310,23 @@ def process_shard(
 
 
 def load_encoder(
-    model: str, fp32: bool
+    model: str, dtype: str
 ) -> tuple["WhisperEncoder", "WhisperFeatureExtractor", "torch.device"]:
     """Load the Whisper encoder and feature extractor onto the best available device."""
     import torch
     from transformers import WhisperFeatureExtractor, WhisperModel
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # fp16 on CPU is unsupported for these ops; the storage dtype is independent of this.
-    compute_dtype = torch.float32 if (fp32 or device.type == "cpu") else torch.float16
+    # One dtype governs both the encode and the storage: casting fp16 output up to fp32
+    # is lossless but adds no information, so the two are only ever meaningful together.
+    # The exception is CPU, where fp16 is unsupported for these ops.
+    torch_dtype = torch.float32 if device.type == "cpu" else getattr(torch, dtype)
 
     extractor = WhisperFeatureExtractor.from_pretrained(model)
     if extractor.hop_length != HOP_LENGTH:
         raise ValueError(f"expected hop_length {HOP_LENGTH}, got {extractor.hop_length}")
 
-    full = WhisperModel.from_pretrained(model, dtype=compute_dtype)
+    full = WhisperModel.from_pretrained(model, dtype=torch_dtype)
     encoder = full.get_encoder().to(device).eval()
     del full.decoder  # the decoder is loaded by from_pretrained but never used here
     return encoder, extractor, device
@@ -333,7 +347,7 @@ def main(argv: list[str] | None = None) -> int:
 
     mine = shards[args.shard_id :: args.num_shards]
     def done(shard: Path) -> bool:
-        return is_complete(*output_paths(args.data_root, args.model, shard))
+        return is_complete(shard, *output_paths(args.data_root, args.model, shard))
 
     todo = [s for s in mine if args.overwrite or not done(s)]
 
@@ -349,7 +363,7 @@ def main(argv: list[str] | None = None) -> int:
     # Machine-readable; submit_whisper.sh reads this to size the sbatch --time.
     print(f"utterances  {count_utterances(mine, args.limit)}")
     print(f"trim        {'off' if args.no_trim else 'on'}")
-    print(f"dtype       {'float32' if args.fp32 else 'float16'}")
+    print(f"dtype       {args.dtype}")
     print(f"batch/work  {args.batch_size} / {args.workers}")
 
     if args.dry_run:
@@ -371,7 +385,7 @@ def main(argv: list[str] | None = None) -> int:
         print("nothing to do")
         return 0
 
-    encoder, extractor, device = load_encoder(args.model, args.fp32)
+    encoder, extractor, device = load_encoder(args.model, args.dtype)
     print(f"device      {device} ({encoder.dtype})")
 
     failures: list[dict] = []
