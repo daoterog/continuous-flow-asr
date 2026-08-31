@@ -69,6 +69,12 @@ else
 fi
 
 # ── run ──────────────────────────────────────────────────────────────────────
+# NO_TRIM=1 stores the full 1500 encoder frames. Required for anything that will be
+# fed back through Whisper's decoder (i.e. the eval splits) — trimmed latents decode
+# to repeated <|en|> tokens. Costs 2.4x the disk, so training splits leave it unset.
+TRIM_FLAG=()
+[[ -n "${NO_TRIM}" ]] && TRIM_FLAG=(--no-trim)
+
 python -m scripts.precompute_whisper \
     --env snellius \
     --model "${MODEL}" \
@@ -77,4 +83,5 @@ python -m scripts.precompute_whisper \
     --num-shards "${SLURM_ARRAY_TASK_COUNT}" \
     --shard-id "${SLURM_ARRAY_TASK_ID}" \
     --workers "${SLURM_CPUS_PER_TASK}" \
-    --batch-size "${BATCH_SIZE:-128}"
+    --batch-size "${BATCH_SIZE:-128}" \
+    "${TRIM_FLAG[@]}"

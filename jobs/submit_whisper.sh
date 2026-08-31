@@ -24,6 +24,8 @@ N_JOBS="${N_JOBS:-7}"
 # The real ceiling is diminishing returns: an RTX 3060 plateaued at batch 16, and an
 # A100 is roughly 8-15x faster, putting saturation near 128-256.
 BATCH_SIZE="${BATCH_SIZE:-128}"
+# Set NO_TRIM=1 for splits that will be decoded back through Whisper (the eval sets).
+NO_TRIM="${NO_TRIM:-}"
 
 # Wall-time model. The encode is GPU-bound (an isolated benchmark matched the
 # end-to-end rate), and an RTX 3060 managed 8.1 utts/s. 30 utts/s assumes an A100 is
@@ -71,11 +73,12 @@ echo "model     : ${MODEL}"
 echo "configs   : ${CONFIGS}"
 echo "splits    : ${SPLITS}"
 echo "tasks     : ${N_JOBS}"
+echo "trim      : $([[ -n "${NO_TRIM}" ]] && echo "off (full 1500 frames)" || echo "on")"
 echo "walltime  : ${WALLTIME}"
 
 # --time here overrides the #SBATCH directive in precompute_whisper.sh.
 sbatch \
     --array="0-$((N_JOBS - 1))" \
     --time="${WALLTIME}" \
-    --export=ALL,CONFIGS="${CONFIGS}",SPLITS="${SPLITS}",MODEL="${MODEL}",BATCH_SIZE="${BATCH_SIZE}" \
+    --export=ALL,CONFIGS="${CONFIGS}",SPLITS="${SPLITS}",MODEL="${MODEL}",BATCH_SIZE="${BATCH_SIZE}",NO_TRIM="${NO_TRIM}" \
     "${SCRIPT_DIR}/precompute_whisper.sh"
