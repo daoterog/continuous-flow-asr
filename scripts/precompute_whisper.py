@@ -365,7 +365,9 @@ def load_encoder(
 def main(argv: list[str] | None = None) -> int:
     """Run the precompute, returning a process exit code."""
     args = parse_args(argv)
-    os.environ.setdefault("HF_HOME", str(args.data_root))
+    # Set rather than setdefault: the Whisper checkpoint is ~3 GB and an inherited
+    # HF_HOME pointing at a quota'd home directory would otherwise win.
+    os.environ["HF_HOME"] = str(args.data_root)
 
     snapshot = snapshot_dir(args.data_root)
     shards, skipped = select_shards(snapshot, args.configs, args.splits)

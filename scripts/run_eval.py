@@ -243,6 +243,10 @@ def decode_split(
 def main(argv: list[str] | None = None) -> int:
     """Decode the selected cached splits, returning a process exit code."""
     args = parse_args(argv)
+    # Before any transformers/hub import: the Whisper checkpoint is ~3 GB and would
+    # otherwise land in $HOME/.cache/huggingface, which is quota'd on Snellius. Set
+    # rather than setdefault, so an inherited HF_HOME pointing at home cannot win.
+    os.environ["HF_HOME"] = str(args.data_root)
     add_leaderboard_to_path()
 
     pairs = [(c, s) for c in args.configs for s in args.splits]
