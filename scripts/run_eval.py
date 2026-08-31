@@ -294,6 +294,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\n  wrote {path}")
 
     if failures:
+        # decode_split creates results_dir, but it may have failed before reaching that;
+        # the failure log must not itself fail and bury the real error.
+        args.results_dir.mkdir(parents=True, exist_ok=True)
         log = args.results_dir / "failures.json"
         log.write_text(json.dumps(failures, indent=2))
         print(f"\nFAILED: {len(failures)} of {len(pending)}, logged to {log}", file=sys.stderr)
