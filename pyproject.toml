@@ -31,6 +31,8 @@ torchcodec = { index = "pytorch-cu130" }
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# Vendored upstream code (git submodule); not ours to lint or reformat.
+extend-exclude = ["open_asr_leaderboard"]
 
 [tool.ruff.lint]
 select = [
