@@ -173,6 +173,7 @@ def decode_split(
 
     refs: list[str] = []
     preds: list[str] = []
+    utt_ids: list[str] = []
     for index_path in indexes:
         meta = json.loads(index_path.read_text())
         if meta["trimmed"]:
@@ -211,6 +212,7 @@ def decode_split(
                 )
             )
             refs.extend(u["text"] for u in chunk)
+            utt_ids.extend(u["id"] for u in chunk)
             print(f"    {len(preds)}/{len(utts)}", end="\r", flush=True)
 
     dataset, lb_split = LEADERBOARD_NAMES.get((config, split), ("librispeech", split))
@@ -222,11 +224,14 @@ def decode_split(
     part = args.shard_id if args.num_shards > 1 else None
     path = args.results_dir / manifest_name(args.model, dataset, lb_split, part)
     with path.open("w", encoding="utf-8") as f:
-        for i, (ref, pred) in enumerate(zip(refs, preds, strict=True)):
+        for utt_id, ref, pred in zip(utt_ids, refs, preds, strict=True):
             f.write(
                 json.dumps(
                     {
-                        "audio_filepath": f"sample_{i}",
+                        # The real utterance id, not a per-file index: sharded parts
+                        # would otherwise all restart at sample_0 and collide on merge,
+                        # making coverage impossible to verify.
+                        "audio_filepath": utt_id,
                         "duration": None,
                         "time": None,
                         "text": ref,

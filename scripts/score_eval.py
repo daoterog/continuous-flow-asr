@@ -60,14 +60,29 @@ def merge_parts(results_dir: Path) -> int:
         # Sorted by shard index, not lexically, so part10 does not land before part2.
         parts.sort(key=lambda p: int(re.search(r"\.part(\d+)\.jsonl$", p.name).group(1)))
         rows = 0
+        seen: set[str] = set()
+        duplicates: set[str] = set()
         with canonical.open("w", encoding="utf-8") as out:
             for part in parts:
                 with part.open(encoding="utf-8") as fh:
                     for line in fh:
-                        if line.strip():
-                            out.write(line)
-                            rows += 1
+                        if not line.strip():
+                            continue
+                        utt_id = json.loads(line)["audio_filepath"]
+                        if utt_id in seen:
+                            duplicates.add(utt_id)
+                        seen.add(utt_id)
+                        out.write(line)
+                        rows += 1
         print(f"merged {len(parts)} part(s), {rows} rows -> {canonical.name}")
+        if duplicates:
+            # Overlapping shards would double-count utterances and skew WER, so this is
+            # an error rather than a warning.
+            raise SystemExit(
+                f"{canonical.name}: {len(duplicates)} duplicate utterance id(s) across "
+                f"parts, e.g. {sorted(duplicates)[:3]}. The shards overlap — check "
+                "--num-shards matched the array size on every task."
+            )
         for part in parts:
             part.unlink()
     return len(groups)

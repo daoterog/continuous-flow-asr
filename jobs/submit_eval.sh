@@ -22,6 +22,9 @@ SPLITS="${SPLITS:-test}"
 MODEL="${MODEL:-openai/whisper-large-v3}"
 N_JOBS="${N_JOBS:-8}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
+# LIMIT caps utterances per split before sharding — used by rehearse_eval.sh to run
+# the identical array shape on a handful of utterances.
+LIMIT="${LIMIT:-}"
 
 # Wall-time model. Decoding is autoregressive, so it is much slower per utterance than
 # the encode: an RTX 3060 managed ~0.7 utts/s at batch 16. 5 utts/s assumes an A100 is
@@ -39,6 +42,9 @@ RESULTS_DIR="${RESULTS_DIR:-${REPO_DIR}/results}"
 
 fmt_hms() { printf '%02d:%02d:%02d' $(($1 / 3600)) $((($1 % 3600) / 60)) $(($1 % 60)); }
 
+if [[ -n "${LIMIT}" && -z "${WALLTIME}" ]]; then
+    WALLTIME="00:30:00"
+fi
 if [[ -z "${WALLTIME}" ]]; then
     # Reuse the precompute's dry-run to count utterances without loading a model.
     # `|| true` is load-bearing: under `set -eo pipefail` a failing python would abort
@@ -71,11 +77,12 @@ echo "configs   : ${CONFIGS}"
 echo "splits    : ${SPLITS}"
 echo "tasks     : ${N_JOBS}"
 echo "results   : ${RESULTS_DIR}"
+[[ -n "${LIMIT}" ]] && echo "limit     : ${LIMIT} utt(s) per split (REHEARSAL, not a full run)"
 echo "walltime  : ${WALLTIME}"
 
 # --time here overrides the #SBATCH directive in run_eval.sh.
 sbatch \
     --array="0-$((N_JOBS - 1))" \
     --time="${WALLTIME}" \
-    --export=ALL,CONFIGS="${CONFIGS}",SPLITS="${SPLITS}",MODEL="${MODEL}",BATCH_SIZE="${BATCH_SIZE}",RESULTS_DIR="${RESULTS_DIR}" \
+    --export=ALL,CONFIGS="${CONFIGS}",SPLITS="${SPLITS}",MODEL="${MODEL}",BATCH_SIZE="${BATCH_SIZE}",RESULTS_DIR="${RESULTS_DIR}",LIMIT="${LIMIT}" \
     "${SCRIPT_DIR}/run_eval.sh"

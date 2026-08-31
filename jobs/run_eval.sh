@@ -20,6 +20,7 @@
 #   CONFIGS — space-separated subset of "clean other"
 #   SPLITS  — space-separated split names as stored in the feature cache
 #   MODEL   — Whisper checkpoint
+#   LIMIT   — optional; utterances per split BEFORE sharding, for rehearsals
 #
 # Each task writes MODEL_..._<dataset>_<split>.part<TASK_ID>.jsonl; score_eval merges the
 # parts back into one manifest per split before scoring, because score_results derives the
@@ -74,4 +75,5 @@ python -m scripts.run_eval \
     --num-shards "${SLURM_ARRAY_TASK_COUNT}" \
     --shard-id "${SLURM_ARRAY_TASK_ID}" \
     --batch-size "${BATCH_SIZE:-32}" \
-    --results-dir "${RESULTS_DIR:-$HOME/continuous-flow-asr/results}"
+    --results-dir "${RESULTS_DIR:-$HOME/continuous-flow-asr/results}" \
+    ${LIMIT:+--limit "${LIMIT}"}
