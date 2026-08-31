@@ -253,7 +253,13 @@ def process_shard(
     device: "torch.device",
     args: argparse.Namespace,
 ) -> int:
-    """Encode one parquet shard and write its .npy/.json pair. Returns utterances done."""
+    """Encode one parquet shard and write its .npy/.json pair. Returns utterances done.
+
+    Features are streamed straight into an on-disk memmap rather than accumulated in a
+    list. Holding a whole untrimmed shard in RAM and then concatenating it needs roughly
+    2 x 9.4 GiB for clean/test, which the OOM killer ends on a machine with less; writing
+    through the memmap keeps peak RAM at one batch.
+    """
     import numpy as np
     import torch
 
@@ -261,43 +267,67 @@ def process_shard(
     npy.parent.mkdir(parents=True, exist_ok=True)
 
     dtype = np.dtype(args.dtype)
-    chunks: list[np.ndarray] = []
-    utts: list[dict] = []
-    offset = 0
-
-    for batch in build_loader(shard, extractor, args):
-        mel = batch["mel"].to(device, dtype=encoder.dtype)
-        with torch.no_grad():
-            out = encoder(mel).last_hidden_state.to(torch.float32).cpu().numpy()
-
-        for row, valid, utt_id, text in zip(
-            out, batch["valid"], batch["id"], batch["text"], strict=True
-        ):
-            length = (
-                row.shape[0]
-                if args.no_trim
-                else min(math.ceil(valid / MEL_TO_ENCODER_STRIDE), row.shape[0])
-            )
-            chunks.append(row[:length].astype(dtype))
-            utts.append({"id": utt_id, "offset": offset, "length": length, "text": text})
-            offset += length
-
-    feats = np.concatenate(chunks) if chunks else np.empty((0, 0), dtype=dtype)
+    d_model = int(encoder.config.d_model)
+    max_frames = MAX_MEL_FRAMES // MEL_TO_ENCODER_STRIDE
+    capacity = count_utterances([shard], args.limit) * max_frames
 
     # Write to .tmp then rename: a killed job must not leave a half-written shard that
     # looks complete to the resume check.
     tmp = npy.with_suffix(".npy.tmp")
-    # Written through a handle, not a path: np.save appends ".npy" to any path that
-    # lacks it, which would silently produce "0000.npy.tmp.npy" and break the rename.
-    with tmp.open("wb") as fh:
-        np.save(fh, feats)
-    os.replace(tmp, npy)
+    store = np.lib.format.open_memmap(
+        tmp, mode="w+", dtype=dtype, shape=(capacity, d_model)
+    )
+
+    utts: list[dict] = []
+    offset = 0
+    try:
+        for batch in build_loader(shard, extractor, args):
+            mel = batch["mel"].to(device, dtype=encoder.dtype)
+            with torch.no_grad():
+                out = encoder(mel).last_hidden_state
+            # Cast on the GPU so only the stored precision crosses the bus.
+            out = out.to(getattr(torch, dtype.name)).cpu().numpy()
+
+            for row, valid, utt_id, text in zip(
+                out, batch["valid"], batch["id"], batch["text"], strict=True
+            ):
+                length = (
+                    row.shape[0]
+                    if args.no_trim
+                    else min(math.ceil(valid / MEL_TO_ENCODER_STRIDE), row.shape[0])
+                )
+                store[offset : offset + length] = row[:length]
+                utts.append({"id": utt_id, "offset": offset, "length": length, "text": text})
+                offset += length
+        store.flush()
+    finally:
+        del store  # release the mapping before the file is renamed or rewritten
+
+    if offset == capacity:
+        # Untrimmed: the upper bound was exact, so the file is already correct.
+        os.replace(tmp, npy)
+    else:
+        # Trimmed: copy the used prefix into a right-sized file, a chunk at a time so
+        # peak RAM stays bounded regardless of shard size.
+        final = npy.with_suffix(".npy.tmp2")
+        src = np.load(tmp, mmap_mode="r")
+        dst = np.lib.format.open_memmap(
+            final, mode="w+", dtype=dtype, shape=(offset, d_model)
+        )
+        for start in range(0, offset, 1 << 16):
+            end = min(start + (1 << 16), offset)
+            dst[start:end] = src[start:end]
+        dst.flush()
+        del src, dst
+        os.replace(final, npy)
+        tmp.unlink()
+
     index.write_text(
         json.dumps(
             {
                 "model": args.model,
-                "dtype": str(np.dtype(dtype)),
-                "d_model": int(feats.shape[1]) if feats.size else 0,
+                "dtype": str(dtype),
+                "d_model": d_model,
                 "trimmed": not args.no_trim,
                 "source": shard.name,
                 "utts": utts,
