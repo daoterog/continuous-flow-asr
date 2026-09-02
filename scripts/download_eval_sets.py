@@ -27,7 +27,8 @@ from scripts.download_librispeech import LOCAL_DATA_ROOT, SNELLIUS_DATA_ROOT
 if TYPE_CHECKING:
     from huggingface_hub import HfApi
 
-EVAL_REPO = "hf-audio/open-asr-leaderboard"
+from scripts.run_eval import EVAL_DATASETS, EVAL_REPO
+
 # The chunked set lives in its own repos: the chunks, and the parent call transcripts that
 # data_utils.load_chunked_data joins onto them.
 CHUNKED_REPOS = [
@@ -36,15 +37,10 @@ CHUNKED_REPOS = [
 ]
 CHUNKED_KEY = "earnings22_cleaned_aa_chunked"
 
-# librispeech is omitted: already downloaded from openslr, and its normalized references
-# were verified identical (2620/2620) to this repo's copy.
-DATASETS = [
-    "ami_cleaned",
-    "gigaspeech_cleaned",
-    "spgispeech",
-    "voxpopuli_cleaned_aa",
-    CHUNKED_KEY,
-]
+# The same keys run_eval uses, so the two scripts cannot disagree about what to fetch.
+# librispeech is included even though openslr has it: the audio path reads it from
+# hf-audio, and omitting it left the array tasks racing to build its Arrow cache.
+DATASETS = list(EVAL_DATASETS)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -78,6 +74,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--failure-log", type=Path, default=None)
     p.add_argument("--dry-run", action="store_true", help="print the plan and exit")
     p.add_argument("--verify", action="store_true", help="check files exist; download nothing")
+    p.add_argument(
+        "--build-cache",
+        action="store_true",
+        help="skip downloading; materialize the Arrow cache once (run single-task)",
+    )
 
     args = p.parse_args(argv)
     if args.num_shards < 1:
@@ -96,7 +97,11 @@ def select_files(api: "HfApi", datasets: Sequence[str]) -> dict[str, list[tuple[
     """Return {repo: [(path, size)]} for every file the selected datasets need."""
     plan: dict[str, list[tuple[str, int]]] = {}
 
-    configs = [d for d in datasets if d != CHUNKED_KEY]
+    # Several keys can share one config (librispeech_test.clean / .other), and the file
+    # layout is <config>/..., so deduplicate to config names before filtering.
+    configs = {
+        EVAL_DATASETS[d][1] for d in datasets if EVAL_DATASETS[d][0] == EVAL_REPO
+    }
     if configs:
         entries = [
             (f.path, f.size)
@@ -154,11 +159,59 @@ def download(repo: str, files: Sequence[str], args: argparse.Namespace) -> list[
     return missing_files(cache_dir, repo, files)
 
 
+def build_arrow_cache(datasets: Sequence[str], data_root: Path) -> list[str]:
+    """Materialize each dataset's Arrow cache once. Returns the datasets that failed.
+
+    Downloading the parquet only fills the *hub* cache; ``load_dataset`` then converts it
+    into a second, separate Arrow cache under ``datasets/``. Eight array tasks doing that
+    conversion at once race on the same ``<hash>.incomplete/`` directory and corrupt each
+    other — "Tried reading schema message, was null or length 0", "Cannot find data file",
+    truncated message bodies. ``datasets`` guards this with file locks, which are not
+    reliable on GPFS. Building it once, single-task, makes every array task a cache hit.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "open_asr_leaderboard"))
+    from types import SimpleNamespace
+
+    from normalizer import data_utils
+
+    from scripts.run_eval import EVAL_DATASETS
+
+    failed = []
+    for key in datasets:
+        if key not in EVAL_DATASETS:
+            continue
+        path, name, split = EVAL_DATASETS[key]
+        print(f"\n[cache] {key}", flush=True)
+        try:
+            ds = data_utils.load_data(
+                SimpleNamespace(
+                    dataset_path=path, dataset=name, split=split, streaming=False
+                )
+            )
+            print(f"  {len(ds)} rows")
+        except Exception as exc:  # one bad dataset must not lose the rest
+            print(f"  FAILED: {exc}", file=sys.stderr)
+            failed.append(key)
+    return failed
+
+
 def main(argv: list[str] | None = None) -> int:
     """Download the selected eval sets, returning a process exit code."""
     args = parse_args(argv)
     # Before any hub import: these are tens of GB and must not land in a quota'd home.
     os.environ["HF_HOME"] = str(args.data_root)
+
+    if args.build_cache:
+        # Must run as a single task: concurrent conversions corrupt each other.
+        if args.num_shards != 1:
+            print("error: --build-cache must run with --num-shards 1", file=sys.stderr)
+            return 2
+        failed = build_arrow_cache(args.datasets, args.data_root)
+        if failed:
+            print(f"\nFAILED to build: {' '.join(failed)}", file=sys.stderr)
+            return 1
+        print(f"\nOK: Arrow cache built for {len(args.datasets)} dataset(s)")
+        return 0
 
     from huggingface_hub import HfApi
 

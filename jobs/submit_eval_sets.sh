@@ -7,17 +7,18 @@
 #   DATASETS="voxpopuli_cleaned_aa" ./jobs/submit_eval_sets.sh  # one set first
 #   N_JOBS=8 ./jobs/submit_eval_sets.sh
 #
-# ~18 GB total across 405 files. LibriSpeech is not included: it is already downloaded
-# from openslr, and its normalized references were verified identical (2620/2620) to this
-# repo's copy.
+# ~18.6 GB across 407 files. LibriSpeech IS included even though openslr has a copy: the
+# audio path reads it from hf-audio, and leaving it out left the eval tasks racing to
+# build its Arrow cache themselves.
 #
-# Afterwards the configs are fully cached, which is what makes data_utils.load_data a pure
-# cache hit inside the eval — it resolves a whole config, so a partial cache would trigger
-# a re-download from every array task at once.
+# Two stages: the download array, then a single-task Arrow cache build chained with
+# --dependency=afterok. The second stage is not optional — downloading fills the *hub*
+# cache, but load_dataset then builds a separate Arrow cache, and eight eval tasks doing
+# that conversion concurrently corrupt each other on GPFS.
 
 set -eo pipefail
 
-DATASETS="${DATASETS:-ami_cleaned gigaspeech_cleaned spgispeech voxpopuli_cleaned_aa earnings22_cleaned_aa_chunked}"
+DATASETS="${DATASETS:-ami_cleaned gigaspeech_cleaned spgispeech voxpopuli_cleaned_aa librispeech_test.clean librispeech_test.other earnings22_cleaned_aa_chunked}"
 N_JOBS="${N_JOBS:-4}"
 
 # Wall-time model, matching submit_librispeech.sh: 10 MB/s is a pessimistic floor measured
@@ -64,8 +65,22 @@ echo "tasks     : ${N_JOBS}"
 echo "walltime  : ${WALLTIME}"
 
 # --time here overrides the #SBATCH directive in download_eval_sets.sh.
-sbatch \
+ARRAY_JOB="$(sbatch --parsable \
     --array="0-$((N_JOBS - 1))" \
     --time="${WALLTIME}" \
     --export=ALL,DATASETS="${DATASETS}" \
-    "${SCRIPT_DIR}/download_eval_sets.sh"
+    "${SCRIPT_DIR}/download_eval_sets.sh")"
+
+# Single task, and only if every download succeeded: a partial download would build a
+# cache over missing shards.
+CACHE_JOB="$(sbatch --parsable \
+    --dependency=afterok:"${ARRAY_JOB}" \
+    --export=ALL,REPO_HOME="${REPO_DIR}",DATASETS="${DATASETS}" \
+    "${SCRIPT_DIR}/build_eval_cache.sh")"
+
+echo
+echo "download array : ${ARRAY_JOB}"
+echo "cache build    : ${CACHE_JOB}  (afterok:${ARRAY_JOB})"
+echo
+echo "Wait for BOTH before running ./jobs/submit_eval.sh — the eval assumes a warm"
+echo "Arrow cache and will race if the build has not finished."
