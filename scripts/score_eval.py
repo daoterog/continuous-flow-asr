@@ -27,9 +27,28 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LEADERBOARD = REPO_ROOT / "open_asr_leaderboard"
 
-# Live leaderboard figures for openai/whisper-large-v3, read from the Gradio Space.
-LIVE_TARGETS = {"librispeech_test.clean": 1.56, "librispeech_test.other": 3.52}
-# Superseded CSV (scripts/data/en_shortform.csv, 2026-05-22), pre-kaldialign.
+# Live leaderboard figures for openai/whisper-large-v3, read by hand from the Gradio Space
+# (it is a client-rendered app and cannot be fetched programmatically). A value of None
+# means "not yet read off the Space": the column still prints, it just is not asserted.
+LIVE_TARGETS: dict[str, float | None] = {
+    "librispeech_test.clean": 1.56,
+    "librispeech_test.other": 3.52,
+    "gigaspeech_cleaned_test": 8.35,
+    "ami_cleaned_test": 13.63,
+    "spgispeech_test": 2.71,
+    "voxpopuli_cleaned_aa_test": 4.53,
+    "earnings22_cleaned_aa_chunked_test": 7.99,
+}
+# Derived from the per-dataset targets rather than hardcoded, so the two can never drift
+# apart. Equals 6.04 for the seven columns above.
+AVERAGE_TARGET = sum(v for v in LIVE_TARGETS.values() if v is not None) / max(
+    sum(v is not None for v in LIVE_TARGETS.values()), 1
+)
+
+# Superseded CSV (scripts/data/en_shortform.csv, 2026-05-22), pre-kaldialign — useful only
+# where the dataset is defined identically in both eras. Deliberately excludes the *_cleaned
+# variants: the old CSV's "Gigaspeech 10.02" is plain gigaspeech, a different set from
+# gigaspeech_cleaned, so pairing them would invite a meaningless comparison.
 CSV_TARGETS = {"librispeech_test.clean": 2.01, "librispeech_test.other": 3.91}
 
 
@@ -181,6 +200,21 @@ def main(argv: list[str] | None = None) -> int:
         if target is not None and abs(kaldi[dataset_id] - target) > args.tolerance:
             row += f"   OFF by {abs(kaldi[dataset_id] - target):.2f}"
             failures.append((dataset_id, kaldi[dataset_id], target))
+        print(row)
+    print("-" * 78)
+
+    # Average across the evaluated columns. Only comparable to the target once every
+    # column is present, so a partial run reports the shortfall rather than printing a
+    # smaller mean that looks like the real thing.
+    scored = [kaldi[d] for d in sorted(kaldi)]
+    complete = len(scored) == len(LIVE_TARGETS)
+    if scored:
+        avg = sum(scored) / len(scored)
+        note = "" if complete else f"   partial: {len(scored)}/{len(LIVE_TARGETS)} sets"
+        row = f"{'AVERAGE':38s}{avg:11.2f}%{AVERAGE_TARGET:9.2f}{'':18s}{note}"
+        if complete and abs(avg - AVERAGE_TARGET) > args.tolerance:
+            row += f"   OFF by {abs(avg - AVERAGE_TARGET):.2f}"
+            failures.append(("AVERAGE", avg, AVERAGE_TARGET))
         print(row)
     print("=" * 78)
 

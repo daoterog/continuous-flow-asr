@@ -1,16 +1,15 @@
-"""Decode cached Whisper encoder latents into transcripts and write result manifests.
+"""Transcribe Open ASR Leaderboard eval sets and write result manifests.
 
-This deliberately does **not** run the encoder. It reads the ``.npy``/``.json`` feature
-cache written by ``scripts.precompute_whisper`` and feeds those latents straight to the
-decoder via ``generate(encoder_outputs=...)``, so a matching WER validates the cache, the
-decode path and the normalization together rather than just re-running Whisper.
+Two sources, selected with ``--source``:
 
-Decoding from cached latents is exact only when the latents are **untrimmed**. Whisper
-pads every clip to a 30 s window and its decoder cross-attends over all 1500 encoder
-frames; hand it the ~175 real frames of a short utterance and it emits ``<|en|>``
-repeatedly instead of text. Zero-padding trimmed latents back to 1500 recovers the right
-answer most of the time but not always (measured: 44/48 transcripts identical), so this
-script refuses trimmed caches rather than silently scoring an approximation.
+* **audio** (default) — runs the full encoder-decoder on the audio, the way the leaderboard
+  does. This is the path for every dataset, and the only one that yields a comparable RTFx.
+* **latents** — decodes cached Whisper encoder latents from ``scripts.precompute_whisper``
+  via ``generate(encoder_outputs=...)``, skipping the encoder. This reproduced the published
+  LibriSpeech numbers and is kept as the regression control: if it drifts, the decode
+  changed. It requires **untrimmed** latents; Whisper's decoder cross-attends over all 1500
+  frames and emits repeated ``<|en|>`` from a trimmed cache, so a trimmed one is refused
+  rather than silently scored.
 
 Predictions and references are written **raw**; the leaderboard's scorer normalizes at
 scoring time. Score with ``python -m scripts.score_eval``.
@@ -21,7 +20,8 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any
 
 from scripts.download_librispeech import LOCAL_DATA_ROOT, SNELLIUS_DATA_ROOT
 
@@ -33,16 +33,31 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 LEADERBOARD = REPO_ROOT / "open_asr_leaderboard"
 
 DEFAULT_MODEL = "openai/whisper-large-v3"
-# The cache is keyed by openslr's (config, split); the leaderboard scorer keys off
-# "librispeech_test.clean" / "librispeech_test.other" substrings in the manifest
-# filename. This maps one onto the other so score_results populates its CSV columns.
-LEADERBOARD_NAMES = {
+EVAL_REPO = "hf-audio/open-asr-leaderboard"
+CHUNKED_REPO = "ArtificialAnalysis/Earnings22-Cleaned-AA-chunked"
+
+# key -> (dataset_path, dataset_name, split). score_results derives its CSV column from the
+# manifest filename, which embeds all three, so these must yield the substrings it looks
+# for: "ami_cleaned_test", "librispeech_test.clean", "earnings22_cleaned_aa_chunked_test".
+EVAL_DATASETS: dict[str, tuple[str, str, str]] = {
+    "ami_cleaned": (EVAL_REPO, "ami_cleaned", "test"),
+    "gigaspeech_cleaned": (EVAL_REPO, "gigaspeech_cleaned", "test"),
+    "spgispeech": (EVAL_REPO, "spgispeech", "test"),
+    "voxpopuli_cleaned_aa": (EVAL_REPO, "voxpopuli_cleaned_aa", "test"),
+    "librispeech_test.clean": (EVAL_REPO, "librispeech", "test.clean"),
+    "librispeech_test.other": (EVAL_REPO, "librispeech", "test.other"),
+    "earnings22_cleaned_aa_chunked": (CHUNKED_REPO, "earnings22_cleaned_aa_chunked", "test"),
+}
+
+# Latent path only: the cache is keyed by openslr's (config, split), which must be relabelled
+# to the leaderboard's names so the scorer recognises the manifest.
+LATENT_NAMES = {
     ("clean", "test"): ("librispeech", "test.clean"),
     ("other", "test"): ("librispeech", "test.other"),
     ("clean", "validation"): ("librispeech", "validation.clean"),
     ("other", "validation"): ("librispeech", "validation.other"),
 }
-SOURCE_DATASET_PATH = "openslr/librispeech_asr"
+LATENT_DATASET_PATH = "openslr/librispeech_asr"
 
 
 def add_leaderboard_to_path() -> None:
@@ -62,12 +77,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--model", default=DEFAULT_MODEL)
+    p.add_argument("--source", choices=["audio", "latents"], default="audio")
     p.add_argument("--env", choices=["local", "snellius"], default="local")
     p.add_argument("--data-root", type=Path, default=None, help="overrides --env")
-    p.add_argument("--configs", nargs="+", default=["clean", "other"])
-    p.add_argument("--splits", nargs="+", default=["test"])
+    p.add_argument(
+        "--datasets",
+        nargs="+",
+        choices=list(EVAL_DATASETS),
+        default=list(EVAL_DATASETS),
+        help="audio source only",
+    )
+    p.add_argument("--configs", nargs="+", default=["clean", "other"], help="latents only")
+    p.add_argument("--splits", nargs="+", default=["test"], help="latents only")
     p.add_argument("--results-dir", type=Path, default=REPO_ROOT / "results")
-    p.add_argument("--batch-size", type=int, default=16)
+    p.add_argument(
+        "--batch-size",
+        type=int,
+        default=64,
+        help="64 matches the leaderboard's run_whisper.sh; RTFx varies with this",
+    )
+    p.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=10,
+        help="untimed batches before measuring, so RTFx excludes CUDA autotuning",
+    )
     p.add_argument(
         "--num-shards",
         type=int,
@@ -103,23 +137,46 @@ def feature_dir(data_root: Path, model: str, config: str, split: str) -> Path:
     return data_root / "features" / model.split("/")[-1] / config / split
 
 
-def manifest_name(model: str, dataset: str, split: str, part: int | None = None) -> str:
+def manifest_name(
+    model: str, dataset_path: str, dataset: str, split: str, part: int | None = None
+) -> str:
     """Reproduce the leaderboard's manifest filename, which its scorer parses.
 
-    A sharded run writes ``.partN`` files instead; score_eval concatenates them back
-    into this canonical name before scoring, since score_results would otherwise treat
-    each part as a separate dataset and average them wrongly.
+    A sharded run writes ``.partN`` files instead; score_eval concatenates them back into
+    this canonical name before scoring, since score_results would otherwise treat each part
+    as a separate dataset and average them wrongly.
     """
     stem = (
         f"MODEL_{model.replace('/', '-')}"
-        f"_DATASET_{SOURCE_DATASET_PATH.replace('/', '-')}_{dataset}_{split}"
+        f"_DATASET_{dataset_path.replace('/', '-')}_{dataset}_{split}"
     )
     return f"{stem}.part{part}.jsonl" if part is not None else f"{stem}.jsonl"
 
 
-def load_decoder(
-    model_id: str,
-) -> tuple["WhisperForConditionalGeneration", "WhisperProcessor", "torch.device", dict]:
+def count_utterances(keys: list[str]) -> int:
+    """Total utterances across the selected datasets, from the dataset card.
+
+    Reads only card metadata, so it needs neither the audio downloaded nor a model loaded
+    — submit_eval.sh uses it to size the sbatch --time before anything is fetched.
+    """
+    from huggingface_hub import HfApi
+
+    counts: dict[str, int] = {}
+    for cfg in HfApi().dataset_info(EVAL_REPO).cardData["dataset_info"]:
+        for split in cfg["splits"]:
+            counts[f"{cfg['config_name']}_{split['name']}"] = split["num_examples"]
+
+    total = 0
+    for key in keys:
+        _path, name, split = EVAL_DATASETS[key]
+        # The chunked set is in its own repo, so its size is not on this card.
+        total += 341 if key == "earnings22_cleaned_aa_chunked" else counts.get(
+            f"{name}_{split}", 0
+        )
+    return total
+
+
+def load_model(model_id: str) -> tuple[Any, Any, "torch.device", dict]:
     """Load the model and processor, with generation settings matching the leaderboard."""
     import torch
     from transformers import WhisperForConditionalGeneration, WhisperProcessor
@@ -129,26 +186,171 @@ def load_decoder(
 
     processor = WhisperProcessor.from_pretrained(model_id)
     model = (
-        WhisperForConditionalGeneration.from_pretrained(model_id, dtype=dtype)
-        .to(device)
-        .eval()
+        WhisperForConditionalGeneration.from_pretrained(model_id, dtype=dtype).to(device).eval()
     )
 
     gen_kwargs: dict = {}
     if getattr(model.generation_config, "is_multilingual", False):
         gen_kwargs["language"] = "en"
         gen_kwargs["task"] = "transcribe"
-
-    # Cleared to match the leaderboard's setup exactly. Verified output-neutral on a
-    # sample here, but suppress_tokens controls which tokens Whisper may never emit, so
-    # matching them removes a source of divergence over the full set.
+    # Cleared to match the leaderboard's setup exactly; these change the decode.
     model.generation_config.forced_decoder_ids = None
     model.generation_config.suppress_tokens = []
     model.generation_config.begin_suppress_tokens = []
     return model, processor, device, gen_kwargs
 
 
-def decode_split(
+def write_manifest(path: Path, rows: list[dict]) -> str:
+    """Write a result manifest in the leaderboard's JSONL format."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return str(path)
+
+
+def decode_from_audio(
+    args: argparse.Namespace,
+    model: "WhisperForConditionalGeneration",
+    processor: "WhisperProcessor",
+    device: "torch.device",
+    gen_kwargs: dict,
+    key: str,
+) -> str:
+    """Run the full encoder-decoder over one dataset and write its manifest."""
+    import torch
+    from normalizer import data_utils
+
+    dataset_path, dataset_name, split = EVAL_DATASETS[key]
+    sampling_rate = processor.feature_extractor.sampling_rate
+
+    # load_data handles both the plain configs and the chunked earnings22, whose chunks it
+    # joins to their parent call transcripts. Safe as a cache hit because
+    # scripts.download_eval_sets has already fetched the whole config.
+    dataset = data_utils.load_data(
+        SimpleNamespace(
+            dataset_path=dataset_path, dataset=dataset_name, split=split, streaming=False
+        )
+    )
+    if args.limit:
+        dataset = dataset.select(range(min(args.limit, len(dataset))))
+    dataset = data_utils.prepare_data(dataset, sampling_rate=sampling_rate)
+    if args.num_shards > 1:
+        # contiguous=False interleaves, so each task gets a similar mix of utterance
+        # lengths and the tasks finish together.
+        dataset = dataset.shard(
+            num_shards=args.num_shards, index=args.shard_id, contiguous=False
+        )
+
+    is_chunked = data_utils.is_chunked_dataset(dataset_path)
+
+    def benchmark(batch: dict) -> dict:
+        audios = [a["array"] for a in batch["audio"]]
+        minibatch_size = len(audios)
+        rate = batch["audio"][0]["sampling_rate"]
+        batch["audio_length_s"] = [len(a) / rate for a in audios]
+        batch["audio_filepath"] = data_utils.extract_audio_filepaths_from_batch(
+            batch, minibatch_size
+        )
+
+        # RTFx methodology, matching open_asr_leaderboard/transformers/run_eval.py:172-353:
+        # cuda events (not perf_counter) around preprocessing + generate + decode, so the
+        # measured span is the same one the published figures were taken over.
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            start_event.record()
+
+        inputs = processor(audios, sampling_rate=rate, return_tensors="pt")
+        inputs = inputs.to(device, model.dtype)
+        # Whisper's extractor sets return_attention_mask=False, so generate has nothing to
+        # infer a mask from and warns. All-ones is the correct mask, not just a silencer:
+        # Whisper attends over the whole padded 30 s window (the reason trimmed latents
+        # decode to garbage), and its encoder ignores this argument regardless.
+        features = inputs["input_features"]
+        mask = torch.ones(
+            (features.shape[0], features.shape[-1]), dtype=torch.long, device=device
+        )
+        with torch.no_grad():
+            pred_ids = model.generate(**inputs, attention_mask=mask, **gen_kwargs)
+        pred_text = processor.batch_decode(
+            pred_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
+        )
+
+        if device.type == "cuda":
+            end_event.record()
+            torch.cuda.synchronize()
+            runtime = start_event.elapsed_time(end_event) / 1000.0
+        else:
+            runtime = float("nan")
+
+        # Per-sample, so the times sum back to wall time across the split.
+        batch["transcription_time_s"] = minibatch_size * [runtime / minibatch_size]
+        batch["predictions"] = pred_text
+        batch["references"] = batch["original_text"]
+        return batch
+
+    # Warmup calls benchmark directly on slices rather than through .map. Its results are
+    # discarded by definition, and .map would Arrow-serialize every warmed batch —
+    # including the decoded waveforms, since there is no remove_columns here — for nothing.
+    if args.warmup_steps and device.type == "cuda":
+        for step in range(args.warmup_steps):
+            lo = step * args.batch_size
+            if lo >= len(dataset):
+                break
+            benchmark(dataset[lo : min(lo + args.batch_size, len(dataset))])
+
+    dataset = dataset.map(
+        benchmark,
+        batch_size=args.batch_size,
+        batched=True,
+        remove_columns=["audio"],
+        # Bounds the Arrow writer buffer; the default 1000 rows holds far more in memory
+        # than the batch itself.
+        writer_batch_size=args.batch_size,
+    )
+
+    keys = [
+        "audio_length_s",
+        "transcription_time_s",
+        "predictions",
+        "references",
+        "audio_filepath",
+    ]
+    if is_chunked:
+        keys += data_utils.CHUNK_METADATA_KEYS
+    collected: dict[str, list] = {k: [] for k in keys}
+    for i, row in enumerate(dataset):
+        for k in keys:
+            collected[k].append(row[k])
+        if i % 200 == 0:
+            print(f"    {i}/{len(dataset)}", end="\r", flush=True)
+
+    rows = []
+    for i in range(len(collected["references"])):
+        row = {
+            "audio_filepath": collected["audio_filepath"][i] or f"sample_{i}",
+            "duration": collected["audio_length_s"][i],
+            "time": collected["transcription_time_s"][i],
+            "text": collected["references"][i],
+            "pred_text": collected["predictions"][i],
+        }
+        if is_chunked:
+            # score_results calls merge_chunked_manifest, which concatenates a call's
+            # chunks before scoring against the call-level reference.
+            for k in data_utils.CHUNK_METADATA_KEYS:
+                row[k] = collected[k][i]
+        rows.append(row)
+
+    part = args.shard_id if args.num_shards > 1 else None
+    path = args.results_dir / manifest_name(
+        args.model, dataset_path, dataset_name, split, part
+    )
+    return write_manifest(path, rows)
+
+
+def decode_from_latents(
     args: argparse.Namespace,
     model: "WhisperForConditionalGeneration",
     processor: "WhisperProcessor",
@@ -157,10 +359,9 @@ def decode_split(
     config: str,
     split: str,
 ) -> str:
-    """Decode one cached split and write its manifest. Returns the manifest path."""
+    """Decode one cached split of latents and write its manifest."""
     import numpy as np
     import torch
-    from normalizer import data_utils
     from transformers.modeling_outputs import BaseModelOutput
 
     src = feature_dir(args.data_root, args.model, config, split)
@@ -183,19 +384,14 @@ def decode_split(
             )
         feats = np.load(index_path.with_suffix(".npy"), mmap_mode="r")
         utts = meta["utts"][: args.limit] if args.limit else meta["utts"]
-        # Interleaved, so every task gets a similar mix of utterance lengths and they
-        # finish together; decode time scales with the number of tokens emitted.
         utts = utts[args.shard_id :: args.num_shards]
 
         for start in range(0, len(utts), args.batch_size):
             chunk = utts[start : start + args.batch_size]
-            batch = np.stack(
-                [feats[u["offset"] : u["offset"] + u["length"]] for u in chunk]
-            )
+            batch = np.stack([feats[u["offset"] : u["offset"] + u["length"]] for u in chunk])
             hidden = torch.from_numpy(batch).to(device, dtype=model.dtype)
-            # Every Whisper encoder output is a full, unpadded 1500 frames, so the mask
-            # is all ones. Passing it explicitly only stops generate from warning that it
-            # cannot infer one (it has no input_features to derive it from here).
+            # Whisper encoder output is always a full 1500 frames, so the mask is all ones;
+            # passing it stops generate warning that it cannot infer one.
             mask = torch.ones(hidden.shape[:2], dtype=torch.long, device=device)
             with torch.no_grad():
                 ids = model.generate(
@@ -203,9 +399,6 @@ def decode_split(
                     attention_mask=mask,
                     **gen_kwargs,
                 )
-            # clean_up_tokenization_spaces=False is what transformers already does for a
-            # BPE tokenizer (it ignores the checkpoint's True and says so); stating it
-            # silences that notice without changing the output.
             preds.extend(
                 processor.batch_decode(
                     ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
@@ -215,99 +408,113 @@ def decode_split(
             utt_ids.extend(u["id"] for u in chunk)
             print(f"    {len(preds)}/{len(utts)}", end="\r", flush=True)
 
-    dataset, lb_split = LEADERBOARD_NAMES.get((config, split), ("librispeech", split))
-
-    # audio_length / transcription_time are deliberately omitted: the encoder ran in a
-    # separate offline job, so an RTFx measured here would describe the decoder alone and
-    # be incomparable to the leaderboard's. score_results skips RTFx when they are absent.
-    args.results_dir.mkdir(parents=True, exist_ok=True)
+    dataset_name, lb_split = LATENT_NAMES.get((config, split), ("librispeech", split))
+    # duration/time omitted: the encoder ran in a separate offline job, so an RTFx here
+    # would describe the decoder alone. score_results skips RTFx when they are absent.
+    rows = [
+        {
+            "audio_filepath": utt_id,
+            "duration": None,
+            "time": None,
+            "text": ref,
+            "pred_text": pred,
+        }
+        for utt_id, ref, pred in zip(utt_ids, refs, preds, strict=True)
+    ]
     part = args.shard_id if args.num_shards > 1 else None
-    path = args.results_dir / manifest_name(args.model, dataset, lb_split, part)
-    with path.open("w", encoding="utf-8") as f:
-        for utt_id, ref, pred in zip(utt_ids, refs, preds, strict=True):
-            f.write(
-                json.dumps(
-                    {
-                        # The real utterance id, not a per-file index: sharded parts
-                        # would otherwise all restart at sample_0 and collide on merge,
-                        # making coverage impossible to verify.
-                        "audio_filepath": utt_id,
-                        "duration": None,
-                        "time": None,
-                        "text": ref,
-                        "pred_text": pred,
-                    },
-                    ensure_ascii=False,
+    path = args.results_dir / manifest_name(
+        args.model, LATENT_DATASET_PATH, dataset_name, lb_split, part
+    )
+    return write_manifest(path, rows)
+
+
+def plan_units(args: argparse.Namespace) -> list[tuple]:
+    """Return the (label, out_path, work) units this run will process."""
+    part = args.shard_id if args.num_shards > 1 else None
+    units = []
+    if args.source == "audio":
+        for key in args.datasets:
+            path, name, split = EVAL_DATASETS[key]
+            out = args.results_dir / manifest_name(args.model, path, name, split, part)
+            units.append((key, out, (key,)))
+    else:
+        for config in args.configs:
+            for split in args.splits:
+                if not feature_dir(args.data_root, args.model, config, split).is_dir():
+                    continue
+                name, lb_split = LATENT_NAMES.get((config, split), ("librispeech", split))
+                out = args.results_dir / manifest_name(
+                    args.model, LATENT_DATASET_PATH, name, lb_split, part
                 )
-                + "\n"
-            )
-    del data_utils  # imported only to fail fast if the submodule is missing
-    return str(path)
+                units.append((f"{config}/{split}", out, (config, split)))
+    return units
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Decode the selected cached splits, returning a process exit code."""
+    """Transcribe the selected datasets, returning a process exit code."""
     args = parse_args(argv)
-    # Before any transformers/hub import: the Whisper checkpoint is ~3 GB and would
-    # otherwise land in $HOME/.cache/huggingface, which is quota'd on Snellius. Set
-    # rather than setdefault, so an inherited HF_HOME pointing at home cannot win.
+    # Before any transformers/hub import: the checkpoint is ~3 GB and would otherwise land
+    # in $HOME/.cache/huggingface, which is quota'd on Snellius.
     os.environ["HF_HOME"] = str(args.data_root)
     add_leaderboard_to_path()
 
-    pairs = [(c, s) for c in args.configs for s in args.splits]
-    pairs = [(c, s) for c, s in pairs if feature_dir(args.data_root, args.model, c, s).is_dir()]
-    if not pairs:
-        print("error: no cached feature splits matched the selection", file=sys.stderr)
+    units = plan_units(args)
+    if not units:
+        print("error: nothing matched the selection", file=sys.stderr)
         return 1
-
-    def out_path(config: str, split: str) -> Path:
-        dataset, lb_split = LEADERBOARD_NAMES.get((config, split), ("librispeech", split))
-        part = args.shard_id if args.num_shards > 1 else None
-        return args.results_dir / manifest_name(args.model, dataset, lb_split, part)
-
-    pending = [(c, s) for c, s in pairs if args.overwrite or not out_path(c, s).is_file()]
+    pending = [u for u in units if args.overwrite or not u[1].is_file()]
 
     print(f"model        {args.model}")
-    print(f"features     {args.data_root / 'features' / args.model.split('/')[-1]}")
-    print(f"splits       {len(pairs)} -> {len(pending)} pending")
+    print(f"source       {args.source}")
+    print(f"data root    {args.data_root}")
+    print(f"units        {len(units)} -> {len(pending)} pending")
     print(f"results dir  {args.results_dir}")
     print(f"batch size   {args.batch_size}")
+    if args.source == "audio":
+        print(f"warmup       {args.warmup_steps} step(s)")
     if args.limit:
         print(f"limit        {args.limit} utt(s) per split  (NOT a full run)")
 
     if args.dry_run:
-        for c, s in pairs:
-            print(f"  {c}/{s} -> {out_path(c, s).name}")
+        if args.source == "audio":
+            # Machine-readable; submit_eval.sh reads this to size the sbatch --time.
+            print(f"utterances   {count_utterances([u[0] for u in units])}")
+        for label, out, _ in units:
+            print(f"  {label} -> {out.name}")
         return 0
     if not pending:
         print("nothing to do")
         return 0
 
-    model, processor, device, gen_kwargs = load_decoder(args.model)
+    model, processor, device, gen_kwargs = load_model(args.model)
     print(f"device       {device} ({model.dtype})")
     print(f"gen kwargs   {gen_kwargs}")
 
     failures = []
-    for i, (config, split) in enumerate(pending, 1):
-        print(f"\n[{i}/{len(pending)}] {config}/{split}", flush=True)
+    for i, (label, _out, work) in enumerate(pending, 1):
+        print(f"\n[{i}/{len(pending)}] {label}", flush=True)
         try:
-            path = decode_split(args, model, processor, device, gen_kwargs, config, split)
-        except Exception as exc:  # one bad split must not lose the others
+            if args.source == "audio":
+                path = decode_from_audio(args, model, processor, device, gen_kwargs, *work)
+            else:
+                path = decode_from_latents(args, model, processor, device, gen_kwargs, *work)
+        except Exception as exc:  # one bad dataset must not lose the others
             print(f"  FAILED: {exc}", file=sys.stderr)
-            failures.append({"config": config, "split": split, "error": repr(exc)})
+            failures.append({"unit": label, "error": repr(exc)})
         else:
             print(f"\n  wrote {path}")
 
     if failures:
-        # decode_split creates results_dir, but it may have failed before reaching that;
-        # the failure log must not itself fail and bury the real error.
+        # pending units may all have failed before results_dir was created.
         args.results_dir.mkdir(parents=True, exist_ok=True)
         log = args.results_dir / "failures.json"
         log.write_text(json.dumps(failures, indent=2))
-        print(f"\nFAILED: {len(failures)} of {len(pending)}, logged to {log}", file=sys.stderr)
+        print(
+            f"\nFAILED: {len(failures)} of {len(pending)}, logged to {log}", file=sys.stderr
+        )
         return 1
 
-    print(f"\nOK: {len(pending)} split(s). Score with: python -m scripts.score_eval")
+    print(f"\nOK: {len(pending)} unit(s). Score with: python -m scripts.score_eval")
     return 0
 
 

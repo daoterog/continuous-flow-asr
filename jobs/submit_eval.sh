@@ -1,36 +1,49 @@
 #!/bin/bash
 
-# Submit the ASR eval array job: decode cached Whisper latents into transcripts.
+# Submit the ASR eval array job.
 #
 # Usage:
-#   ./jobs/submit_eval.sh                              # clean+other test, 8 tasks
-#   N_JOBS=16 ./jobs/submit_eval.sh                    # more parallelism
-#   CONFIGS=clean ./jobs/submit_eval.sh                # test.clean only
-#   WALLTIME=01:00:00 ./jobs/submit_eval.sh            # skip the estimate
+#   ./jobs/submit_eval.sh                                   # all 7 sets from audio, 8 tasks
+#   DATASETS="librispeech_test.clean" ./jobs/submit_eval.sh # one set
+#   N_JOBS=16 ./jobs/submit_eval.sh                         # more parallelism
+#   SOURCE=latents CONFIGS="clean other" SPLITS=test ./jobs/submit_eval.sh
+#   WALLTIME=01:00:00 ./jobs/submit_eval.sh                 # skip the estimate
 #
 # Afterwards, on the login node (CPU only, seconds):
 #   python -m scripts.score_eval
 # which merges the per-task .partN files and prints WER against the leaderboard targets.
 #
-# Prerequisite: the latents must exist and be UNTRIMMED:
-#   CONFIGS="clean other" SPLITS=test NO_TRIM=1 ./jobs/submit_whisper.sh
+# Prerequisites:
+#   audio   — ./jobs/submit_eval_sets.sh   (the configs must be fully cached, because
+#             data_utils.load_data resolves a whole config)
+#   latents — CONFIGS="clean other" SPLITS=test NO_TRIM=1 ./jobs/submit_whisper.sh
 
 set -eo pipefail
 
-CONFIGS="${CONFIGS:-clean other}"
-SPLITS="${SPLITS:-test}"
+SOURCE="${SOURCE:-audio}"
+# audio source: leaderboard eval keys. librispeech appears here because the audio path
+# reads it from hf-audio, unlike the latent path which reads the openslr feature cache.
+DATASETS="${DATASETS:-ami_cleaned gigaspeech_cleaned spgispeech voxpopuli_cleaned_aa librispeech_test.clean librispeech_test.other earnings22_cleaned_aa_chunked}"
+# latents source only (the LibriSpeech regression control); empty on the audio path.
+CONFIGS="${CONFIGS:-}"
+SPLITS="${SPLITS:-}"
 MODEL="${MODEL:-openai/whisper-large-v3}"
 N_JOBS="${N_JOBS:-8}"
-BATCH_SIZE="${BATCH_SIZE:-32}"
-# LIMIT caps utterances per split before sharding — used by rehearse_eval.sh to run
-# the identical array shape on a handful of utterances.
+
+# 64 matches the leaderboard's run_whisper.sh. RTFx varies with batch size, so holding it
+# fixed is part of the measurement rather than a free knob.
+BATCH_SIZE="${BATCH_SIZE:-64}"
+WARMUP_STEPS="${WARMUP_STEPS:-10}"
+# LIMIT caps utterances per split before sharding — used by rehearse_eval.sh to run the
+# identical array shape on a handful of utterances.
 LIMIT="${LIMIT:-}"
 
-# Wall-time model. Decoding is autoregressive, so it is much slower per utterance than
-# the encode: an RTX 3060 managed ~0.7 utts/s at batch 16. 5 utts/s assumes an A100 is
-# ~7x that, which is deliberately pessimistic. Over-booking is free; under-booking loses
-# the work, so the estimate is doubled again.
-UTTS_PER_SEC="${UTTS_PER_SEC:-5}"
+# Wall-time model. The audio path runs the encoder AND an autoregressive decode, so it is
+# slower per utterance than either alone: an RTX 3060 managed ~8 utts/s encoding and
+# ~0.7 utts/s decoding. 4 utts/s assumes an A100 is several times the combined 3060 rate,
+# which is deliberately pessimistic. Over-booking is free; under-booking loses the work,
+# so the estimate is doubled again.
+UTTS_PER_SEC="${UTTS_PER_SEC:-4}"
 SAFETY="${SAFETY:-2}"
 OVERHEAD_S="${OVERHEAD_S:-900}"   # module load, conda activate, ~3 GB of Whisper weights
 MIN_S=1800                        # 30 min
@@ -46,18 +59,20 @@ if [[ -n "${LIMIT}" && -z "${WALLTIME}" ]]; then
     WALLTIME="00:30:00"
 fi
 if [[ -z "${WALLTIME}" ]]; then
-    # Reuse the precompute's dry-run to count utterances without loading a model.
-    # `|| true` is load-bearing: under `set -eo pipefail` a failing python would abort
-    # the script instead of reaching the fallback.
-    UTTS="$(cd "${REPO_DIR}" && python -m scripts.precompute_whisper \
-        --dry-run --env snellius --model "${MODEL}" \
-        --configs ${CONFIGS} --splits ${SPLITS} \
-        --num-shards 1 --shard-id 0 2>/dev/null \
+    # run_eval --dry-run reports the utterance count from the dataset card, so this needs
+    # neither the audio downloaded nor a model loaded.
+    # `|| true` is load-bearing: under `set -eo pipefail` a failing python would abort the
+    # script instead of reaching the fallback.
+    UTTS="$(cd "${REPO_DIR}" && python -m scripts.run_eval \
+        --dry-run --env snellius --source "${SOURCE}" --model "${MODEL}" \
+        ${DATASETS:+--datasets ${DATASETS}} \
+        ${CONFIGS:+--configs ${CONFIGS}} \
+        ${SPLITS:+--splits ${SPLITS}} 2>/dev/null \
         | awk '/^utterances/ {print $2}' || true)"
 
     if [[ -z "${UTTS}" ]]; then
         WALLTIME="$(fmt_hms ${MAX_S})"
-        echo "WARNING: could not size the job (is the env active? are the latents there?)," \
+        echo "WARNING: could not size the job (is the env active? are the data cached?)," \
              "falling back to ${WALLTIME}" >&2
     else
         PER_TASK=$(( (UTTS + N_JOBS - 1) / N_JOBS ))
@@ -73,9 +88,11 @@ if [[ -z "${WALLTIME}" ]]; then
 fi
 
 echo "model     : ${MODEL}"
-echo "configs   : ${CONFIGS}"
-echo "splits    : ${SPLITS}"
+echo "source    : ${SOURCE}"
+[[ "${SOURCE}" == "audio" ]] && echo "datasets  : ${DATASETS}"
+[[ "${SOURCE}" == "latents" ]] && echo "configs   : ${CONFIGS} / splits: ${SPLITS}"
 echo "tasks     : ${N_JOBS}"
+echo "batch     : ${BATCH_SIZE} (warmup ${WARMUP_STEPS})"
 echo "results   : ${RESULTS_DIR}"
 [[ -n "${LIMIT}" ]] && echo "limit     : ${LIMIT} utt(s) per split (REHEARSAL, not a full run)"
 echo "walltime  : ${WALLTIME}"
@@ -84,5 +101,5 @@ echo "walltime  : ${WALLTIME}"
 sbatch \
     --array="0-$((N_JOBS - 1))" \
     --time="${WALLTIME}" \
-    --export=ALL,CONFIGS="${CONFIGS}",SPLITS="${SPLITS}",MODEL="${MODEL}",BATCH_SIZE="${BATCH_SIZE}",RESULTS_DIR="${RESULTS_DIR}",LIMIT="${LIMIT}" \
+    --export=ALL,SOURCE="${SOURCE}",DATASETS="${DATASETS}",CONFIGS="${CONFIGS}",SPLITS="${SPLITS}",MODEL="${MODEL}",BATCH_SIZE="${BATCH_SIZE}",WARMUP_STEPS="${WARMUP_STEPS}",RESULTS_DIR="${RESULTS_DIR}",LIMIT="${LIMIT}" \
     "${SCRIPT_DIR}/run_eval.sh"
