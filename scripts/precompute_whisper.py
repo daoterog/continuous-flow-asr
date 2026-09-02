@@ -392,7 +392,7 @@ def main(argv: list[str] | None = None) -> int:
         f"-> {len(mine)} of {len(shards)} shard(s)"
     )
     print(f"pending     {len(todo)} (skipping {len(mine) - len(todo)} already complete)")
-    # Machine-readable; submit_whisper.sh reads this to size the sbatch --time.
+    # Machine-readable; submit/whisper.sh reads this to size the sbatch --time.
     print(f"utterances  {count_utterances(mine, args.limit)}")
     print(f"trim        {'off' if args.no_trim else 'on'}")
     print(f"dtype       {args.dtype}")

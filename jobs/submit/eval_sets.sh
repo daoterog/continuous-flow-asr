@@ -3,9 +3,9 @@
 # Submit the eval-dataset download array job.
 #
 # Usage:
-#   ./jobs/submit_eval_sets.sh                                  # all sets, 4 tasks
-#   DATASETS="voxpopuli_cleaned_aa" ./jobs/submit_eval_sets.sh  # one set first
-#   N_JOBS=8 ./jobs/submit_eval_sets.sh
+#   ./jobs/submit/eval_sets.sh                                  # all sets, 4 tasks
+#   DATASETS="voxpopuli_cleaned_aa" ./jobs/submit/eval_sets.sh  # one set first
+#   N_JOBS=8 ./jobs/submit/eval_sets.sh
 #
 # ~18.6 GB across 407 files. LibriSpeech IS included even though openslr has a copy: the
 # audio path reads it from hf-audio, and leaving it out left the eval tasks racing to
@@ -21,7 +21,7 @@ set -eo pipefail
 DATASETS="${DATASETS:-ami_cleaned gigaspeech_cleaned spgispeech voxpopuli_cleaned_aa librispeech_test.clean librispeech_test.other earnings22_cleaned_aa_chunked}"
 N_JOBS="${N_JOBS:-4}"
 
-# Wall-time model, matching submit_librispeech.sh: 10 MB/s is a pessimistic floor measured
+# Wall-time model, matching submit/librispeech.sh: 10 MB/s is a pessimistic floor measured
 # on a home connection, whereas a Snellius staging node is far faster. Over-booking is
 # free; under-booking loses the transfer, so the estimate is doubled on top.
 THROUGHPUT_MB_S="${THROUGHPUT_MB_S:-10}"
@@ -31,7 +31,8 @@ MIN_S=1800                        # 30 min
 MAX_S=28800                       # 8 h, the staging partition limit
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(dirname "${SCRIPT_DIR}")"
+REPO_DIR="$(dirname "$(dirname "${SCRIPT_DIR}")")"
+BATCH_DIR="${REPO_DIR}/jobs/batch"
 
 fmt_hms() { printf '%02d:%02d:%02d' $(($1 / 3600)) $((($1 % 3600) / 60)) $(($1 % 60)); }
 
@@ -69,18 +70,18 @@ ARRAY_JOB="$(sbatch --parsable \
     --array="0-$((N_JOBS - 1))" \
     --time="${WALLTIME}" \
     --export=ALL,DATASETS="${DATASETS}" \
-    "${SCRIPT_DIR}/download_eval_sets.sh")"
+    "${BATCH_DIR}/download_eval_sets.sh")"
 
 # Single task, and only if every download succeeded: a partial download would build a
 # cache over missing shards.
 CACHE_JOB="$(sbatch --parsable \
     --dependency=afterok:"${ARRAY_JOB}" \
     --export=ALL,REPO_HOME="${REPO_DIR}",DATASETS="${DATASETS}" \
-    "${SCRIPT_DIR}/build_eval_cache.sh")"
+    "${BATCH_DIR}/build_eval_cache.sh")"
 
 echo
 echo "download array : ${ARRAY_JOB}"
 echo "cache build    : ${CACHE_JOB}  (afterok:${ARRAY_JOB})"
 echo
-echo "Wait for BOTH before running ./jobs/submit_eval.sh — the eval assumes a warm"
+echo "Wait for BOTH before running ./jobs/submit/eval.sh — the eval assumes a warm"
 echo "Arrow cache and will race if the build has not finished."

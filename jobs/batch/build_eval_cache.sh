@@ -9,7 +9,7 @@
 #SBATCH --output=slurm_buildcache_%j.out
 
 # Converts the downloaded parquet into the Arrow cache that load_dataset uses, ONCE.
-# Submitted by submit_eval_sets.sh with --dependency=afterok, after the download array.
+# Submitted by submit/eval_sets.sh with --dependency=afterok, after the download array.
 #
 # Single task by design. Eight eval tasks calling load_dataset against a cold Arrow cache
 # race on the same <hash>.incomplete/ directory and corrupt each other — the failures look
@@ -22,7 +22,7 @@
 
 set -eo pipefail
 
-source "${REPO_HOME:-$HOME/continuous-flow-asr}/jobs/_env.sh"
+source "${REPO_HOME:-$HOME/continuous-flow-asr}/jobs/batch/_env.sh"
 
 python -m scripts.download_eval_sets \
     --env snellius \

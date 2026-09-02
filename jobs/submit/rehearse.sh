@@ -4,9 +4,9 @@
 # a handful of utterances each. Catches the failures that only appear at scale — missing
 # deps, quota, sharding overlap, merge — for a couple of GPU-minutes instead of a full run.
 #
-#   ./jobs/rehearse_eval.sh              # 8 tasks x 4 utts per dataset
-#   N_JOBS=16 LIMIT=32 ./jobs/rehearse_eval.sh
-#   DATASETS="librispeech_test.clean" ./jobs/rehearse_eval.sh
+#   ./jobs/submit/rehearse.sh              # 8 tasks x 4 utts per dataset
+#   N_JOBS=16 LIMIT=32 ./jobs/submit/rehearse.sh
+#   DATASETS="librispeech_test.clean" ./jobs/submit/rehearse.sh
 #
 # Submits the array, then chains jobs/check_eval.sh with --dependency=afterok so the
 # verification runs only if every task succeeded. Watch both with `squeue -u $USER`.
@@ -24,7 +24,8 @@ LIMIT="${LIMIT:-$((N_JOBS * 4))}"
 DATASETS="${DATASETS:-ami_cleaned gigaspeech_cleaned spgispeech voxpopuli_cleaned_aa librispeech_test.clean librispeech_test.other earnings22_cleaned_aa_chunked}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(dirname "${SCRIPT_DIR}")"
+REPO_DIR="$(dirname "$(dirname "${SCRIPT_DIR}")")"
+BATCH_DIR="${REPO_DIR}/jobs/batch"
 REHEARSAL_DIR="${REHEARSAL_DIR:-/scratch-shared/cont-flow-asr/rehearsal}"
 CHECK_PARTITION="${CHECK_PARTITION:-rome}"
 
@@ -35,7 +36,7 @@ echo "=== submitting rehearsal array ==="
 SUBMIT_OUT="$(
     N_JOBS="${N_JOBS}" LIMIT="${LIMIT}" DATASETS="${DATASETS}" \
     RESULTS_DIR="${REHEARSAL_DIR}" \
-    "${SCRIPT_DIR}/submit_eval.sh"
+    "${SCRIPT_DIR}/eval.sh"
 )"
 echo "${SUBMIT_OUT}"
 ARRAY_JOB="$(echo "${SUBMIT_OUT}" | awk '/Submitted batch job/ {print $NF}')"
@@ -51,7 +52,7 @@ VERIFY_JOB="$(sbatch --parsable \
     --partition="${CHECK_PARTITION}" \
     --output="${REHEARSAL_DIR}/verify_%j.out" \
     --export=ALL,REPO_HOME="${REPO_DIR}",RESULTS_DIR="${REHEARSAL_DIR}",NUM_SHARDS="${N_JOBS}",EXPECT_TOTAL="${LIMIT}",DATASETS="${DATASETS}" \
-    "${SCRIPT_DIR}/check_eval.sh")"
+    "${BATCH_DIR}/check_eval.sh")"
 
 echo "array job    : ${ARRAY_JOB}"
 echo "verify job   : ${VERIFY_JOB}  (afterok:${ARRAY_JOB})"

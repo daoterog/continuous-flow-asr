@@ -294,7 +294,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"workers     {args.workers}")
     print(f"xet fast    {'on' if os.environ.get('HF_XET_HIGH_PERFORMANCE') else 'off'}")
 
-    # Machine-readable; submit_librispeech.sh reads these to size the sbatch --time.
+    # Machine-readable; submit/librispeech.sh reads these to size the sbatch --time.
     # Shard 0 takes ceil(n/num_shards) files, so it is the worst case.
     shard_bytes = sum(sizes[f] for f in shard_files)
     total_bytes = sum(sizes[f] for f in files)

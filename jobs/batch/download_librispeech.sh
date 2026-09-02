@@ -8,16 +8,16 @@
 #SBATCH --time=04:00:00
 # Worst case: one task, cold cache, the whole 61.8 GB corpus. At a pessimistic
 # 10 MB/s that is ~1h43m; doubled plus overhead gives ~3h36m, rounded up here.
-# submit_librispeech.sh overrides this with a --time derived from the actual
+# submit/librispeech.sh overrides this with a --time derived from the actual
 # selection and task count (8 tasks over the full corpus needs ~36 min).
 #SBATCH --output=slurm_output_%A_%a.out
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=daniel.otero.gomez@student.uva.nl
 
 # Array job: each task downloads a disjoint slice of LibriSpeech parquet shards.
-# Submit via submit_librispeech.sh — do not run this script directly.
+# Submit via submit/librispeech.sh — do not run this script directly.
 #
-# Required env vars (set by submit_librispeech.sh via --export):
+# Required env vars (set by submit/librispeech.sh via --export):
 #   CONFIGS — space-separated subset of "clean other"
 #   SPLITS  — space-separated subset of "train.100 train.360 train.500 validation test"
 #
@@ -33,7 +33,7 @@
 # No -u: conda's activate script reads unset variables and would abort under it.
 set -eo pipefail
 
-source "${REPO_HOME:-$HOME/continuous-flow-asr}/jobs/_env.sh"
+source "${REPO_HOME:-$HOME/continuous-flow-asr}/jobs/batch/_env.sh"
 
 # ── run ──────────────────────────────────────────────────────────────────────
 python -m scripts.download_librispeech \

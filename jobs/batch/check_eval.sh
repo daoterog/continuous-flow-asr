@@ -7,7 +7,7 @@
 #SBATCH --time=00:15:00
 
 # Verifies that a sharded eval array produced complete, non-overlapping results.
-# Submitted by rehearse_eval.sh with --dependency=afterok, so it runs only if every array
+# Submitted by submit/rehearse.sh with --dependency=afterok, so it runs only if every array
 # task succeeded. CPU only; no GPU, no partition pinned here (the submitter chooses).
 #
 # Required env vars (set via --export):
@@ -18,7 +18,7 @@
 
 set -eo pipefail
 
-source "${REPO_HOME:-$HOME/continuous-flow-asr}/jobs/_env.sh"
+source "${REPO_HOME:-$HOME/continuous-flow-asr}/jobs/batch/_env.sh"
 
 python -m scripts.check_eval \
     --results-dir "${RESULTS_DIR}" \

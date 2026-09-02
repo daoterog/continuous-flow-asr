@@ -3,11 +3,11 @@
 # Submit the Whisper encoder feature precompute array job.
 #
 # Usage:
-#   ./jobs/submit_whisper.sh                                # train.100, 7 tasks
-#   N_JOBS=14 ./jobs/submit_whisper.sh                      # one task per shard
-#   SPLITS="validation" ./jobs/submit_whisper.sh            # small run first
-#   MODEL=openai/whisper-small ./jobs/submit_whisper.sh
-#   WALLTIME=02:00:00 ./jobs/submit_whisper.sh              # skip the estimate
+#   ./jobs/submit/whisper.sh                                # train.100, 7 tasks
+#   N_JOBS=14 ./jobs/submit/whisper.sh                      # one task per shard
+#   SPLITS="validation" ./jobs/submit/whisper.sh            # small run first
+#   MODEL=openai/whisper-small ./jobs/submit/whisper.sh
+#   WALLTIME=02:00:00 ./jobs/submit/whisper.sh              # skip the estimate
 #
 # train.clean.100 is 28,539 utterances across 14 shards, ~46 GB of trimmed float16
 # features. The shard is the unit of parallelism, so N_JOBS above 14 gains nothing.
@@ -38,7 +38,8 @@ MIN_S=1800                        # 30 min
 MAX_S=86400                       # 24 h, the gpu partition limit
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(dirname "${SCRIPT_DIR}")"
+REPO_DIR="$(dirname "$(dirname "${SCRIPT_DIR}")")"
+BATCH_DIR="${REPO_DIR}/jobs/batch"
 
 fmt_hms() { printf '%02d:%02d:%02d' $(($1 / 3600)) $((($1 % 3600) / 60)) $(($1 % 60)); }
 
@@ -81,4 +82,4 @@ sbatch \
     --array="0-$((N_JOBS - 1))" \
     --time="${WALLTIME}" \
     --export=ALL,CONFIGS="${CONFIGS}",SPLITS="${SPLITS}",MODEL="${MODEL}",BATCH_SIZE="${BATCH_SIZE}",NO_TRIM="${NO_TRIM}" \
-    "${SCRIPT_DIR}/precompute_whisper.sh"
+    "${BATCH_DIR}/precompute_whisper.sh"

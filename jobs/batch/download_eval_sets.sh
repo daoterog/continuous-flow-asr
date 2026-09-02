@@ -6,16 +6,16 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
 #SBATCH --time=04:00:00
-# Worst case: one task pulling all ~18 GB. submit_eval_sets.sh overrides this with a
+# Worst case: one task pulling all ~18 GB. submit/eval_sets.sh overrides this with a
 # --time derived from the actual selection and task count.
 #SBATCH --output=slurm_dl_eval_%A_%a.out
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=daniel.otero.gomez@student.uva.nl
 
 # Array job: each task downloads a disjoint slice of the eval datasets.
-# Submit via submit_eval_sets.sh — do not run this script directly.
+# Submit via submit/eval_sets.sh — do not run this script directly.
 #
-# Required env vars (set by submit_eval_sets.sh via --export):
+# Required env vars (set by submit/eval_sets.sh via --export):
 #   DATASETS — space-separated subset of the leaderboard eval configs
 #
 # File assignment: files[TASK_ID::TASK_COUNT] over every selected repo, so tasks never
@@ -27,7 +27,7 @@
 # No -u: conda's activate script reads unset variables and would abort under it.
 set -eo pipefail
 
-source "${REPO_HOME:-$HOME/continuous-flow-asr}/jobs/_env.sh"
+source "${REPO_HOME:-$HOME/continuous-flow-asr}/jobs/batch/_env.sh"
 
 # ── run ──────────────────────────────────────────────────────────────────────
 python -m scripts.download_eval_sets \

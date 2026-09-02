@@ -3,20 +3,20 @@
 # Submit the ASR eval array job.
 #
 # Usage:
-#   ./jobs/submit_eval.sh                                   # all 7 sets from audio, 8 tasks
-#   DATASETS="librispeech_test.clean" ./jobs/submit_eval.sh # one set
-#   N_JOBS=16 ./jobs/submit_eval.sh                         # more parallelism
-#   SOURCE=latents CONFIGS="clean other" SPLITS=test ./jobs/submit_eval.sh
-#   WALLTIME=01:00:00 ./jobs/submit_eval.sh                 # skip the estimate
+#   ./jobs/submit/eval.sh                                   # all 7 sets from audio, 8 tasks
+#   DATASETS="librispeech_test.clean" ./jobs/submit/eval.sh # one set
+#   N_JOBS=16 ./jobs/submit/eval.sh                         # more parallelism
+#   SOURCE=latents CONFIGS="clean other" SPLITS=test ./jobs/submit/eval.sh
+#   WALLTIME=01:00:00 ./jobs/submit/eval.sh                 # skip the estimate
 #
 # Afterwards, on the login node (CPU only, seconds):
 #   python -m scripts.score_eval
 # which merges the per-task .partN files and prints WER against the leaderboard targets.
 #
 # Prerequisites:
-#   audio   — ./jobs/submit_eval_sets.sh   (the configs must be fully cached, because
+#   audio   — ./jobs/submit/eval_sets.sh   (the configs must be fully cached, because
 #             data_utils.load_data resolves a whole config)
-#   latents — CONFIGS="clean other" SPLITS=test NO_TRIM=1 ./jobs/submit_whisper.sh
+#   latents — CONFIGS="clean other" SPLITS=test NO_TRIM=1 ./jobs/submit/whisper.sh
 
 set -eo pipefail
 
@@ -34,7 +34,7 @@ N_JOBS="${N_JOBS:-8}"
 # fixed is part of the measurement rather than a free knob.
 BATCH_SIZE="${BATCH_SIZE:-64}"
 WARMUP_STEPS="${WARMUP_STEPS:-10}"
-# LIMIT caps utterances per split before sharding — used by rehearse_eval.sh to run the
+# LIMIT caps utterances per split before sharding — used by submit/rehearse.sh to run the
 # identical array shape on a handful of utterances.
 LIMIT="${LIMIT:-}"
 
@@ -50,7 +50,8 @@ MIN_S=1800                        # 30 min
 MAX_S=86400                       # 24 h
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(dirname "${SCRIPT_DIR}")"
+REPO_DIR="$(dirname "$(dirname "${SCRIPT_DIR}")")"
+BATCH_DIR="${REPO_DIR}/jobs/batch"
 RESULTS_DIR="${RESULTS_DIR:-${REPO_DIR}/results}"
 
 fmt_hms() { printf '%02d:%02d:%02d' $(($1 / 3600)) $((($1 % 3600) / 60)) $(($1 % 60)); }
@@ -102,4 +103,4 @@ sbatch \
     --array="0-$((N_JOBS - 1))" \
     --time="${WALLTIME}" \
     --export=ALL,SOURCE="${SOURCE}",DATASETS="${DATASETS}",CONFIGS="${CONFIGS}",SPLITS="${SPLITS}",MODEL="${MODEL}",BATCH_SIZE="${BATCH_SIZE}",WARMUP_STEPS="${WARMUP_STEPS}",RESULTS_DIR="${RESULTS_DIR}",LIMIT="${LIMIT}" \
-    "${SCRIPT_DIR}/run_eval.sh"
+    "${BATCH_DIR}/run_eval.sh"

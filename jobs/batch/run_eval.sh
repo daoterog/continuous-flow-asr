@@ -7,16 +7,16 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=02:00:00
-# Worst case: one task over all 5559 eval utterances. submit_eval.sh overrides this with
+# Worst case: one task over all 5559 eval utterances. submit/eval.sh overrides this with
 # a --time derived from the actual selection and task count.
 #SBATCH --output=slurm_eval_%A_%a.out
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=daniel.otero.gomez@student.uva.nl
 
 # Array job: each task decodes a disjoint slice of the cached encoder latents.
-# Submit via submit_eval.sh — do not run this script directly.
+# Submit via submit/eval.sh — do not run this script directly.
 #
-# Required env vars (set by submit_eval.sh via --export):
+# Required env vars (set by submit/eval.sh via --export):
 #   SOURCE   — "audio" (default, all datasets) or "latents" (LibriSpeech control)
 #   DATASETS — audio source: space-separated leaderboard eval keys
 #   CONFIGS  — latents source: space-separated subset of "clean other"
@@ -42,7 +42,7 @@
 # No -u: conda's activate script reads unset variables and would abort under it.
 set -eo pipefail
 
-source "${REPO_HOME:-$HOME/continuous-flow-asr}/jobs/_env.sh"
+source "${REPO_HOME:-$HOME/continuous-flow-asr}/jobs/batch/_env.sh"
 
 # ── run ──────────────────────────────────────────────────────────────────────
 python -m scripts.run_eval \

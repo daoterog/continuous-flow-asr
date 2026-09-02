@@ -157,7 +157,7 @@ def count_utterances(keys: list[str]) -> int:
     """Total utterances across the selected datasets, from the dataset card.
 
     Reads only card metadata, so it needs neither the audio downloaded nor a model loaded
-    — submit_eval.sh uses it to size the sbatch --time before anything is fetched.
+    — submit/eval.sh uses it to size the sbatch --time before anything is fetched.
     """
     from huggingface_hub import HfApi
 
@@ -484,7 +484,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.dry_run:
         if args.source == "audio":
-            # Machine-readable; submit_eval.sh reads this to size the sbatch --time.
+            # Machine-readable; submit/eval.sh reads this to size the sbatch --time.
             print(f"utterances   {count_utterances([u[0] for u in units])}")
         for label, out, _ in units:
             print(f"  {label} -> {out.name}")

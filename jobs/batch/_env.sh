@@ -1,6 +1,6 @@
 # Shared environment setup for every batch job. Source it, do not execute it:
 #
-#   source "$HOME/continuous-flow-asr/jobs/_env.sh"
+#   source "$HOME/continuous-flow-asr/jobs/batch/_env.sh"
 #
 # An absolute path, not one relative to $BASH_SOURCE: SLURM may copy the batch script to a
 # spool directory on the compute node, so a relative source would resolve to nothing.

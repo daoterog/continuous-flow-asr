@@ -8,16 +8,16 @@
 #SBATCH --mem=64G
 #SBATCH --time=04:00:00
 # Worst case: one task over all 14 shards of train.clean.100 at the locally measured
-# 8.9 utts/s. An A100 with 16 decode workers is much faster; submit_whisper.sh
+# 8.9 utts/s. An A100 with 16 decode workers is much faster; submit/whisper.sh
 # overrides this with a --time derived from the actual selection and task count.
 #SBATCH --output=slurm_output_%A_%a.out
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=daniel.otero.gomez@student.uva.nl
 
 # Array job: each task encodes a disjoint slice of the input parquet shards.
-# Submit via submit_whisper.sh — do not run this script directly.
+# Submit via submit/whisper.sh — do not run this script directly.
 #
-# Required env vars (set by submit_whisper.sh via --export):
+# Required env vars (set by submit/whisper.sh via --export):
 #   CONFIGS — space-separated subset of "clean other"
 #   SPLITS  — space-separated subset of the LibriSpeech split names
 #   MODEL   — Whisper checkpoint
@@ -37,7 +37,7 @@
 # No -u: conda's activate script reads unset variables and would abort under it.
 set -eo pipefail
 
-source "${REPO_HOME:-$HOME/continuous-flow-asr}/jobs/_env.sh"
+source "${REPO_HOME:-$HOME/continuous-flow-asr}/jobs/batch/_env.sh"
 
 # ── run ──────────────────────────────────────────────────────────────────────
 # NO_TRIM=1 stores the full 1500 encoder frames. Required for anything that will be
