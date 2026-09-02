@@ -110,7 +110,7 @@ def merge_parts(results_dir: Path) -> int:
 def jiwer_wer_by_dataset(results_dir: Path) -> dict[str, float]:
     """Plain jiwer WER per manifest, over the same normalized text score_results uses."""
     import jiwer
-    from normalizer import data_utils
+    from normalizer import data_utils, eval_utils
 
     out = {}
     for path in sorted(glob.glob(f"{results_dir}/**/*.jsonl", recursive=True)):
@@ -118,6 +118,10 @@ def jiwer_wer_by_dataset(results_dir: Path) -> dict[str, float]:
             manifest = [json.loads(line) for line in fh if line.strip()]
         if not manifest:
             continue
+        # Same collapse score_results performs: a chunked dataset stores one row per chunk
+        # but one reference per parent call, so scoring the rows directly compares each
+        # chunk against the whole call — which reads as ~98% WER rather than ~8%.
+        manifest = eval_utils.merge_chunked_manifest(manifest)
         refs = [data_utils.normalizer(d["text"]) for d in manifest]
         preds = [data_utils.normalizer(d["pred_text"]) for d in manifest]
         # Empty references make jiwer raise; the leaderboard filters them at write time.
