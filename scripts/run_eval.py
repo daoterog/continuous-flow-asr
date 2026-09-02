@@ -249,8 +249,15 @@ def decode_from_audio(
         minibatch_size = len(audios)
         rate = batch["audio"][0]["sampling_rate"]
         batch["audio_length_s"] = [len(a) / rate for a in audios]
-        batch["audio_filepath"] = data_utils.extract_audio_filepaths_from_batch(
-            batch, minibatch_size
+        # The full id, not the leaderboard's basenamed version. spgispeech ids look like
+        # "<hash>/117.wav", and basenaming collapses 1035 distinct utterances into 253
+        # names — which makes coverage unverifiable and looks like shard overlap. The
+        # field is not used for scoring, so keeping it unique costs nothing.
+        ids = batch.get("id")
+        batch["audio_filepath"] = (
+            [str(i) for i in ids]
+            if isinstance(ids, list) and len(ids) == minibatch_size
+            else data_utils.extract_audio_filepaths_from_batch(batch, minibatch_size)
         )
 
         # RTFx methodology, matching open_asr_leaderboard/transformers/run_eval.py:172-353:
