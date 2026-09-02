@@ -507,7 +507,9 @@ def main(argv: list[str] | None = None) -> int:
     if failures:
         # pending units may all have failed before results_dir was created.
         args.results_dir.mkdir(parents=True, exist_ok=True)
-        log = args.results_dir / "failures.json"
+        # Per task: all array tasks share results_dir, so a single failures.json means the
+        # last task to fail silently overwrites every earlier one.
+        log = args.results_dir / f"eval_failures_{args.shard_id}.json"
         log.write_text(json.dumps(failures, indent=2))
         print(
             f"\nFAILED: {len(failures)} of {len(pending)}, logged to {log}", file=sys.stderr
