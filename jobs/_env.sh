@@ -11,16 +11,21 @@ REPO_HOME="${REPO_HOME:-$HOME/continuous-flow-asr}"
 
 module purge
 module load 2025
-module load Anaconda3/2025.06-1
 
 cd "${REPO_HOME}"
 
-source activate "${CONDA_ENV:-flow_asr}"
+# Put the env's interpreter on PATH directly instead of activating it. Both
+# `source activate flow_asr` and `conda activate flow_asr` silently no-op in a batch shell
+# and leave `python` pointing at the Anaconda3 module's interpreter, which has no torch —
+# the module's conda does not resolve env names under ~/.conda/envs. The Anaconda3 module
+# is not loaded at all now, since nothing here needs it.
+CONDA_ENV_PATH="${CONDA_ENV_PATH:-$HOME/.conda/envs/${CONDA_ENV:-flow_asr}}"
+export PATH="${CONDA_ENV_PATH}/bin:${PATH}"
 
-# Conda relies on RPATH and does not set LD_LIBRARY_PATH, but pip wheels such as torchcodec
-# carry no RPATH into the env, so libtorchcodec resolves libstdc++ against Snellius's
-# /lib64 — too old for the GLIBCXX that conda's own libicuuc needs.
-export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# Pip wheels such as torchcodec carry no RPATH into the env, so libtorchcodec would
+# resolve libstdc++ against Snellius's /lib64 — too old for the GLIBCXX that conda's own
+# libicuuc needs.
+export LD_LIBRARY_PATH="${CONDA_ENV_PATH}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 # HF_TOKEN for authenticated Hub requests (higher rate limits on model/dataset pulls).
 if [[ -f .env ]]; then
