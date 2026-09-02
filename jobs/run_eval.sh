@@ -42,34 +42,7 @@
 # No -u: conda's activate script reads unset variables and would abort under it.
 set -eo pipefail
 
-module purge
-module load 2025
-module load Anaconda3/2025.06-1
-
-cd "$HOME/continuous-flow-asr"
-
-# ── environment ──────────────────────────────────────────────────────────────
-source activate "${CONDA_ENV:-flow_asr}"
-
-# Conda relies on RPATH and does not set LD_LIBRARY_PATH, but pip wheels such as
-# torchcodec carry no RPATH into the env, so its libtorchcodec resolves libstdc++
-# against Snellius's /lib64 — too old for the GLIBCXX conda's own libicuuc needs.
-export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-
-if [[ -f .env ]]; then
-    set -a
-    # shellcheck disable=SC1091
-    source .env
-    set +a
-else
-    echo "WARNING: no .env found; Hub requests will be unauthenticated" >&2
-fi
-
-# The eval imports the leaderboard normalizer from the pinned submodule.
-if [[ ! -f open_asr_leaderboard/normalizer/__init__.py ]]; then
-    echo "ERROR: submodule empty; run 'git submodule update --init --recursive'" >&2
-    exit 1
-fi
+source "${REPO_HOME:-$HOME/continuous-flow-asr}/jobs/_env.sh"
 
 # ── run ──────────────────────────────────────────────────────────────────────
 python -m scripts.run_eval \

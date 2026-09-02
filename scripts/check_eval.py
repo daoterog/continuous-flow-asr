@@ -32,15 +32,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="utterances expected per split (the --limit used, or the split size)",
     )
-    p.add_argument("--configs", default="clean other", help="space-separated")
-    p.add_argument("--splits", default="test", help="space-separated")
+    p.add_argument(
+        "--datasets",
+        nargs="+",
+        required=True,
+        help="dataset keys the run covered; one manifest is expected per key",
+    )
     return p.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     """Check the sharded output, returning a process exit code."""
     args = parse_args(argv)
-    n_splits = len(args.configs.split()) * len(args.splits.split())
+    n_expected_manifests = len(args.datasets)
 
     parts = sorted(args.results_dir.glob("*.part*.jsonl"))
     if not parts:
@@ -91,10 +95,10 @@ def main(argv: list[str] | None = None) -> int:
                 f"{short}: {len(counts)} unique utterances, expected {args.expect_total}"
             )
 
-    if len(groups) != n_splits:
+    if len(groups) != n_expected_manifests:
         failures.append(
-            f"{len(groups)} manifest(s) but {n_splits} (config x split) expected — "
-            "a split produced nothing"
+            f"{len(groups)} manifest(s) but {n_expected_manifests} expected "
+            f"({' '.join(args.datasets)}) — a dataset produced nothing"
         )
 
     print("-" * 73)

@@ -25,24 +25,7 @@ CONFIGS="${CONFIGS:-clean}"
 SPLITS="${SPLITS:-train.100}"
 MODEL="${MODEL:-openai/whisper-large-v3}"
 
-module purge
-module load 2025
-module load Anaconda3/2025.06-1
-
-cd "$HOME/continuous-flow-asr"
-source activate "${CONDA_ENV:-flow_asr}"
-
-# Conda relies on RPATH and does not set LD_LIBRARY_PATH, but pip wheels such as
-# torchcodec carry no RPATH into the env, so its libtorchcodec resolves libstdc++
-# against Snellius's /lib64 — too old for the GLIBCXX_3.4.30 conda's libicuuc needs.
-export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-
-if [[ -f .env ]]; then
-    set -a
-    # shellcheck disable=SC1091
-    source .env
-    set +a
-fi
+source "${REPO_HOME:-$HOME/continuous-flow-asr}/jobs/_env.sh"
 
 FAILED=0
 check() {
