@@ -3,11 +3,11 @@
 # Submit the LibriSpeech download array job.
 #
 # Usage:
-#   ./jobs/submit_librispeech.sh                            # everything, 8 tasks
-#   N_JOBS=4 ./jobs/submit_librispeech.sh                   # everything, 4 tasks
-#   SPLITS="validation test" ./jobs/submit_librispeech.sh   # small run first
-#   CONFIGS="clean" SPLITS="train.100" ./jobs/submit_librispeech.sh
-#   WALLTIME=02:00:00 ./jobs/submit_librispeech.sh          # skip the estimate
+#   ./jobs/submit/librispeech.sh                            # everything, 8 tasks
+#   N_JOBS=4 ./jobs/submit/librispeech.sh                   # everything, 4 tasks
+#   SPLITS="validation test" ./jobs/submit/librispeech.sh   # small run first
+#   CONFIGS="clean" SPLITS="train.100" ./jobs/submit/librispeech.sh
+#   WALLTIME=02:00:00 ./jobs/submit/librispeech.sh          # skip the estimate
 #
 # The full corpus (clean + other) is ~62 GB across 130 shards.  Downloading the
 # "all" config is deliberately not an option: it is the same audio under merged
@@ -30,7 +30,8 @@ MIN_S=1800                        # 30 min
 MAX_S=28800                       # 8 h, the staging partition limit
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(dirname "${SCRIPT_DIR}")"
+REPO_DIR="$(dirname "$(dirname "${SCRIPT_DIR}")")"
+BATCH_DIR="${REPO_DIR}/jobs/batch"
 
 fmt_hms() { printf '%02d:%02d:%02d' $(($1 / 3600)) $((($1 % 3600) / 60)) $(($1 % 60)); }
 
@@ -69,4 +70,4 @@ sbatch \
     --array="0-$((N_JOBS - 1))" \
     --time="${WALLTIME}" \
     --export=ALL,CONFIGS="${CONFIGS}",SPLITS="${SPLITS}" \
-    "${SCRIPT_DIR}/download_librispeech.sh"
+    "${BATCH_DIR}/download_librispeech.sh"

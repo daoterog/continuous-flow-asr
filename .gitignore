@@ -222,3 +222,6 @@ data/
 
 # Project-local conda prefix holding the pinned FFmpeg (see README)
 .ffmpeg/
+
+# Model Results
+results/

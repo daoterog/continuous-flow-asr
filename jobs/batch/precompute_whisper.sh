@@ -8,16 +8,16 @@
 #SBATCH --mem=64G
 #SBATCH --time=04:00:00
 # Worst case: one task over all 14 shards of train.clean.100 at the locally measured
-# 8.9 utts/s. An A100 with 16 decode workers is much faster; submit_whisper.sh
+# 8.9 utts/s. An A100 with 16 decode workers is much faster; submit/whisper.sh
 # overrides this with a --time derived from the actual selection and task count.
 #SBATCH --output=slurm_output_%A_%a.out
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=daniel.otero.gomez@student.uva.nl
 
 # Array job: each task encodes a disjoint slice of the input parquet shards.
-# Submit via submit_whisper.sh — do not run this script directly.
+# Submit via submit/whisper.sh — do not run this script directly.
 #
-# Required env vars (set by submit_whisper.sh via --export):
+# Required env vars (set by submit/whisper.sh via --export):
 #   CONFIGS — space-separated subset of "clean other"
 #   SPLITS  — space-separated subset of the LibriSpeech split names
 #   MODEL   — Whisper checkpoint
@@ -37,38 +37,15 @@
 # No -u: conda's activate script reads unset variables and would abort under it.
 set -eo pipefail
 
-module purge
-module load 2025
-module load Anaconda3/2025.06-1
-
-cd "$HOME/continuous-flow-asr"
-
-# ── environment ──────────────────────────────────────────────────────────────
-source activate "${CONDA_ENV:-flow_asr}"
-
-# Conda relies on RPATH and does not set LD_LIBRARY_PATH, but pip wheels such as
-# torchcodec carry no RPATH into the env — so its libtorchcodec_core7.so resolves
-# libstdc++ against Snellius's /lib64, which is too old for the GLIBCXX_3.4.30 that
-# conda's own libicuuc needs. Prepending the env's lib puts conda's newer libstdc++
-# and its libavutil ahead of the system ones.
-export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-
-# Fail fast on a broken decoder rather than after loading 3 GB of weights and
-# discovering it once per shard.
-python -m scripts.check_ffmpeg
-
-# HF_TOKEN, for authenticated Hub requests (higher rate limits when pulling the
-# Whisper weights). set -a exports everything the file defines.
-if [[ -f .env ]]; then
-    set -a
-    # shellcheck disable=SC1091
-    source .env
-    set +a
-else
-    echo "WARNING: no .env found; Hub requests will be unauthenticated" >&2
-fi
+source "${REPO_HOME:-$HOME/continuous-flow-asr}/jobs/batch/_env.sh"
 
 # ── run ──────────────────────────────────────────────────────────────────────
+# NO_TRIM=1 stores the full 1500 encoder frames. Required for anything that will be
+# fed back through Whisper's decoder (i.e. the eval splits) — trimmed latents decode
+# to repeated <|en|> tokens. Costs 2.4x the disk, so training splits leave it unset.
+TRIM_FLAG=()
+[[ -n "${NO_TRIM}" ]] && TRIM_FLAG=(--no-trim)
+
 python -m scripts.precompute_whisper \
     --env snellius \
     --model "${MODEL}" \
@@ -77,4 +54,5 @@ python -m scripts.precompute_whisper \
     --num-shards "${SLURM_ARRAY_TASK_COUNT}" \
     --shard-id "${SLURM_ARRAY_TASK_ID}" \
     --workers "${SLURM_CPUS_PER_TASK}" \
-    --batch-size "${BATCH_SIZE:-128}"
+    --batch-size "${BATCH_SIZE:-128}" \
+    "${TRIM_FLAG[@]}"
