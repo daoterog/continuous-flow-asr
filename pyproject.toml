@@ -5,7 +5,7 @@ dependencies = [
     "datasets>=5.0.1",
     "einops>=0.8.2",
     "evaluate>=0.4.6",
-    "flash-attn==2.8.3",
+    "flow-matching>=1.0.10",
     "ipykernel>=7.3.0",
     "jiwer>=4.0.0",
     "kaldialign>=0.12.0",
@@ -33,18 +33,6 @@ explicit = true
 # version, and PyPI's build will not load. CUDA 13 needs driver >= 580.
 torch = { index = "pytorch-cu130" }
 torchcodec = { index = "pytorch-cu130" }
-
-# flash-attn is sdist-only and its setup.py imports torch, so it must be built
-# against the locked torch (the reproducible equivalent of
-# `pip install --no-build-isolation`). Needs a CUDA toolkit matching torch's
-# (13.x) on CUDA_HOME; set MAX_JOBS to bound compile memory.
-[tool.uv.extra-build-dependencies]
-flash-attn = [
-    { requirement = "torch", match-runtime = true },
-    "ninja",
-    "packaging",
-    "psutil",
-]
 
 # Static metadata so resolving/locking never has to run flash-attn's setup.py.
 [[tool.uv.dependency-metadata]]
