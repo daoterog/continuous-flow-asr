@@ -14,7 +14,13 @@ they are not interchangeable:
 
 They agree on ordinary substitutions and deletions and diverge only on compound-word
 boundaries, which ``merge_compounds`` forgives. Seeing both eras line up at once is much
-stronger evidence the harness is right than matching either alone.
+stronger evidence the harness is right than matching either alone. Both columns are
+restricted to ``--model``'s manifests, since comparing two different runs would make the
+agreement meaningless.
+
+``--results-dir``, ``--model`` and ``--num-shards`` must describe the run that produced
+the manifests; jobs/batch/score_eval.sh threads them through from the same env vars
+submit/eval.sh used.
 """
 
 import argparse
@@ -26,6 +32,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LEADERBOARD = REPO_ROOT / "open_asr_leaderboard"
+
+# The checkpoint LIVE_TARGETS and CSV_TARGETS were read for. --model is free, so the
+# targets are only asserted when the run used this checkpoint; anything else reports.
+TARGETS_MODEL = "openai/whisper-large-v3"
 
 # Live leaderboard figures for openai/whisper-large-v3, read by hand from the Gradio Space
 # (it is a client-rendered app and cannot be fetched programmatically). A value of None
@@ -62,22 +72,52 @@ def add_leaderboard_to_path() -> None:
         sys.path.insert(0, str(LEADERBOARD))
 
 
-def merge_parts(results_dir: Path) -> int:
+def part_index(path: Path) -> int:
+    """Shard index encoded in a ``*.partN.jsonl`` filename."""
+    return int(re.search(r"\.part(\d+)\.jsonl$", path.name).group(1))
+
+
+def merge_parts(
+    results_dir: Path, num_shards: int | None = None, model: str | None = None
+) -> int:
     """Concatenate ``*.partN.jsonl`` shards into their canonical manifest.
 
     A sharded array run writes one file per task. score_results derives the dataset name
     from the filename, so left alone it would score each part as its own dataset and
     average them — which is not the same number as scoring the union. Returns how many
     canonical manifests were produced.
+
+    Merging is destructive (the parts are unlinked), so an incomplete set is refused
+    before anything is written: scoring the union of a partially-failed array produces a
+    plausible-looking WER over fewer utterances and destroys the evidence that it was
+    partial. Without ``num_shards`` only gaps below the highest index are detectable —
+    a missing final task looks exactly like a smaller array.
+
+    ``model`` restricts the merge to that checkpoint's parts. Each checkpoint's parts
+    group under their own canonical name, so merging all of them mixes no numbers, but it
+    would consume and delete the parts of a run that is not being scored.
     """
     groups: dict[Path, list[Path]] = {}
     for part in sorted(results_dir.glob("*.part*.jsonl")):
+        if model is not None and not belongs_to_model(str(part), model):
+            continue
         canonical = results_dir / (re.sub(r"\.part\d+\.jsonl$", "", part.name) + ".jsonl")
         groups.setdefault(canonical, []).append(part)
 
     for canonical, parts in groups.items():
+        present = {part_index(p) for p in parts}
+        expected = num_shards if num_shards is not None else max(present) + 1
+        missing = sorted(set(range(expected)) - present)
+        if missing:
+            raise SystemExit(
+                f"{canonical.name}: missing part(s) {missing} of {expected}. Those array "
+                "tasks did not finish — check their slurm_eval_*.out. Merging now would "
+                "score a partial run and delete the parts; rerun the missing shards, or "
+                "pass --num-shards to state the array size explicitly."
+            )
+
         # Sorted by shard index, not lexically, so part10 does not land before part2.
-        parts.sort(key=lambda p: int(re.search(r"\.part(\d+)\.jsonl$", p.name).group(1)))
+        parts.sort(key=part_index)
         rows = 0
         seen: set[str] = set()
         duplicates: set[str] = set()
@@ -107,13 +147,25 @@ def merge_parts(results_dir: Path) -> int:
     return len(groups)
 
 
-def jiwer_wer_by_dataset(results_dir: Path) -> dict[str, float]:
+def belongs_to_model(path: str, model: str) -> bool:
+    """Whether a manifest is this model's, by the same test score_results applies.
+
+    Mirrored rather than imported because it is inlined in score_results. The two columns
+    must agree on the file set or the cross-check compares different runs.
+    """
+    slug = model.replace("/", "-")
+    return f"/{slug}/" in path or f"MODEL_{slug}_DATASET_" in path
+
+
+def jiwer_wer_by_dataset(results_dir: Path, model: str) -> dict[str, float]:
     """Plain jiwer WER per manifest, over the same normalized text score_results uses."""
     import jiwer
     from normalizer import data_utils, eval_utils
 
     out = {}
     for path in sorted(glob.glob(f"{results_dir}/**/*.jsonl", recursive=True)):
+        if not belongs_to_model(path, model):
+            continue
         with open(path, encoding="utf-8") as fh:
             manifest = [json.loads(line) for line in fh if line.strip()]
         if not manifest:
@@ -161,7 +213,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--tolerance", type=float, default=0.1, help="absolute WER tolerance")
     p.add_argument("--no-assert", action="store_true", help="report only, never fail")
-    return p.parse_args(argv)
+    p.add_argument(
+        "--num-shards",
+        type=int,
+        default=None,
+        help="array task count the run used; lets the merge detect a missing final shard",
+    )
+    args = p.parse_args(argv)
+    # score_results reads an empty model_id as "do not filter", which would pool every
+    # checkpoint in the directory into one WER instead of failing.
+    if not args.model:
+        p.error("--model must not be empty")
+    if args.num_shards is not None and args.num_shards < 1:
+        p.error(f"--num-shards must be >= 1, got {args.num_shards}")
+    args.results_dir = args.results_dir.expanduser().resolve()
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -173,16 +239,31 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: no manifests under {args.results_dir}", file=sys.stderr)
         return 2
 
-    merge_parts(args.results_dir)
+    merge_parts(args.results_dir, args.num_shards, args.model)
 
     from normalizer import eval_utils
 
     _composite, results = eval_utils.score_results(str(args.results_dir), args.model)
-    jiwer_wers = jiwer_wer_by_dataset(args.results_dir)
+    jiwer_wers = jiwer_wer_by_dataset(args.results_dir, args.model)
 
     # results keys are "model | dataset_id"; reduce to dataset_id for comparison.
     kaldi = {key.split(" | ", 1)[1]: val["wer"] for key, val in results.items()}
-    expected = parse_expect(args.expect) if args.expect else LIVE_TARGETS
+
+    # The built-in targets are one checkpoint's numbers. Asserting them against a
+    # different model would fail for the only reason that is not a bug, so a non-default
+    # model reports unless --expect states what to compare against.
+    if args.expect:
+        expected = parse_expect(args.expect)
+    elif args.model == TARGETS_MODEL:
+        expected = LIVE_TARGETS
+    else:
+        print(
+            f"note: --model {args.model} is not {TARGETS_MODEL}, which the built-in "
+            "targets were read for — reporting without assertions. Pass --expect "
+            "dataset:split=wer to assert against this model's own numbers.",
+            file=sys.stderr,
+        )
+        expected = {}
 
     print("\n" + "=" * 78)
     print(f"{'dataset':38s}{'kaldialign':>12s}{'target':>9s}{'jiwer':>9s}{'old CSV':>9s}")
@@ -194,7 +275,13 @@ def main(argv: list[str] | None = None) -> int:
         known = [k for k in (*LIVE_TARGETS, *CSV_TARGETS) if k in dataset_id]
         short = known[0] if known else dataset_id
         target = next((v for k, v in expected.items() if k in dataset_id), None)
-        old = next((v for k, v in CSV_TARGETS.items() if k in dataset_id), None)
+        # The old CSV is the same checkpoint's history; against another model it is not a
+        # comparison, just a number in the same row.
+        old = (
+            next((v for k, v in CSV_TARGETS.items() if k in dataset_id), None)
+            if args.model == TARGETS_MODEL
+            else None
+        )
         row = (
             f"{short[:37]:38s}{kaldi[dataset_id]:11.2f}%"
             f"{('-' if target is None else f'{target:.2f}'):>9s}"
@@ -212,11 +299,15 @@ def main(argv: list[str] | None = None) -> int:
     # smaller mean that looks like the real thing.
     scored = [kaldi[d] for d in sorted(kaldi)]
     complete = len(scored) == len(LIVE_TARGETS)
+    # AVERAGE_TARGET is derived from LIVE_TARGETS, so it means nothing once the targets
+    # are another model's or --expect replaced them.
+    comparable = expected is LIVE_TARGETS
     if scored:
         avg = sum(scored) / len(scored)
         note = "" if complete else f"   partial: {len(scored)}/{len(LIVE_TARGETS)} sets"
-        row = f"{'AVERAGE':38s}{avg:11.2f}%{AVERAGE_TARGET:9.2f}{'':18s}{note}"
-        if complete and abs(avg - AVERAGE_TARGET) > args.tolerance:
+        shown = f"{AVERAGE_TARGET:9.2f}" if comparable else f"{'-':>9s}"
+        row = f"{'AVERAGE':38s}{avg:11.2f}%{shown}{'':18s}{note}"
+        if comparable and complete and abs(avg - AVERAGE_TARGET) > args.tolerance:
             row += f"   OFF by {abs(avg - AVERAGE_TARGET):.2f}"
             failures.append(("AVERAGE", avg, AVERAGE_TARGET))
         print(row)

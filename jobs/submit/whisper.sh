@@ -6,7 +6,7 @@
 #   ./jobs/submit/whisper.sh                                # train.100, 7 tasks
 #   N_JOBS=14 ./jobs/submit/whisper.sh                      # one task per shard
 #   SPLITS="validation" ./jobs/submit/whisper.sh            # small run first
-#   MODEL=openai/whisper-small ./jobs/submit/whisper.sh
+#   ALLOW_MODEL=1 MODEL=openai/whisper-small ./jobs/submit/whisper.sh   # off the pin
 #   WALLTIME=02:00:00 ./jobs/submit/whisper.sh              # skip the estimate
 #
 # train.clean.100 is 28,539 utterances across 14 shards, ~46 GB of trimmed float16
@@ -16,7 +16,6 @@ set -eo pipefail
 
 CONFIGS="${CONFIGS:-clean}"
 SPLITS="${SPLITS:-train.100}"
-MODEL="${MODEL:-openai/whisper-large-v3}"
 N_JOBS="${N_JOBS:-7}"
 
 # Batch size. Measured: 1.19 GiB of fp16 encoder weights + ~45 MiB of activations per
@@ -40,6 +39,12 @@ MAX_S=86400                       # 24 h, the gpu partition limit
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$(dirname "${SCRIPT_DIR}")")"
 BATCH_DIR="${REPO_DIR}/jobs/batch"
+
+# Resolves MODEL and checks it here, on the login node, rather than letting the array
+# queue and then write a second checkpoint's features into the cache.
+# shellcheck disable=SC1091
+source "${REPO_DIR}/jobs/pinned_model.sh"
+require_pinned_model
 
 fmt_hms() { printf '%02d:%02d:%02d' $(($1 / 3600)) $((($1 % 3600) / 60)) $(($1 % 60)); }
 

@@ -39,6 +39,10 @@ set -eo pipefail
 
 source "${REPO_HOME:-$HOME/continuous-flow-asr}/jobs/batch/_env.sh"
 
+# MODEL is resolved by _env.sh; refuse anything but the pinned checkpoint so a stale
+# export cannot write a second model's features into the cache.
+require_pinned_model
+
 # ── run ──────────────────────────────────────────────────────────────────────
 # NO_TRIM=1 stores the full 1500 encoder frames. Required for anything that will be
 # fed back through Whisper's decoder (i.e. the eval splits) — trimmed latents decode

@@ -36,3 +36,10 @@ if [[ -f .env ]]; then
 else
     echo "WARNING: no .env found; Hub requests will be unauthenticated" >&2
 fi
+
+# Last, so it sees the final MODEL: .env is sourced under `set -a`, which exports every
+# name it defines, so a MODEL left in there would otherwise slip past the guard.
+# Defines PINNED_MODEL, resolves MODEL, and provides require_pinned_model — which the
+# jobs that load a checkpoint call for themselves; the download jobs do not.
+# shellcheck disable=SC1091
+source "${REPO_HOME}/jobs/pinned_model.sh"

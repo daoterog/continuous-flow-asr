@@ -105,6 +105,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     args = p.parse_args(argv)
 
+    # An empty model would write features to features//<config>/<split>, outside the
+    # per-checkpoint namespacing everything else relies on.
+    if not args.model:
+        p.error("--model must not be empty")
     if args.num_shards < 1:
         p.error(f"--num-shards must be >= 1, got {args.num_shards}")
     if not 0 <= args.shard_id < args.num_shards:

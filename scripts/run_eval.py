@@ -119,6 +119,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--dry-run", action="store_true", help="print the plan and exit")
     args = p.parse_args(argv)
 
+    # An empty model still runs, writing manifests named MODEL__DATASET_... that the
+    # scorer cannot attribute to a checkpoint.
+    if not args.model:
+        p.error("--model must not be empty")
     if args.batch_size < 1:
         p.error(f"--batch-size must be >= 1, got {args.batch_size}")
     if args.num_shards < 1:
