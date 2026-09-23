@@ -170,7 +170,8 @@ def build_trainer(cfg: DictConfig, logger: object) -> pl.Trainer:
         accelerator=cfg.train.accelerator,
         devices=cfg.train.devices,
         precision=cfg.train.precision or "32-true",
-        gradient_clip_val=cfg.train.grad_clip,
+        # Lightning wants a number, not None: 0 is how it spells "no clipping".
+        gradient_clip_val=cfg.train.grad_clip or 0,
         fast_dev_run=cfg.train.fast_dev_run,
         log_every_n_steps=cfg.train.log_every_n_steps,
         check_val_every_n_epoch=cfg.train.get("check_val_every_n_epoch", 1),

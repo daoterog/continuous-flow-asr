@@ -36,13 +36,19 @@ def make_schedule(spec: DictConfig | dict | str | None) -> Callable | None:
     spec = OmegaConf.to_container(spec) if isinstance(spec, DictConfig) else dict(spec)
     kind = spec.pop("type")
 
+    # `scale` matters most on gamma. At scale 1 the audio_cond schedule has gamma == alpha,
+    # so once mu is trained the interpolant is ~(1-t) x0 + x1 at every t: the answer is in
+    # the input always, and the denoiser can learn to copy instead of to denoise. Scaling
+    # gamma below 1 leaves a real denoising problem at low t.
+    scale = spec.pop("scale", 1.0)
+
     if kind == "linear_up":
-        return lambda t: t
+        return lambda t: scale * t
     if kind == "linear_down":
-        return lambda t: 1 - t
+        return lambda t: scale * (1 - t)
     if kind == "parabola":
         c = spec.pop("c", 0.5)
-        return lambda t: 4 * c * t * (1 - t)
+        return lambda t: scale * 4 * c * t * (1 - t)
     raise ValueError(
         f"unknown schedule {kind!r}; expected linear_up, linear_down or parabola"
     )
@@ -209,11 +215,24 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             return torch.linspace(0, 1, num_steps + 1).tolist()
         return [float(t) for t in generation_grid(self.sample_t_fn, num_steps)]
 
-    def sample(self, audio: torch.Tensor, num_steps: int, hard: bool = False) -> torch.Tensor:
-        """Integrate from noise to (B, canvas_len) token ids for this batch of audio."""
+    def sample(
+        self,
+        audio: torch.Tensor,
+        num_steps: int,
+        hard: bool = False,
+        init_from_mu: bool | None = None,
+    ) -> torch.Tensor:
+        """Integrate from noise to (B, canvas_len) token ids for this batch of audio.
+
+        init_from_mu seeds the first state's endpoint term with mu. The tau grid starts
+        at the edge of the dead zone rather than at 0, so training's state there already
+        carries beta(t0) * x1 and the sampler otherwise supplies nothing for it.
+        """
         mu = None
         if self.mu_nn is not None:
             mu = F.softmax(self.mu_nn(audio), dim=-1)
+        if init_from_mu is None:
+            init_from_mu = bool(self.cfg.get("sampling", {}).get("init_from_mu", False))
         return sample_tokens(
             self.denoiser,
             audio,
@@ -225,6 +244,7 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             self.gamma_fn,
             mu,
             hard=hard,
+            x1_init=mu if init_from_mu else None,
         )
 
     def _sampling_batch(self) -> dict | None:
