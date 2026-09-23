@@ -159,7 +159,10 @@ def build_datamodule(cfg: DictConfig) -> AudioFeatureDataModule:
 
 def build_trainer(cfg: DictConfig, logger: object) -> pl.Trainer:
     """Trainer with gradient clipping, LR logging and a val-loss checkpoint."""
-    callbacks = [ModelCheckpoint(monitor="total_loss/val", mode="min", save_last=True)]
+    checkpoint = cfg.train.get("checkpoint", True)
+    callbacks = []
+    if checkpoint:
+        callbacks.append(ModelCheckpoint(monitor="total_loss/val", mode="min", save_last=True))
     if logger:  # LearningRateMonitor raises if there is nowhere to write
         callbacks.append(LearningRateMonitor(logging_interval="step"))
     return pl.Trainer(
@@ -170,6 +173,8 @@ def build_trainer(cfg: DictConfig, logger: object) -> pl.Trainer:
         gradient_clip_val=cfg.train.grad_clip,
         fast_dev_run=cfg.train.fast_dev_run,
         log_every_n_steps=cfg.train.log_every_n_steps,
+        check_val_every_n_epoch=cfg.train.get("check_val_every_n_epoch", 1),
+        enable_checkpointing=checkpoint,
         deterministic=cfg.train.get("deterministic", False),
         benchmark=cfg.train.get("benchmark", False),
         logger=logger,

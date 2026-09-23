@@ -15,6 +15,8 @@ from transformers import WhisperTokenizerFast
 from src.dataset import VocabMap
 from src.metrics.reporting import MetricReporting
 from src.models import build_audio_decoder, build_denoiser
+from src.sampler import sample_tokens, score_samples
+from src.schedule import generation_grid
 
 
 def make_schedule(spec: DictConfig | dict | str | None) -> Callable | None:
@@ -84,7 +86,11 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         self.cfg = cfg
         self.vocab_size = vocab_size
         self.pad_id = pad_id
+        self.canvas_len = canvas_len
         self.sample_t_fn = sample_t_fn
+        self.tokenizer = tokenizer
+        self.vocab_map = vocab_map
+        self._sample_batch = None
 
         self.denoiser = build_denoiser(cfg.model.denoiser, vocab_size)
         self.mu_nn = (
@@ -191,6 +197,82 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         if self.mu_nn is not None:
             loss = loss + self.mu_loss_weight * out["mu"]["loss"]
         return loss, out, t
+
+    def generation_grid(self, num_steps: int) -> list[float]:
+        """The sampler's time grid — uniform in tau when t was drawn through tau^-1.
+
+        Training and generation have to share this: under the reparameterization the
+        model has seen almost nothing below the dead zone, so integrating on a
+        uniform-in-t grid would run it far out of distribution.
+        """
+        if self.sample_t_fn is None:
+            return torch.linspace(0, 1, num_steps + 1).tolist()
+        return [float(t) for t in generation_grid(self.sample_t_fn, num_steps)]
+
+    def sample(self, audio: torch.Tensor, num_steps: int, hard: bool = False) -> torch.Tensor:
+        """Integrate from noise to (B, canvas_len) token ids for this batch of audio."""
+        mu = None
+        if self.mu_nn is not None:
+            mu = F.softmax(self.mu_nn(audio), dim=-1)
+        return sample_tokens(
+            self.denoiser,
+            audio,
+            self.generation_grid(num_steps),
+            self.vocab_size,
+            self.canvas_len,
+            self.alpha_fn,
+            self.beta_fn,
+            self.gamma_fn,
+            mu,
+            hard=hard,
+        )
+
+    def _sampling_batch(self) -> dict | None:
+        """A fixed slice of val, collated once and reused every time we sample."""
+        if self._sample_batch is None:
+            datamodule = getattr(self.trainer, "datamodule", None)
+            if datamodule is None:
+                return None
+            subset = datamodule.datasets["val"]
+            n = min(int(self.cfg.sampling.get("n_utts", 64)), len(subset))
+            self._sample_batch = datamodule.collate_fn([subset[i] for i in range(n)])
+        return self._sample_batch
+
+    def _log_sampled(self) -> None:
+        """Sample from noise on a fixed val slice and log the WER it actually achieves.
+
+        This is the only metric here that reflects inference: the binned ones score one
+        denoising step from an x_t built out of the target, which at high t largely
+        measures the input rather than the model.
+        """
+        cfg = self.cfg.get("sampling")
+        if cfg is None or not cfg.get("enabled", False) or self.trainer.sanity_checking:
+            return
+        every = int(cfg.get("every_n_epochs", 5))
+        if every <= 0 or (self.current_epoch + 1) % every:
+            return
+        batch = self._sampling_batch()
+        if batch is None:
+            return
+
+        was_training = self.training
+        self.eval()
+        audio = batch["audio"].to(self.device).float()
+        tokens = batch["tokens"].to(self.device)
+        pred = self.sample(
+            audio, int(cfg.get("num_steps", 16)), hard=bool(cfg.get("hard", False))
+        )
+        wer, token_error = score_samples(
+            pred, tokens, self.tokenizer, self.pad_id, self.vocab_map
+        )
+        self.log("sampled/wer", wer, batch_size=tokens.size(0))
+        self.log("sampled/perr", token_error, batch_size=tokens.size(0))
+        self.train(was_training)
+
+    def on_validation_epoch_end(self) -> None:
+        """Flush the binned metrics, then sample from noise on a fixed val slice."""
+        super().on_validation_epoch_end()
+        self._log_sampled()
 
     def _step(self, batch: dict, split: str) -> torch.Tensor:
         loss, out, t = self.flow_step(batch)
