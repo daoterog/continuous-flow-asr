@@ -10,6 +10,7 @@ dependencies = [
     "jiwer>=4.0.0",
     "kaldialign>=0.12.0",
     "librosa>=1.0.0",
+    "lightning>=2.6.6",
     "matplotlib>=3.11.2",
     "num2words>=0.5.14",
     "omegaconf>=2.3.1",
@@ -20,6 +21,7 @@ dependencies = [
     "torchcodec>=0.16",
     "torchmetrics>=1.9.0",
     "transformers>=5.16.1",
+    "wandb>=0.30.0",
 ]
 
 [[tool.uv.index]]
@@ -43,8 +45,10 @@ requires-dist = ["torch", "einops"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-# Vendored upstream code (git submodule); not ours to lint or reformat.
-extend-exclude = ["open_asr_leaderboard"]
+# Vendored upstream code; not ours to lint or reformat. open_asr_leaderboard is a git
+# submodule; src/models/drax is DRAX's flow decoder (CC-BY-NC, Meta / aiOla), copied in
+# verbatim so the licence headers and the upstream diff stay readable.
+extend-exclude = ["open_asr_leaderboard", "src/models/drax"]
 
 [tool.ruff.lint]
 select = [
@@ -60,6 +64,29 @@ select = [
     "N",   # pep8-naming
     "RUF", # ruff-specific rules (unused noqa, etc.)
 ]
+ignore = [
+    # `import torch.nn.functional as F` is the universal torch convention; renaming it
+    # would make every model file read unlike every other codebase.
+    "N812",
+]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
+
+[tool.ruff.lint.isort]
+known-first-party = ["src", "scripts"]
+# `src.constants` sets HF_HOME and puts the leaderboard submodule on sys.path, and
+# huggingface resolves its cache at *import* time — so it has to be imported before
+# transformers. Its own section keeps it above third-party without anyone hand-sorting,
+# and without pushing the import down into a function body.
+section-order = [
+    "future",
+    "standard-library",
+    "bootstrap",
+    "third-party",
+    "first-party",
+    "local-folder",
+]
+
+[tool.ruff.lint.isort.sections]
+bootstrap = ["src.constants"]

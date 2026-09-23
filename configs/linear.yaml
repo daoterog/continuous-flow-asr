@@ -1,0 +1,10 @@
+# Linear interpolant, no audio decoder: I_t = (1-t) x0 + t x1.
+# The denoiser still hears the audio through cross-attention; what is absent is mu, the
+# audio-only prior that would pull the field toward a transcript on its own.
+_base_: base.yaml
+
+model:
+  audio_decoder: null
+
+flow:
+  gamma: null

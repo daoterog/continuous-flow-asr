@@ -1,0 +1,194 @@
+"""The time reparameterization: tau, its inverse, and the corruption sweep behind it.
+
+Not metrics, though it is measured with one. ``BinnedTokenError`` reports P_e(t); this
+module turns a P_e curve into tau (Eq. 25), inverts it, and hands training and the
+sampler the same u -> t map. Two curves can feed it:
+
+  * the model-free corruption sweep below — what the interpolant alone does to a target,
+    available before a single step of training;
+  * the model's own P_e, via ``refresh_tau`` — which moves left as the denoiser learns to
+    read the audio and recovers tokens the corrupted field alone could not.
+"""
+
+from collections.abc import Callable
+from typing import TYPE_CHECKING
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+
+if TYPE_CHECKING:
+    from src.metrics import BinnedTokenError
+
+
+def argmax_threshold(vocab_size: int) -> float:
+    """The t above which the interpolant's argmax starts recovering the true token.
+
+    The crossover sits where the signal beats the largest of V draws from N(0, 1-t):
+    t/(1-t) > E[max], i.e. t > E[max]/(1 + E[max]). sqrt(2 ln V) is the leading-order
+    term and runs a little high — measured, E[max] is 4.24 at V=51,866 against a
+    predicted 4.66.
+    """
+    e_max = np.sqrt(2 * np.log(vocab_size))
+    return float(e_max / (1 + e_max))
+
+
+@torch.no_grad()
+def corrupt_and_decode(
+    tokens: torch.Tensor, vocab_size: int, t: float, chunk: int = 8
+) -> torch.Tensor:
+    """The interpolant with no model in the loop: argmax of (1-t)*x0 + t*x1.
+
+    Per canvas position the true slot lands at t + (1-t)*N(0,1) and each of the other
+    V-1 slots at (1-t)*N(0,1). argmax recovers the token only when the spike beats the
+    largest of those V-1 draws, which sits near sqrt(2 ln V) — about 4.2 at Whisper's
+    full vocabulary.
+
+    Chunked because a (B, 160, 51866) float field is ~132 MB per 4 sequences, and
+    randn_like allocates a second one.
+    """
+    out = []
+    for i in range(0, tokens.size(0), chunk):
+        x1 = F.one_hot(tokens[i : i + chunk], vocab_size).float()
+        out.append(((1 - t) * torch.randn_like(x1) + t * x1).argmax(dim=-1))
+    return torch.cat(out)
+
+
+@torch.no_grad()
+def sweep_corruption(
+    tokens: torch.Tensor, vocab_size: int, ts: list[float], chunk: int = 8
+) -> list[float]:
+    """Token recovery under pure corruption, one value per t in `ts`.
+
+    This is the prior tau is built from before any training: how much of the transcript
+    survives the interpolant alone. Feed the result straight to ``make_tau_inverse``.
+    """
+    recovery = []
+    for t in ts:
+        noisy = corrupt_and_decode(tokens, vocab_size, t, chunk=chunk)
+        recovery.append((noisy == tokens).float().mean().item())
+    return recovery
+
+
+def tau_from_recovery(recovery: np.ndarray | list[float], vocab_size: int) -> np.ndarray:
+    """Eq. 25: tau(t) = 1 - P_e(t)/P_e(0), cumulative decoding progress in [0, 1].
+
+    P_e(0) = (V-1)/V because an argmax over pure noise is right 1/V of the time, so the
+    1/P_e(0) here is the paper's |V|/(|V|-1). Forced monotone: tau has to be invertible
+    and the measured curve is a finite sample.
+    """
+    recovery = np.asarray(recovery, dtype=np.float64)
+    p_e = 1.0 - recovery
+    p_e0 = 1.0 - 1.0 / vocab_size
+    tau = np.clip(1.0 - p_e / p_e0, 0.0, 1.0)
+    return np.maximum.accumulate(tau)
+
+
+def make_tau_inverse(
+    ts: np.ndarray | list[float],
+    recovery: np.ndarray | list[float],
+    vocab_size: int,
+    flat_eps: float = 1e-3,
+) -> Callable:
+    """Build t = tau^-1(u), the map from a uniform draw to a flow time.
+
+    This is the INVERSE of Eq. 25. The paper samples t such that tau(t) ~ U[0,1], so what
+    training and the generation grid both need is u -> t, not t -> tau.
+
+    Two details the naive inversion gets wrong:
+      * tau is ~0 across the whole dead zone (t < ~0.65 at Whisper's vocabulary). Keeping
+        the LAST t of each flat run makes tau^-1(0) the right edge of that zone instead
+        of spreading samples linearly across a region where nothing is decided.
+      * a finite sample makes tau wobble by ~1e-4 down there, and those wobbles survive
+        the monotone fix as genuine-looking steps; flat_eps clamps them to exactly 0.
+
+    The returned callable carries `tau`, `ts` and `knots` as attributes, for plotting and
+    for ``schedule_bin_edges``.
+
+    A tensor argument is interpolated on its own device. Training calls this once per
+    step, so routing it through numpy would mean a device-to-host copy — and therefore a
+    full CUDA sync, blocking on every kernel still in flight — inside the hot loop.
+    """
+    ts = np.asarray(ts, dtype=np.float64)
+    tau = tau_from_recovery(recovery, vocab_size)
+    tau[tau < flat_eps] = 0.0
+
+    keep = np.concatenate([np.diff(tau) > 0, [True]])  # last index of every flat run
+    tau_k, t_k = tau[keep], ts[keep]
+    knots: dict[tuple, tuple[torch.Tensor, torch.Tensor]] = {}  # uploaded once per device
+
+    def _knots_on(device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+        if device not in knots:
+            # float64 so the interpolation matches np.interp to ~1e-9 rather than the
+            # ~4e-5 float32 accumulates; it is a handful of values, so the cost is nil.
+            knots[device] = (
+                torch.as_tensor(tau_k, dtype=torch.float64, device=device),
+                torch.as_tensor(t_k, dtype=torch.float64, device=device),
+            )
+        return knots[device]
+
+    def tau_inverse(u: np.ndarray | torch.Tensor) -> np.ndarray | torch.Tensor:
+        """Map u: (B,) uniform in [0, 1] to t: (B,) flow times."""
+        if not torch.is_tensor(u):
+            return np.interp(np.asarray(u), tau_k, t_k)
+
+        xk, yk = _knots_on(u.device)
+        if xk.numel() == 1:  # tau never rises: every draw lands on the one knot
+            return torch.full_like(u, float(t_k[0]))
+
+        # Piecewise-linear, matching np.interp including its clamp outside the knots:
+        # below the first knot w goes negative and above the last it exceeds 1, and the
+        # clamp pins both to the endpoint values.
+        x = u.detach().double()
+        idx = torch.searchsorted(xk, x.contiguous(), right=True).clamp(1, xk.numel() - 1)
+        lo, hi = xk[idx - 1], xk[idx]
+        w = ((x - lo) / (hi - lo).clamp_min(torch.finfo(torch.float64).tiny)).clamp(0, 1)
+        return torch.lerp(yk[idx - 1], yk[idx], w).to(u.dtype)
+
+    tau_inverse.tau = tau
+    tau_inverse.ts = ts
+    tau_inverse.knots = (tau_k, t_k)
+    return tau_inverse
+
+
+def generation_grid(tau_inverse: Callable, num_steps: int) -> np.ndarray:
+    """t_n = tau^-1(n/N) — the sampler's schedule, uniform in tau rather than in t.
+
+    Training and generation have to share this. Once the model is trained under the
+    reparameterization it has seen almost nothing below the dead zone, so integrating on
+    a uniform-in-t grid afterwards would run it far out of distribution.
+
+    Note this is schedule_bin_edges(tau_inverse, num_steps): the sampler's grid and the
+    metrics' bin edges are the same construction, which is why one bin is one step.
+    """
+    return tau_inverse(np.linspace(0.0, 1.0, num_steps + 1))
+
+
+def refresh_tau(
+    metric: "BinnedTokenError", vocab_size: int, min_recovery: float = 0.05
+) -> Callable:
+    """Re-derive tau^-1 from the model's own P_e instead of the corruption prior.
+
+    The sweep's tau is what the interpolant does to a target with no model involved. Once
+    the denoiser can read the audio it recovers tokens the corrupted field alone could
+    not, so its P_e curve — and the schedule that should follow from it — moves left.
+    Bins with no samples are dropped; under an existing reparameterization the low-t bins
+    are empty by construction.
+
+    Takes the live metric rather than a history snapshot: that is what is in hand at
+    ``on_validation_epoch_end``, and it is the same numbers.
+    """
+    seen = metric.seen().detach().cpu().numpy()
+    ts_seen = metric.bin_centers().numpy()[seen]
+    rec_seen = metric.recovery().detach().cpu().numpy()[seen]
+    if rec_seen.size == 0 or rec_seen.max() < min_recovery:
+        raise ValueError(
+            f"the model recovers at most {rec_seen.max() if rec_seen.size else 0:.3f} of "
+            f"tokens in any bin.\nP_e is flat at 1, so tau would be 0 everywhere and the "
+            f"schedule would collapse onto t=1.\nTrain further before refreshing, or lower "
+            f"min_recovery if that is deliberate."
+        )
+    # tau is defined on [0, 1]; pin the endpoints so the inverse stays total.
+    ts_full = np.concatenate([[0.0], ts_seen, [1.0]])
+    rec_full = np.concatenate([[1.0 / vocab_size], rec_seen, [1.0]])
+    return make_tau_inverse(ts_full, rec_full, vocab_size)

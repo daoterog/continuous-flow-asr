@@ -1,0 +1,200 @@
+"""Everything that writes metrics to the logger, kept out of the model.
+
+`MetricReporting` is a mixin for a LightningModule: it owns the metric bank, updates it
+each batch, and at each epoch end emits the scalars and the per-bin histograms. It leans
+on `self.log`, `self.logger`, `self.trainer` and `self.current_epoch`, so it only works
+mixed into a LightningModule and must come before it in the bases.
+"""
+
+from collections.abc import Callable
+
+import numpy as np
+import torch
+import wandb
+from lightning.pytorch.loggers import WandbLogger
+from torch import nn
+from transformers import WhisperTokenizerFast
+
+from src.dataset import VocabMap
+
+from .base import TimeBinnedMetric
+from .utils import check_metrics, edge_values, make_metrics, section_for, split_key
+
+
+class MetricReporting:
+    """Metric bank plus the logging hooks, mixed into a LightningModule.
+
+    Keys come out as `{model}_{metric}/{split}_{stat}` so one wandb section is one metric
+    of one model, with train and val next to each other.
+    """
+
+    metrics: nn.ModuleDict
+    names: tuple[str, ...]
+
+    def init_metrics(
+        self,
+        names: tuple[str, ...],
+        tokenizer: WhisperTokenizerFast,
+        pad_id: int,
+        vocab_map: VocabMap | None = None,
+        sample_t_fn: Callable | None = None,
+        **bins: int | dict | None,
+    ) -> None:
+        """Build and validate the metric bank. Call once, from `__init__`."""
+        self.names = tuple(names)
+        self.metrics = make_metrics(
+            self.names,
+            tokenizer,
+            pad_id,
+            vocab_map,
+            sample_t_fn=sample_t_fn,
+            **bins,
+        )
+        check_metrics(self.metrics, sample_t_fn)
+
+    def update_metrics(
+        self, out: dict, target_ids: torch.Tensor, t: torch.Tensor, split: str
+    ) -> None:
+        """Feed one batch's per-model records to every metric of this split.
+
+        Each metric is fed `metric.update(*(record[k] for k in metric.inputs))`, so this
+        never has to know what a metric is.
+        """
+        for name in self.names:
+            record = {
+                "pred_ids": out[name]["pred_ids"],
+                "target_ids": target_ids,
+                "loss_per_seq": out[name]["loss_per_seq"],
+                "t": t,
+            }
+            for key, metric in self.metrics.items():
+                if key.startswith(f"{split}_{name}_"):
+                    metric.update(*(record[k] for k in metric.inputs))
+
+    def log_losses(self, loss: torch.Tensor, out: dict, split: str, batch_size: int) -> None:
+        """The objective and each model's term, on the same `{section}/{split}` shape."""
+        self.log(
+            f"total_loss/{split}", loss, on_step=False, on_epoch=True, batch_size=batch_size
+        )
+        for name in self.names:
+            self.log(
+                f"{name}_loss/{split}",
+                out[name]["loss"],
+                on_step=False,
+                on_epoch=True,
+                batch_size=batch_size,
+            )
+
+    def flush_metrics(self, split: str) -> None:
+        """Emit one split's scalars and histograms, then reset it for the next epoch."""
+        for key, metric in self.metrics.items():
+            if not key.startswith(f"{split}_"):
+                continue
+            section = section_for(key)
+            self.log(f"{section}/{split}_overall", metric.overall())
+            low, high = edge_values(metric)
+            if low is not None:
+                self.log(f"{section}/{split}_low_t", low)
+                self.log(f"{section}/{split}_high_t", high)
+            self._log_bins(f"{section}/{split}_bins", metric)
+            metric.reset()
+
+    def _log_bins(self, key: str, metric: TimeBinnedMetric) -> None:
+        """Send one metric's per-bin values to wandb as a histogram over the bin index.
+
+        `np_histogram=(values, edges)` hands wandb the bars directly rather than letting
+        it re-bin. The edges are the bin *index*, 0..num_bins, not t: schedule bins are
+        quantiles of t, so their widths differ by an order of magnitude and a to-scale t
+        axis crushes the whole populated region into a sliver near t=1. Equal widths also
+        mean equal sample counts per bar, which is the honest weighting. The t each bar
+        covers goes to the run summary once, via `_log_bin_edges`.
+
+        Empty bins are reported as 0 because a histogram needs a contiguous edge array.
+        Under schedule bins every bin is populated by construction, so this is rare.
+        """
+        # Lightning suppresses `self.log` during the sanity-check pass but not a direct
+        # experiment.log, which would prepend a two-batch epoch to every panel.
+        if not isinstance(self.logger, WandbLogger) or self.trainer.sanity_checking:
+            return
+        num_bins = metric.num_bins
+        if num_bins > wandb.Histogram.MAX_LENGTH:
+            raise ValueError(
+                f"{key} has {num_bins} bins; wandb histograms cap at "
+                f"{wandb.Histogram.MAX_LENGTH}. Lower metrics.*_bins."
+            )
+        edges = np.arange(num_bins + 1, dtype=float)
+        values = metric.compute().detach().cpu().numpy()
+        values = np.where(metric.seen().detach().cpu().numpy(), values, 0.0)
+        # commit=False buffers the histogram into whatever step is open instead of
+        # opening a new one. An explicit step here would land behind the counter
+        # Lightning has already advanced, and wandb drops out-of-order data; letting our
+        # log drive the counter instead would make Lightning's next write the late one.
+        self.logger.experiment.log(
+            {
+                key: wandb.Histogram(np_histogram=(values.tolist(), edges.tolist())),
+                "epoch": self.current_epoch,
+            },
+            commit=False,
+        )
+
+    def _define_bin_metrics(self) -> None:
+        """Plot the histogram panels against the epoch, not the global step.
+
+        One histogram per epoch is the natural x-axis for these, and it keeps them off
+        the step counter that train and val writes share.
+        """
+        if not isinstance(self.logger, WandbLogger):
+            return
+        self.logger.experiment.define_metric("epoch")
+        # define_metric globs are suffix-only ("prefix*"), and the histograms sit at the
+        # tail of each section's key — so declare them one by one. All are known here.
+        for key in self.metrics:
+            split, _, _ = split_key(key)
+            self.logger.experiment.define_metric(
+                f"{section_for(key)}/{split}_bins", step_metric="epoch"
+            )
+        self._log_bin_edges()
+
+    def _log_bin_edges(self) -> None:
+        """Record which t each histogram bar covers.
+
+        The bars are indexed 0..num_bins, so the t edges have to live somewhere or the
+        panel cannot be read back in flow time. They are fixed geometry for the whole
+        run, so the summary is the right place.
+        """
+        if not isinstance(self.logger, WandbLogger):
+            return
+        for key, metric in self.metrics.items():
+            split, _, _ = split_key(key)
+            where = f"{section_for(key)}/{split}"
+            self.logger.experiment.summary[f"bin_edges/{where}"] = (
+                metric.bin_edges().tolist()
+            )
+            self.logger.experiment.summary[f"bin_centers/{where}"] = (
+                metric.bin_centers().tolist()
+            )
+
+    def on_fit_start(self) -> None:
+        """Declare the histogram panels' step metric before anything is logged."""
+        super().on_fit_start()
+        self._define_bin_metrics()
+
+    def on_test_start(self) -> None:
+        """Same, for a `trainer.test()` that did not go through `fit`."""
+        super().on_test_start()
+        self._define_bin_metrics()
+
+    def on_train_epoch_end(self) -> None:
+        """Flush the train metrics."""
+        super().on_train_epoch_end()
+        self.flush_metrics("train")
+
+    def on_validation_epoch_end(self) -> None:
+        """Flush the val metrics."""
+        super().on_validation_epoch_end()
+        self.flush_metrics("val")
+
+    def on_test_epoch_end(self) -> None:
+        """Flush the test metrics."""
+        super().on_test_epoch_end()
+        self.flush_metrics("test")

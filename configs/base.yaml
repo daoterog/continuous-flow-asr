@@ -1,0 +1,108 @@
+# Defaults shared by every run. The variant files next to this one set `_base_: base.yaml`
+# and override only what differs. Anything here is also settable on the command line:
+#   python train.py --config configs/linear.yaml train.num_epochs=10 data.batch_size=16
+
+seed: 0
+
+# Which variant this is, uploaded as a hyperparameter so runs group and filter by it.
+# Left null it is filled in from the config file's stem.
+variant: null
+
+data:
+  # `local` -> ./data, `snellius` -> /scratch-shared/cont-flow-asr/data. data_root wins.
+  env: local
+  data_root: null
+  # The checkpoint the features were precomputed with; names the cache directory.
+  model: openai/whisper-large-v3
+
+  canvas_len: 96
+  # mean-pool the 1500 Whisper frames: stride 4 makes them 80 ms and cuts the
+  # cross-attention keys 4x.
+  audio_stride: 4
+  batch_size: 32
+  compact_vocab: true
+  num_workers: 4
+
+  # One role = configs x splits, the same cross product the precompute scripts take.
+  # Overridable as --train-configs / --train-splits / --val-configs / ... on the CLI.
+  splits:
+    train: {configs: [clean], splits: [train.100]}
+    val:   {configs: [clean], splits: [validation]}
+    test:  {configs: [clean], splits: [test]}
+
+  # Cap per role, applied after the canvas-length filter. null means all of it.
+  subset_n:
+    train: 2000
+    val: null
+    test: null
+
+model:
+  denoiser:
+    hidden_size: 256
+    cond_dim: 64
+    n_heads: 4
+    n_blocks: 4
+    dropout: 0.1
+    # whisper_dim defaults to the large-v3 encoder width (1280).
+  # null drops mu entirely; the audio-conditioned variants fill this in.
+  audio_decoder: null
+
+flow:
+  # I_t = alpha(t) x0 + beta(t) x1 [+ gamma(t) mu]
+  alpha: linear_down          # 1 - t
+  beta: linear_up             # t
+  gamma: null                 # linear_down, or {type: parabola, c: 0.5}
+  stop_grad_mu: true
+  mu_loss_weight: 1.0
+
+schedule:
+  # Draw t through tau^-1 rather than uniformly. Off, ~65% of every batch lands below the
+  # dead zone where x_t carries nothing.
+  enabled: true
+  sweep_n: 1024                 # utterances in the model-free corruption sweep
+  num_bins: 100               # resolution of the measured P_e curve
+
+metrics:
+  loss_bins: 10
+  perr_bins: 10
+  # WER needs a decode per batch, so it is off on train by default.
+  wer_bins: {train: 0, val: 10, test: 10}
+
+train:
+  num_epochs: 50
+  denoiser_lr: 1.0e-2
+  audio_decoder_lr: 1.0e-2
+  weight_decay: 0.0
+  grad_clip: 1.0
+  accelerator: auto
+  devices: 1
+  precision: null
+  fast_dev_run: false
+  log_every_n_steps: 50
+
+  # TF32 for fp32 matmuls. Measured on a 3060 at batch 32, ms/step:
+  #   16-mixed  highest 38.5 | high 43.4      <- under AMP the matmuls are already fp16,
+  #   32-true   highest 47.9 | high 43.0         so TF32 only slows the fp32 tail
+  # So: leave `highest` with 16-mixed, switch to `high` if you run 32-true. Lightning
+  # prints an info line recommending `high` whenever this is `highest`; it is advice for
+  # fp32 training and is measurably wrong for this model under AMP.
+  matmul_precision: highest
+
+  # Moderate reproducibility: seed_everything(workers=True) fixes init, data order, the
+  # t draws and each worker's RNG, so runs line up. Bit-exact GPU reductions would need
+  # deterministic=true, which measured ~7-10% slower for no benefit we need.
+  deterministic: false
+  # Only tunes convolution algorithms, and neither model has a conv layer — inert here.
+  benchmark: false
+
+logging:
+  # The wandb team runs belong to. Pinned rather than left to the account default, so a
+  # run from another machine or a CI job lands in the same place.
+  entity: cont-flow-asr-
+  project: continuous-flow-asr
+  # null lets wandb generate the run name; the variant is carried in `variant` above.
+  name: null
+  # Runs of the same variant share a group, so repeats and seeds sit together.
+  group: null
+  offline: false              # or pass --offline
+  save_dir: runs

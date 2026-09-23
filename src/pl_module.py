@@ -1,0 +1,227 @@
+"""The flow-matching LightningModule: interpolant, objective and optimizers.
+
+Everything that reports numbers to a logger lives in `src.metrics.reporting`, and the
+metric bank is built by `src.metrics.utils`.
+"""
+
+from collections.abc import Callable
+
+import lightning.pytorch as pl
+import torch
+import torch.nn.functional as F
+from omegaconf import DictConfig, OmegaConf
+from transformers import WhisperTokenizerFast
+
+from src.dataset import VocabMap
+from src.metrics.reporting import MetricReporting
+from src.models import build_audio_decoder, build_denoiser
+
+
+def make_schedule(spec: DictConfig | dict | str | None) -> Callable | None:
+    """Turn a named coefficient schedule into alpha_fn / beta_fn / gamma_fn.
+
+    The three variants are:
+      * `linear_up`   -> t          (beta, the weight on the one-hot target)
+      * `linear_down` -> 1 - t      (alpha on the noise; gamma in the audio-conditioned run)
+      * `parabola`    -> 4c t (1-t) (gamma in the three-term run, peaking at c)
+
+    None means the term is absent, which is how the linear variant drops mu entirely.
+    """
+    if spec is None:
+        return None
+    if isinstance(spec, str):
+        spec = {"type": spec}
+    spec = OmegaConf.to_container(spec) if isinstance(spec, DictConfig) else dict(spec)
+    kind = spec.pop("type")
+
+    if kind == "linear_up":
+        return lambda t: t
+    if kind == "linear_down":
+        return lambda t: 1 - t
+    if kind == "parabola":
+        c = spec.pop("c", 0.5)
+        return lambda t: 4 * c * t * (1 - t)
+    raise ValueError(
+        f"unknown schedule {kind!r}; expected linear_up, linear_down or parabola"
+    )
+
+
+class FlowMatching(MetricReporting, pl.LightningModule):
+    """Continuous flow matching over the token simplex, conditioned on Whisper latents.
+
+    Everything stays continuous: x1 is the one-hot target read as a point on the simplex,
+    x0 is Gaussian, and I_t is their interpolation. DRAX's Transformer takes that directly
+    — a 3D x_t goes through `x_t @ vocab_embed.weight` instead of an embedding lookup — so
+    the continuous field never has to be discretised.
+
+    MetricReporting comes first in the bases so its Lightning hooks win the MRO.
+    """
+
+    def __init__(
+        self,
+        cfg: DictConfig,
+        vocab_size: int,
+        pad_id: int,
+        audio_dim: int,
+        canvas_len: int,
+        tokenizer: WhisperTokenizerFast,
+        vocab_map: VocabMap | None = None,
+        sample_t_fn: Callable | None = None,
+    ) -> None:
+        """Build both models, the interpolant coefficients and the metric bank.
+
+        sample_t_fn maps a uniform draw to a flow time (tau^-1 from make_tau_inverse).
+        Left as None, t is uniform — which at this vocabulary spends most of every batch
+        below the dead zone, where x_t carries nothing and the denoiser can only hear the
+        audio.
+        """
+        super().__init__()
+        # tokenizer/vocab_map/sample_t_fn are objects, not hyperparameters: they would
+        # not survive a checkpoint round-trip and are rebuilt from the data instead.
+        self.save_hyperparameters(
+            ignore=["tokenizer", "vocab_map", "sample_t_fn"], logger=False
+        )
+        self.cfg = cfg
+        self.vocab_size = vocab_size
+        self.pad_id = pad_id
+        self.sample_t_fn = sample_t_fn
+
+        self.denoiser = build_denoiser(cfg.model.denoiser, vocab_size)
+        self.mu_nn = (
+            build_audio_decoder(cfg.model.audio_decoder, vocab_size, canvas_len)
+            if cfg.model.get("audio_decoder") is not None
+            else None
+        )
+
+        flow = cfg.flow
+        self.alpha_fn = make_schedule(flow.get("alpha", "linear_down"))
+        self.beta_fn = make_schedule(flow.get("beta", "linear_up"))
+        self.gamma_fn = make_schedule(flow.get("gamma"))
+        self.stop_grad_mu = bool(flow.get("stop_grad_mu", True))
+        self.mu_loss_weight = float(flow.get("mu_loss_weight", 1.0))
+
+        if self.gamma_fn is not None and self.mu_nn is None:
+            raise ValueError(
+                "flow.gamma is set but model.audio_decoder is absent — the third "
+                "interpolant term needs a mu to weight"
+            )
+
+        self.init_metrics(
+            ("denoiser", "mu") if self.mu_nn is not None else ("denoiser",),
+            tokenizer,
+            pad_id,
+            vocab_map,
+            sample_t_fn=sample_t_fn,
+            loss_bins=cfg.metrics.get("loss_bins", 10),
+            perr_bins=cfg.metrics.get("perr_bins", 10),
+            wer_bins=OmegaConf.to_container(cfg.metrics.get("wer_bins", {})) or None,
+        )
+
+    def make_interpolant(
+        self, x1: torch.Tensor, t: torch.Tensor, mu: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """I_t = alpha(t) x0 + beta(t) x1 [+ gamma(t) mu], broadcast over (B, L, V)."""
+        x0 = torch.randn_like(x1)
+        i_t = self.alpha_fn(t)[:, None, None] * x0 + self.beta_fn(t)[:, None, None] * x1
+        if self.gamma_fn is not None and mu is not None:
+            if self.stop_grad_mu:
+                mu = mu.detach()
+            i_t = i_t + self.gamma_fn(t)[:, None, None] * mu
+        return i_t
+
+    @staticmethod
+    def sequence_ce(logits: torch.Tensor, tokens: torch.Tensor) -> torch.Tensor:
+        """(B,) cross-entropy, one value per row instead of a batch scalar.
+
+        Its mean equals F.cross_entropy(..., reduction="mean") because every row is
+        exactly canvas_len wide, so the training signal is unchanged — but keeping the
+        per-row values is what lets BinnedLoss attribute a loss to the t that produced it.
+        """
+        b, _, vocab_size = logits.shape
+        per_token = F.cross_entropy(
+            logits.reshape(-1, vocab_size), tokens.reshape(-1), reduction="none"
+        )
+        return per_token.view(b, -1).mean(dim=1)
+
+    def flow_step(self, batch: dict) -> tuple[torch.Tensor, dict, torch.Tensor]:
+        """One forward pass: the objective, the per-model records, and the t that drew it.
+
+        Lightning has already moved the batch to the right device, so nothing here calls
+        `.to()`. Losses stay as tensors — `.item()` every step forces a GPU sync.
+        """
+        audio = batch["audio"].float()
+        tokens = batch["tokens"]
+        x1 = F.one_hot(tokens, self.vocab_size).float()
+
+        out = {}
+        mu = None
+        if self.mu_nn is not None:
+            mu_logits = self.mu_nn(audio)
+            mu = F.softmax(mu_logits, dim=-1)
+            mu_loss_per_seq = self.sequence_ce(mu_logits, tokens)
+            out["mu"] = {
+                "loss": mu_loss_per_seq.mean(),
+                "loss_per_seq": mu_loss_per_seq,
+                "pred_ids": mu_logits.argmax(dim=-1),
+            }
+
+        u = torch.rand(tokens.size(0), device=self.device)
+        t = u if self.sample_t_fn is None else self.sample_t_fn(u)
+        i_t = self.make_interpolant(x1=x1, t=t, mu=mu)
+
+        logits = self.denoiser(x_t=i_t, time=t, audio_embeddings=audio)
+        d_loss_per_seq = self.sequence_ce(logits, tokens)
+        out["denoiser"] = {
+            "loss": d_loss_per_seq.mean(),
+            "loss_per_seq": d_loss_per_seq,
+            "pred_ids": logits.argmax(dim=-1),
+        }
+
+        loss = out["denoiser"]["loss"]
+        if self.mu_nn is not None:
+            loss = loss + self.mu_loss_weight * out["mu"]["loss"]
+        return loss, out, t
+
+    def _step(self, batch: dict, split: str) -> torch.Tensor:
+        loss, out, t = self.flow_step(batch)
+        self.log_losses(loss, out, split, batch_size=batch["tokens"].size(0))
+        self.update_metrics(out, batch["tokens"], t, split)
+        return loss
+
+    def training_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
+        """One optimizer step."""
+        return self._step(batch, "train")
+
+    def validation_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
+        """One validation batch."""
+        return self._step(batch, "val")
+
+    def test_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
+        """One test batch. Only reached through an explicit `trainer.test()`."""
+        return self._step(batch, "test")
+
+    def configure_optimizers(self) -> dict:
+        """AdamW with a per-model LR group, plus OneCycleLR stepped every batch.
+
+        `estimated_stepping_batches` already accounts for epochs, accumulation and the
+        drop_last on the training loader, so the schedule cannot run past the run.
+        """
+        train = self.cfg.train
+        groups = [{"params": self.denoiser.parameters(), "lr": train.denoiser_lr}]
+        max_lr = [train.denoiser_lr]
+        if self.mu_nn is not None:
+            groups.append(
+                {"params": self.mu_nn.parameters(), "lr": train.audio_decoder_lr}
+            )
+            max_lr.append(train.audio_decoder_lr)
+
+        optimizer = torch.optim.AdamW(groups, weight_decay=train.get("weight_decay", 0.0))
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer,
+            max_lr=max_lr if len(max_lr) > 1 else max_lr[0],
+            total_steps=int(self.trainer.estimated_stepping_batches),
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {"scheduler": scheduler, "interval": "step"},
+        }

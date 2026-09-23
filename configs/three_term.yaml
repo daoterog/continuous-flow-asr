@@ -1,0 +1,15 @@
+# Three-term endpoint: I_t = (1-t) x0 + t x1 + 4c t(1-t) mu.
+# mu peaks at t = 0.5 (height c) and vanishes at both ends, so it informs the middle of
+# the path without displacing either endpoint.
+_base_: base.yaml
+
+model:
+  audio_decoder:
+    hidden: 256
+    n_heads: 4
+    n_blocks: 2
+
+flow:
+  gamma: {type: parabola, c: 0.5}
+  stop_grad_mu: true
+  mu_loss_weight: 1.0

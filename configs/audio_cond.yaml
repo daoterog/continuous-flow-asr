@@ -1,0 +1,14 @@
+# Audio-conditioned endpoint: I_t = (1-t) x0 + t x1 + (1-t) mu.
+# gamma decays as the target takes over, so mu carries the low-t end where x_t is noise.
+_base_: base.yaml
+
+model:
+  audio_decoder:
+    hidden: 256
+    n_heads: 4
+    n_blocks: 2
+
+flow:
+  gamma: linear_down
+  stop_grad_mu: true
+  mu_loss_weight: 1.0
