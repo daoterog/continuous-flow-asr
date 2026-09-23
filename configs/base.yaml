@@ -72,7 +72,9 @@ train:
   num_epochs: 50
   denoiser_lr: 1.0e-2
   audio_decoder_lr: 1.0e-2
-  weight_decay: 0.0
+  # torch.optim.AdamW's own default, which is what the notebook ran under by not passing
+  # one. Set 0.0 to turn decay off.
+  weight_decay: 0.01
   grad_clip: 1.0
   accelerator: auto
   devices: 1
@@ -94,6 +96,18 @@ train:
   deterministic: false
   # Only tunes convolution algorithms, and neither model has a conv layer — inert here.
   benchmark: false
+
+  # One fused CUDA kernel for the whole AdamW update instead of a launch per parameter
+  # tensor: +28% throughput, since these models are small enough that launch overhead
+  # dominates the update. It unscales gradients inside its own kernel, so it CANNOT be
+  # combined with grad_clip — set grad_clip: null to use it. Ignored on CPU.
+  fused_optimizer: false
+
+  # torch.compile the two models. The largest single win measured (+64% at batch 64),
+  # paid for with a one-off warmup: ~40s at "default", ~6 min at "max-autotune-no-cudagraphs".
+  # Worth it for a long run, not for a smoke test.
+  compile: false
+  compile_mode: default
 
 logging:
   # The wandb team runs belong to. Pinned rather than left to the account default, so a

@@ -111,9 +111,6 @@ def build_sample_t_fn(dm: AudioFeatureDataModule, cfg: DictConfig) -> object | N
         return None
     torch.manual_seed(cfg.seed)
     tokens = dm.sample_tokens("train", cfg.schedule.sweep_n, seed=cfg.seed)
-    # The sweep one-hots a (n, canvas, V) field once per t. On GPU that is ~35x faster
-    # and near-flat in n (0.3s -> 0.6s from 64 to 256 utts, against 5.2s -> 21.7s on
-    # CPU), which is what makes a large enough sweep to settle tau affordable.
     if torch.cuda.is_available():
         tokens = tokens.cuda()
     ts = np.linspace(0.0, 1.0, cfg.schedule.num_bins + 1).tolist()

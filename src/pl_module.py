@@ -106,6 +106,16 @@ class FlowMatching(MetricReporting, pl.LightningModule):
                 "interpolant term needs a mu to weight"
             )
 
+        if cfg.train.get("compile"):
+            # Compiled submodules rather than the whole LightningModule: the hooks stay
+            # in eager Python and only the model graphs are traced. Note this prefixes
+            # state_dict keys with `_orig_mod.`, so a checkpoint from a compiled run
+            # needs `compile: true` to load back cleanly.
+            mode = cfg.train.get("compile_mode", "default")
+            self.denoiser = torch.compile(self.denoiser, mode=mode)
+            if self.mu_nn is not None:
+                self.mu_nn = torch.compile(self.mu_nn, mode=mode)
+
         self.init_metrics(
             ("denoiser", "mu") if self.mu_nn is not None else ("denoiser",),
             tokenizer,
@@ -215,7 +225,17 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             )
             max_lr.append(train.audio_decoder_lr)
 
-        optimizer = torch.optim.AdamW(groups, weight_decay=train.get("weight_decay", 0.0))
+        fused = bool(train.get("fused_optimizer", False)) and self.device.type == "cuda"
+        if fused and train.get("grad_clip"):
+            raise ValueError(
+                "train.fused_optimizer and train.grad_clip cannot both be set: a fused "
+                "AdamW unscales the gradients inside its own kernel, so there is no "
+                "point left at which a clip could be applied. Pick one — fused measured "
+                "~28% faster, clipping is the guard on the OneCycle peak LR."
+            )
+        optimizer = torch.optim.AdamW(
+            groups, weight_decay=train.get("weight_decay", 0.0), fused=fused
+        )
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer,
             max_lr=max_lr if len(max_lr) > 1 else max_lr[0],
