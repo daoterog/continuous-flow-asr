@@ -33,9 +33,10 @@ class AudioFeatureDataset(Dataset):
     arithmetically).
     """
 
-    def __init__(self, audio_feature_dir: Path) -> None:
+    def __init__(self, audio_feature_dir: Path, audio_stride: int = 1) -> None:
         """Read every shard index under `audio_feature_dir` into one utterance table."""
         self.audio_feature_dir = Path(audio_feature_dir)
+        self.audio_stride = audio_stride
         self.index_paths = sorted(self.audio_feature_dir.glob("*.json"))
         if not self.index_paths:
             raise FileNotFoundError(f"no feature shards under {self.audio_feature_dir}")
@@ -79,14 +80,26 @@ class AudioFeatureDataset(Dataset):
         return self._shards[shard_idx]
 
     def __getitem__(self, idx: int) -> dict:
-        """One utterance: its (frames, d_model) latents and its raw transcript."""
+        """One utterance: its (frames, d_model) latents and its raw transcript.
+
+        Whisper frames are 20 ms; stride 4 makes them 80 ms, still well under a phoneme,
+        and it cuts the cross-attention keys 4x. The pool runs in float32 so the mean
+        does not accumulate in float16.
+        """
         shard_idx, offset, length, text = self.utts[idx]
         feats = self._feats(shard_idx)[offset : offset + length]
-        return {
-            # copy off the read-only mmap so the tensor owns its memory
-            "audio": torch.from_numpy(np.array(feats)),
-            "text": text,
-        }
+        # copy off the read-only mmap so the tensor owns its memory
+        audio = torch.from_numpy(np.array(feats))
+        if self.audio_stride > 1:
+            frames, d_model = audio.shape
+            keep = frames // self.audio_stride * self.audio_stride
+            audio = (
+                audio[:keep]
+                .view(keep // self.audio_stride, self.audio_stride, d_model)
+                .float()
+                .mean(dim=1)
+            )
+        return {"audio": audio, "text": text}
 
 
 class VocabMap:
@@ -130,7 +143,6 @@ def collate(
     tokenizer: WhisperTokenizerFast,
     canvas_len: int,
     vocab_map: VocabMap | None = None,
-    audio_stride: int = 1,
 ) -> dict[str, torch.Tensor]:
     """Tokenize onto the fixed canvas and stack the (frames, d_model) latents.
 
@@ -152,15 +164,9 @@ def collate(
     if vocab_map is not None:
         tokens = vocab_map.encode(tokens)
 
-    # every clip is 1500 frames now that the cache is untrimmed, so a plain stack does it
-    audio = torch.stack([b["audio"] for b in batch])
-    if audio_stride > 1:
-        # mean-pool along time. Whisper frames are 20 ms; stride 4 makes them 80 ms,
-        # still well under a phoneme, and it cuts the cross-attention keys 4x.
-        b, t, d = audio.shape
-        audio = audio.view(b, t // audio_stride, audio_stride, d).mean(dim=2)
-
-    return {"audio": audio, "tokens": tokens}
+    # every clip is the same length now that the cache is untrimmed, and the dataset has
+    # already pooled along time, so a plain stack does it
+    return {"audio": torch.stack([b["audio"] for b in batch]), "tokens": tokens}
 
 
 def expand_spec(configs: Iterable[str], splits: Iterable[str]) -> list[tuple[str, str]]:
@@ -285,7 +291,7 @@ class AudioFeatureDataModule(pl.LightningDataModule):
         dirs = resolve_role(
             self.data_root, self.model, spec["configs"], spec["splits"], role
         )
-        parts = [AudioFeatureDataset(d) for d in dirs]
+        parts = [AudioFeatureDataset(d, self.audio_stride) for d in dirs]
         d_models = {p.d_model for p in parts}
         if len(d_models) != 1:
             raise ValueError(f"role '{role}' mixes feature widths {d_models}")
@@ -370,7 +376,6 @@ class AudioFeatureDataModule(pl.LightningDataModule):
             tokenizer=self.tokenizer,
             canvas_len=self.canvas_len,
             vocab_map=self.vocab_map,
-            audio_stride=self.audio_stride,
         )
 
     def _loader(self, role: str, shuffle: bool) -> DataLoader:

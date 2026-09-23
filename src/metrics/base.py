@@ -129,8 +129,11 @@ def edit_counts(ref: str, pred: str) -> tuple[int, int]:
     return r["total"], r["ref_len"]
 
 
-def wer(refs: list[str], preds: list[str]) -> float:
+def corpus_wer(refs: list[str], preds: list[str]) -> float:
     """Percent corpus WER, the way scripts/score_eval.py's kaldialign column computes it.
+
+    Named `corpus_wer`, not `wer`: `src.metrics.wer` is the submodule holding BinnedWER,
+    and a function of that name would be unreachable through the package.
 
     Whisper's EnglishTextNormalizer folds case, strips punctuation, expands contractions
     and rewrites number words as digits, so it must be applied to both sides — and never

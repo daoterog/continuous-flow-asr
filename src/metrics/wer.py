@@ -1,11 +1,17 @@
 """Corpus WER binned by flow time."""
 
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 import torch
 from normalizer import data_utils
 
 from .base import Edges, TimeBinnedMetric, edit_counts, ids_to_text
+
+# EnglishTextNormalizer is the bulk of this metric's cost, and the references are the
+# same strings on every epoch. Only references go through the cache: predictions change
+# as the model trains, so caching them would evict the references and hold nothing.
+normalize_reference = lru_cache(maxsize=100_000)(data_utils.normalizer)
 
 if TYPE_CHECKING:
     from transformers import WhisperTokenizerFast
@@ -58,13 +64,19 @@ class BinnedWER(TimeBinnedMetric):
         preds = ids_to_text(pred_ids, self.tokenizer, self.pad_id, self.vocab_map)
         refs = ids_to_text(target_ids, self.tokenizer, self.pad_id, self.vocab_map)
 
+        # Accumulated in Python and added once: `self.errors[b] += ...` per row is two
+        # host-to-device round trips per utterance.
+        errors = [0.0] * self.num_bins
+        ref_words = [0.0] * self.num_bins
         for b, ref, pred in zip(self._bin_indices(t).tolist(), refs, preds, strict=True):
-            ref, pred = data_utils.normalizer(ref), data_utils.normalizer(pred)
+            ref, pred = normalize_reference(ref), data_utils.normalizer(pred)
             if not ref.strip():
                 continue
-            errors, ref_words = edit_counts(ref, pred)
-            self.errors[b] += errors
-            self.ref_words[b] += ref_words
+            e, n = edit_counts(ref, pred)
+            errors[b] += e
+            ref_words[b] += n
+        self.errors += torch.tensor(errors, device=self.errors.device)
+        self.ref_words += torch.tensor(ref_words, device=self.ref_words.device)
 
     def compute(self) -> torch.Tensor:
         """(num_bins,) percent WER; empty bins report 0."""

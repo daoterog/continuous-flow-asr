@@ -6,10 +6,10 @@ validates a bank of them, and `reporting` is the mixin that writes them to a log
 
 from .base import (
     TimeBinnedMetric,
+    corpus_wer,
     edit_counts,
     ids_to_text,
     schedule_bin_edges,
-    wer,
 )
 from .loss import BinnedLoss
 from .reporting import MetricReporting
@@ -32,6 +32,7 @@ __all__ = [
     "MetricReporting",
     "TimeBinnedMetric",
     "check_metrics",
+    "corpus_wer",
     "edge_values",
     "edit_counts",
     "ids_to_text",
@@ -39,5 +40,4 @@ __all__ = [
     "schedule_bin_edges",
     "section_for",
     "split_key",
-    "wer",
 ]
