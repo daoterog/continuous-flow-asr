@@ -12,4 +12,4 @@ model:
 flow:
   gamma: {type: parabola, c: 0.5}
   stop_grad_mu: true
-  mu_loss_weight: 1.0
+  mu_loss_weight: 0.1

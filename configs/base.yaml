@@ -53,7 +53,11 @@ flow:
   beta: linear_up             # t
   gamma: null                 # linear_down, or {type: parabola, c: 0.5}
   stop_grad_mu: true
-  mu_loss_weight: 1.0
+  # How hard mu's own cross-entropy is trained, NOT how much mu enters the flow (that is
+  # gamma). At 1.0 the auxiliary loss dominates the objective and starves the denoiser:
+  # measured on 64 memorised utterances, 1.0 gave 41% sampled WER and 0.1 gave 0.00%,
+  # with mu itself perfect either way. mu converges easily and does not need the weight.
+  mu_loss_weight: 0.1
 
 schedule:
   # Draw t through tau^-1 rather than uniformly. Off, ~65% of every batch lands below the
@@ -82,8 +86,11 @@ metrics:
 
 train:
   num_epochs: 50
-  denoiser_lr: 1.0e-2
-  audio_decoder_lr: 1.0e-2
+  # 1e-2 came from the notebook and is far too hot: on the overfit check it sat at
+  # loss 1.86 where 1e-3 reached 0.014. The optimum moves with the step count, since
+  # OneCycleLR derives its schedule from the total, so re-check it if epochs change a lot.
+  denoiser_lr: 1.0e-3
+  audio_decoder_lr: 1.0e-3
   # torch.optim.AdamW's own default, which is what the notebook ran under by not passing
   # one. Set 0.0 to turn decay off.
   weight_decay: 0.01

@@ -11,4 +11,4 @@ model:
 flow:
   gamma: linear_down
   stop_grad_mu: true
-  mu_loss_weight: 1.0
+  mu_loss_weight: 0.1

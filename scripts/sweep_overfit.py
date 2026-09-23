@@ -51,6 +51,8 @@ def build_grid(args: argparse.Namespace) -> list[dict]:
     }
     if args.mu_lrs:
         grid["train.audio_decoder_lr"] = args.mu_lrs
+    if len(args.n_utts) > 1:
+        grid["n_utts"] = args.n_utts
     for axis in args.grid or []:
         key, _, values = axis.partition("=")
         # YAML so `null` becomes None and `1.0` a float, matching the dotlist overrides.
@@ -62,8 +64,8 @@ def build_grid(args: argparse.Namespace) -> list[dict]:
     ]
 
 
-def base_overrides(args: argparse.Namespace) -> list[str]:
-    """The settings every job in the sweep shares."""
+def base_overrides(args: argparse.Namespace, n_utts: int) -> list[str]:
+    """The settings every job in the sweep shares, for one memorisation-set size."""
     return [
         # Point val at the SAME split as train, not base.yaml's held-out one. With the
         # same source, the same cap and the same seed the DataModule draws the identical
@@ -73,8 +75,8 @@ def base_overrides(args: argparse.Namespace) -> list[str]:
         f"data.splits.val.splits=[{','.join(args.train_splits)}]",
         f"data.splits.train.configs=[{','.join(args.train_configs)}]",
         f"data.splits.train.splits=[{','.join(args.train_splits)}]",
-        f"data.subset_n.train={args.n_utts}",
-        f"data.subset_n.val={args.n_utts}",
+        f"data.subset_n.train={n_utts}",
+        f"data.subset_n.val={n_utts}",
         # WER on train too: with val == train it is the same number, but if the identity
         # ever breaks, the two disagreeing is the signal.
         "metrics.wer_bins.train=10",
@@ -96,7 +98,7 @@ def base_overrides(args: argparse.Namespace) -> list[str]:
         "sampling.enabled=true",
         f"sampling.num_steps={args.sample_steps}",
         f"sampling.every_n_epochs={args.val_every}",
-        f"sampling.n_utts={args.n_utts}",
+        f"sampling.n_utts={min(n_utts, 128)}",
         f"logging.project={args.project}",
         f"logging.group={args.group}",
     ] + ([f"logging.entity={args.entity}"] if args.entity else [])
@@ -118,6 +120,9 @@ def job_name(combo: dict) -> str:
     if "train.audio_decoder_lr" in combo:
         name += f"-mu{combo['train.audio_decoder_lr']:g}"
     known = {"variant", "train.denoiser_lr", "train.audio_decoder_lr", "schedule.enabled"}
+    if "n_utts" in combo:
+        name += f"-n{combo['n_utts']}"
+        known.add("n_utts")
     for key, value in combo.items():
         if key not in known:
             name += f"-{key.rsplit('.', 1)[-1]}={value}"
@@ -212,7 +217,9 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, l
                    help="corpus config(s) the memorisation set is drawn from")
     p.add_argument("--train-splits", nargs="+", default=["train.100"],
                    help="split(s) the memorisation set is drawn from; val reuses these")
-    p.add_argument("--n-utts", type=int, default=64, help="utterances to memorise")
+    p.add_argument("--n-utts", type=int, nargs="+", default=[64],
+                   help="utterances to memorise; several values sweep it as an axis, "
+                        "which is how to make the task hard enough for mu to matter")
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--epochs", type=int, default=400)
     p.add_argument("--val-every", type=int, default=20, help="epochs between validations")
@@ -241,7 +248,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     combos = build_grid(args)
 
     print(f"{len(combos)} jobs, {args.parallel} at a time, {args.epochs} epochs on "
-          f"{args.n_utts} utterances")
+          f"{args.n_utts} utterance(s)")
     for combo in combos:
         print(f"  {job_name(combo)}")
     if args.dry_run:
@@ -256,8 +263,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         wave = combos[start : start + args.parallel]
         jobs = []
         for combo in wave:
-            overrides = base_overrides(args) + [
-                f"{k}={as_override(v)}" for k, v in combo.items() if k != "variant"
+            n_utts = combo.get("n_utts", args.n_utts[0])
+            overrides = base_overrides(args, n_utts) + [
+                f"{k}={as_override(v)}"
+                for k, v in combo.items()
+                if k not in ("variant", "n_utts")
             ]
             overrides += extra
             if "train.audio_decoder_lr" not in combo:
