@@ -62,6 +62,18 @@ schedule:
   sweep_n: 1024                 # utterances in the model-free corruption sweep
   num_bins: 100               # resolution of the measured P_e curve
 
+sampling:
+  # Integrate from noise on a fixed slice of val and score the result. This is the only
+  # metric that reflects inference — the binned ones score one denoising step from an x_t
+  # built out of the target, which at high t largely measures the input.
+  enabled: true
+  num_steps: 16
+  every_n_epochs: 5
+  n_utts: 64
+  # Feed back a one-hot argmax instead of the softmax. The softmax is closer to what
+  # training showed the model, so it is the default.
+  hard: false
+
 metrics:
   loss_bins: 10
   perr_bins: 10
@@ -81,6 +93,11 @@ train:
   precision: null
   fast_dev_run: false
   log_every_n_steps: 50
+  # Validation costs a decode per batch when WER is on; on short-epoch runs (an overfit
+  # check has a handful of steps per epoch) it is worth checking less often.
+  check_val_every_n_epoch: 1
+  # Off for sweeps, where dozens of runs would each write a checkpoint nobody reads.
+  checkpoint: true
 
   # TF32 for fp32 matmuls. Measured on a 3060 at batch 32, ms/step:
   #   16-mixed  highest 38.5 | high 43.4      <- under AMP the matmuls are already fp16,
