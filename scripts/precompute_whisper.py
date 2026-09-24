@@ -25,6 +25,7 @@ import json
 import math
 import os
 import sys
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -428,13 +429,21 @@ def main(argv: list[str] | None = None) -> int:
     for i, shard in enumerate(todo, 1):
         rel = f"{shard.parent.parent.name}/{shard.parent.name}/{shard.name}"
         print(f"[{i}/{len(todo)}] {rel}", flush=True)
+        started = time.perf_counter()
         try:
             n = process_shard(shard, encoder, extractor, device, args)
         except Exception as exc:  # one bad shard must not lose the whole task
-            print(f"  FAILED: {exc}", file=sys.stderr)
+            print(f"  FAILED: {exc}", file=sys.stderr, flush=True)
             failures.append({"shard": rel, "error": repr(exc)})
         else:
-            print(f"  {n} utterance(s)")
+            # flush=True throughout: stdout is block-buffered to the SLURM output file,
+            # so without it a long encode shows nothing and a finished shard is not
+            # visibly finished. The rate is what sizes the next job's walltime.
+            elapsed = time.perf_counter() - started
+            print(
+                f"  {n} utterance(s) in {elapsed:.0f}s ({n / max(elapsed, 1e-9):.1f} utts/s)",
+                flush=True,
+            )
 
     if failures:
         args.failure_log.parent.mkdir(parents=True, exist_ok=True)
@@ -447,10 +456,13 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"FAILED: {len(failures)} of {len(todo)} shard(s), logged to {args.failure_log}",
             file=sys.stderr,
+            flush=True,
         )
         return 1
 
-    print(f"OK: {len(todo)} shard(s) written under {args.data_root / 'features'}")
+    print(
+        f"OK: {len(todo)} shard(s) written under {args.data_root / 'features'}", flush=True
+    )
     return 0
 
 
