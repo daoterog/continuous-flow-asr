@@ -20,6 +20,10 @@ data:
   # cross-attention keys 4x.
   audio_stride: 4
   batch_size: 32
+  # null means one epoch is one pass over the training subset. Set it to make an epoch a
+  # fixed number of steps instead, sampling with replacement — worth it on small subsets,
+  # where the per-epoch fixed cost otherwise dominates.
+  steps_per_epoch: null
   compact_vocab: true
   num_workers: 4
 
@@ -105,6 +109,13 @@ train:
   check_val_every_n_epoch: 1
   # Off for sweeps, where dozens of runs would each write a checkpoint nobody reads.
   checkpoint: true
+
+  # Stop as soon as a metric reaches its target — e.g. `sampled/wer` at 0 for an overfit
+  # check, where everything after that is wasted compute. null disables it. Only the
+  # target stops the run; a plateau does not.
+  early_stop_on: null
+  early_stop_threshold: 0.0
+  early_stop_mode: min
 
   # TF32 for fp32 matmuls. Measured on a 3060 at batch 32, ms/step:
   #   16-mixed  highest 38.5 | high 43.4      <- under AMP the matmuls are already fp16,

@@ -17,7 +17,7 @@ from src.constants import CONFIGS, SPLITS, feature_dir
 import lightning.pytorch as pl
 import numpy as np
 import torch
-from torch.utils.data import ConcatDataset, DataLoader, Dataset, Subset
+from torch.utils.data import ConcatDataset, DataLoader, Dataset, RandomSampler, Subset
 from transformers import WhisperTokenizerFast
 
 ROLES = ("train", "val", "test")
@@ -218,12 +218,27 @@ def make_loader(
     collate_fn: Callable,
     num_workers: int = 4,
     pin_memory: bool = False,
+    steps_per_epoch: int | None = None,
 ) -> DataLoader:
-    """One DataLoader, with the settings shared by every split."""
+    """One DataLoader, with the settings shared by every split.
+
+    steps_per_epoch decouples the epoch from the dataset size by sampling with
+    replacement. On a small subset an epoch is otherwise only a handful of batches, and
+    the fixed per-epoch cost (~100 ms of loader restart and hooks) comes to dominate:
+    25,600 steps over 64 utterances at batch 16 is 6,400 epoch boundaries. Setting it
+    makes an epoch as long as you like without changing what the model sees.
+    """
+    sampler = None
+    if steps_per_epoch:
+        sampler = RandomSampler(
+            ds, replacement=True, num_samples=steps_per_epoch * batch_size
+        )
+        shuffle = False  # mutually exclusive with an explicit sampler
     return DataLoader(
         ds,
         batch_size=batch_size,
         shuffle=shuffle,
+        sampler=sampler,
         num_workers=num_workers,
         collate_fn=collate_fn,
         pin_memory=pin_memory,
@@ -254,6 +269,7 @@ class AudioFeatureDataModule(pl.LightningDataModule):
         num_workers: int = 4,
         seed: int = 0,
         pin_memory: bool = False,
+        steps_per_epoch: int | None = None,
     ) -> None:
         """Record the configuration; nothing is read off disk until `setup()`.
 
@@ -277,6 +293,7 @@ class AudioFeatureDataModule(pl.LightningDataModule):
         self.num_workers = num_workers
         self.seed = seed
         self.pin_memory = pin_memory
+        self.steps_per_epoch = steps_per_epoch
 
         self.datasets: dict[str, Subset] = {}
         self.dirs: dict[str, list[Path]] = {}
@@ -388,6 +405,8 @@ class AudioFeatureDataModule(pl.LightningDataModule):
             collate_fn=self.collate_fn,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
+            # Only the training loader: val and test must cover their split exactly once.
+            steps_per_epoch=self.steps_per_epoch if role == "train" else None,
         )
 
     def train_dataloader(self) -> DataLoader:
