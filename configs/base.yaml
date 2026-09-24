@@ -74,6 +74,10 @@ schedule:
   # assumption instead of silently assuming mu is absent. Only used when flow.gamma is
   # set. refresh_tau replaces the assumption with the model's measured P_e.
   mu_accuracy: 1.0
+  # Re-derive tau from the model's own P_e every N validations, replacing the
+  # corruption-sweep prior. 0 disables it. The bins move with it, so histograms are not
+  # comparable across a refresh — the underlying t-distribution genuinely changed.
+  refresh_every_n_epochs: 0
 
 sampling:
   # Integrate from noise on a fixed slice of val and score the result. This is the only
