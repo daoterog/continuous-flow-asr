@@ -33,7 +33,7 @@ from omegaconf import DictConfig, OmegaConf
 from transformers import WhisperTokenizerFast
 
 from src.dataset import ROLES, AudioFeatureDataModule
-from src.pl_module import FlowMatching
+from src.pl_module import FlowMatching, make_schedule
 from src.schedule import make_tau_inverse, sweep_corruption
 
 # `train.num_epochs=10`, `data.subset_n.train=64` — an OmegaConf dotlist assignment.
@@ -118,10 +118,25 @@ def build_sample_t_fn(dm: AudioFeatureDataModule, cfg: DictConfig) -> object | N
     if torch.cuda.is_available():
         tokens = tokens.cuda()
     ts = np.linspace(0.0, 1.0, cfg.schedule.num_bins + 1).tolist()
-    recovery = sweep_corruption(tokens, dm.vocab_size, ts)
+    # The sweep must follow the path this run trains on. Measuring a mu variant on the
+    # linear path understates what its field carries and puts tau's mass in the wrong
+    # place; mu_accuracy states how good mu is assumed to be, since mu_nn is still at
+    # init when tau is measured.
+    gamma_fn = make_schedule(cfg.flow.get("gamma"))
+    recovery = sweep_corruption(
+        tokens,
+        dm.vocab_size,
+        ts,
+        alpha_fn=make_schedule(cfg.flow.get("alpha", "linear_down")),
+        beta_fn=make_schedule(cfg.flow.get("beta", "linear_up")),
+        gamma_fn=gamma_fn,
+        mu_accuracy=float(cfg.schedule.get("mu_accuracy", 1.0)),
+    )
     tau_inverse = make_tau_inverse(ts, recovery, dm.vocab_size)
     lo, hi = float(tau_inverse(0.0)), float(tau_inverse(1.0))
-    print(f"tau: sweep over {tokens.size(0)} utts, t in [{lo:.3f}, {hi:.3f}] carries the draw")
+    path = "with mu" if gamma_fn is not None else "linear"
+    print(f"tau: sweep over {tokens.size(0)} utts on the {path} path, "
+          f"t in [{lo:.3f}, {hi:.3f}] carries the draw")
     return tau_inverse
 
 

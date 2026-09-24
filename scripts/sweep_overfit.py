@@ -209,6 +209,10 @@ def train_one(config: str, overrides: list[str]) -> dict:
         "train_wer": metric("denoiser_wer/train_overall"),
         "val_wer": metric("denoiser_wer/val_overall"),
         "mu_perr": metric("mu_perr/train_overall"),
+        # What the interpolant already carried, against what the denoiser made of it.
+        "input_perr": metric("input_perr/train_overall"),
+        "input_perr_low_t": metric("input_perr/train_low_t"),
+        "denoiser_perr_low_t": metric("denoiser_perr/train_low_t"),
         "mu_wer": metric("mu_wer/val_overall"),
         "sampled_wer": metric("sampled/wer"),
         "stopped_epoch": trainer.current_epoch,
@@ -366,12 +370,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     # measure the input rather than the model.
     results.sort(key=lambda r: (r["sampled_wer"], r["train_loss"]))
     width = max(len(r["label"]) for r in results)
-    print(f"\n{'run':<{width}} {'loss':>8} {'den P_e':>8} {'den WER':>9} "
-          f"{'mu P_e':>8} {'mu WER':>9} {'SAMPLED WER':>12} {'steps':>9}")
+    print(f"\n{'run':<{width}} {'in P_e':>8} {'den P_e':>8} {'mu P_e':>8} "
+          f"{'in@lowT':>8} {'den@lowT':>9} {'den WER':>9} {'SAMPLED':>9} {'steps':>9}")
     for r in results:
-        print(f"{r['label']:<{width}} {r['train_loss']:8.4f} {r['denoiser_perr']:8.4f} "
-              f"{r['val_wer']:8.2f}% {r['mu_perr']:8.4f} {r['mu_wer']:8.2f}% "
-              f"{r['sampled_wer']:11.2f}% {r.get('stopped_step', 0):9,}")
+        print(f"{r['label']:<{width}} {r['input_perr']:8.4f} {r['denoiser_perr']:8.4f} "
+              f"{r['mu_perr']:8.4f} {r['input_perr_low_t']:8.4f} "
+              f"{r['denoiser_perr_low_t']:9.4f} {r['val_wer']:8.2f}% "
+              f"{r['sampled_wer']:8.2f}% {r.get('stopped_step', 0):9,}")
+    print("\n  in P_e  = token error of argmax(x_t), the interpolant with no model in it")
+    print("  den P_e = the denoiser's, from that same input. The gap is what it added.")
+    print("  @lowT   = the same two in the lowest populated t bin, where x_t is nearly")
+    print("            pure noise and mu is the only signal the denoiser has.")
 
     best = results[0]
     print(f"\nbest by sampled WER: {best['label']}  ({best['sampled_wer']:.2f}%)")

@@ -69,6 +69,11 @@ schedule:
   enabled: true
   sweep_n: 1024                 # utterances in the model-free corruption sweep
   num_bins: 100               # resolution of the measured P_e curve
+  # How accurate mu is assumed to be while tau is measured. tau is built before training,
+  # when mu_nn is still at init, so its real output carries nothing — this states the
+  # assumption instead of silently assuming mu is absent. Only used when flow.gamma is
+  # set. refresh_tau replaces the assumption with the model's measured P_e.
+  mu_accuracy: 1.0
 
 sampling:
   # Integrate from noise on a fixed slice of val and score the result. This is the only

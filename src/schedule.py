@@ -33,41 +33,94 @@ def argmax_threshold(vocab_size: int) -> float:
     return float(e_max / (1 + e_max))
 
 
+def simulate_mu(
+    tokens: torch.Tensor, vocab_size: int, accuracy: float, generator: torch.Generator | None = None
+) -> torch.Tensor:
+    """A stand-in for the audio decoder's output, right on `accuracy` of positions.
+
+    tau has to be measured before training, when mu_nn is still at init and its real
+    output carries nothing. A one-hot at a stated accuracy is the honest placeholder: it
+    says "assume mu will be this good" rather than silently assuming it does not exist.
+    Once the model has trained, `refresh_tau` replaces this with its measured P_e.
+    """
+    right = torch.rand(tokens.shape, device=tokens.device, generator=generator) < accuracy
+    wrong = torch.randint(
+        0, vocab_size, tokens.shape, device=tokens.device, generator=generator
+    )
+    return F.one_hot(torch.where(right, tokens, wrong), vocab_size).float()
+
+
 @torch.no_grad()
 def corrupt_and_decode(
-    tokens: torch.Tensor, vocab_size: int, t: float, chunk: int = 8
+    tokens: torch.Tensor,
+    vocab_size: int,
+    t: float,
+    alpha_fn: Callable | None = None,
+    beta_fn: Callable | None = None,
+    gamma_fn: Callable | None = None,
+    mu_accuracy: float = 1.0,
+    chunk: int = 8,
+    generator: torch.Generator | None = None,
 ) -> torch.Tensor:
-    """The interpolant with no model in the loop: argmax of (1-t)*x0 + t*x1.
+    """The interpolant with no model in the loop: argmax of alpha*x0 + beta*x1 [+ gamma*mu].
 
-    Per canvas position the true slot lands at t + (1-t)*N(0,1) and each of the other
-    V-1 slots at (1-t)*N(0,1). argmax recovers the token only when the spike beats the
-    largest of those V-1 draws, which sits near sqrt(2 ln V) — about 4.2 at Whisper's
-    full vocabulary.
+    Per canvas position the true slot lands at beta(t) + alpha(t)*N(0,1) and each of the
+    other V-1 slots at alpha(t)*N(0,1). argmax recovers the token only when the spike
+    beats the largest of those V-1 draws, which sits near sqrt(2 ln V).
 
-    Chunked because a (B, 160, 51866) float field is ~132 MB per 4 sequences, and
-    randn_like allocates a second one.
+    gamma_fn must be the schedule actually being trained. Measuring a mu variant on the
+    linear path understates how much its field knows — at t=0.6 with gamma=1-t the real
+    recovery is ~0.23 against the linear path's ~0.04 — and tau built from the wrong
+    curve puts the training mass in the wrong place.
+
+    Chunked because a (B, L, V) float field is large and randn_like allocates a second one.
     """
+    alpha_fn = alpha_fn or (lambda t: 1 - t)
+    beta_fn = beta_fn or (lambda t: t)
     out = []
     for i in range(0, tokens.size(0), chunk):
-        x1 = F.one_hot(tokens[i : i + chunk], vocab_size).float()
-        out.append(((1 - t) * torch.randn_like(x1) + t * x1).argmax(dim=-1))
+        piece = tokens[i : i + chunk]
+        x1 = F.one_hot(piece, vocab_size).float()
+        field = alpha_fn(t) * torch.randn(
+            x1.shape, device=x1.device, generator=generator
+        ) + beta_fn(t) * x1
+        if gamma_fn is not None:
+            field = field + gamma_fn(t) * simulate_mu(
+                piece, vocab_size, mu_accuracy, generator
+            )
+        out.append(field.argmax(dim=-1))
     return torch.cat(out)
 
 
 @torch.no_grad()
 def sweep_corruption(
-    tokens: torch.Tensor, vocab_size: int, ts: list[float], chunk: int = 8
+    tokens: torch.Tensor,
+    vocab_size: int,
+    ts: list[float],
+    alpha_fn: Callable | None = None,
+    beta_fn: Callable | None = None,
+    gamma_fn: Callable | None = None,
+    mu_accuracy: float = 1.0,
+    chunk: int = 8,
 ) -> list[float]:
-    """Token recovery under pure corruption, one value per t in `ts`.
+    """Token recovery under the interpolant alone, one value per t in `ts`.
 
     This is the prior tau is built from before any training: how much of the transcript
-    survives the interpolant alone. Feed the result straight to ``make_tau_inverse``.
+    the field carries on its own. Pass the schedules the run will actually train with, or
+    tau describes a different probability path than the model sees.
     """
-    recovery = []
-    for t in ts:
-        noisy = corrupt_and_decode(tokens, vocab_size, t, chunk=chunk)
-        recovery.append((noisy == tokens).float().mean().item())
-    return recovery
+    return [
+        (
+            corrupt_and_decode(
+                tokens, vocab_size, t, alpha_fn, beta_fn, gamma_fn, mu_accuracy, chunk
+            )
+            == tokens
+        )
+        .float()
+        .mean()
+        .item()
+        for t in ts
+    ]
 
 
 def tau_from_recovery(recovery: np.ndarray | list[float], vocab_size: int) -> np.ndarray:
