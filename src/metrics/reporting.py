@@ -60,13 +60,12 @@ class MetricReporting:
         Each metric is fed `metric.update(*(record[k] for k in metric.inputs))`, so this
         never has to know what a metric is.
         """
-        for name in self.names:
-            record = {
-                "pred_ids": out[name]["pred_ids"],
-                "target_ids": target_ids,
-                "loss_per_seq": out[name]["loss_per_seq"],
-                "t": t,
-            }
+        # Iterates `out` rather than self.names: "input" has predictions but no loss,
+        # so its record carries only the keys its metrics actually declare.
+        for name, part in out.items():
+            record = {"pred_ids": part["pred_ids"], "target_ids": target_ids, "t": t}
+            if "loss_per_seq" in part:
+                record["loss_per_seq"] = part["loss_per_seq"]
             for key, metric in self.metrics.items():
                 if key.startswith(f"{split}_{name}_"):
                     metric.update(*(record[k] for k in metric.inputs))

@@ -137,6 +137,7 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             loss_bins=cfg.metrics.get("loss_bins", 10),
             perr_bins=cfg.metrics.get("perr_bins", 10),
             wer_bins=OmegaConf.to_container(cfg.metrics.get("wer_bins", {})) or None,
+            input_perr_bins=cfg.metrics.get("input_perr_bins", 0),
         )
 
     def make_interpolant(
@@ -198,6 +199,9 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             "loss_per_seq": d_loss_per_seq,
             "pred_ids": logits.argmax(dim=-1),
         }
+
+        if self.cfg.metrics.get("input_perr_bins"):
+            out["input"] = {"pred_ids": i_t.argmax(dim=-1)}
 
         loss = out["denoiser"]["loss"]
         if self.mu_nn is not None:

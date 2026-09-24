@@ -32,6 +32,7 @@ def make_metrics(
     loss_bins: int = 10,
     perr_bins: int = 10,
     wer_bins: dict | None = None,
+    input_perr_bins: int = 0,
     sample_t_fn: Callable | None = None,
 ) -> nn.ModuleDict:
     """Build the `{split}_{model}_{metric}` ModuleDict the reporting mixin drives.
@@ -50,6 +51,13 @@ def make_metrics(
 
     metrics = nn.ModuleDict()
     for split in SPLITS:
+        if input_perr_bins:
+            # argmax of the interpolant itself, with no model involved. Read against
+            # denoiser_perr it separates what the field already carried from what the
+            # denoiser added, which is the only way to see mu's effect on the input.
+            metrics[f"{split}_input_perr"] = BinnedTokenError(
+                input_perr_bins, edges=edges_for(input_perr_bins)
+            )
         for name in names:
             if loss_bins:
                 metrics[f"{split}_{name}_loss"] = BinnedLoss(
