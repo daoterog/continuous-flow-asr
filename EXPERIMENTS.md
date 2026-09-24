@@ -21,17 +21,23 @@ target, so at high t they largely measure the input.
 | 7 | Is the interpolant broken? | No. With a perfect μ the field's recovery triples (t=0.6: 0.044 → 0.230). But below t≈0.8 the noise max (α·√(2 ln V)≈3.0) exceeds the signal peak (~1.0). | — |
 | 8 | Is τ right for μ variants? | **No.** `sweep_corruption` measured τ on the *linear* path for every variant. audio_cond n=256: **16.64% → 1.60%** after the fix, in ⅓ the steps. | Largest single win |
 | 9 | Does the denoiser use μ or ignore it? | Uses its own audio pathway. At the lowest t bin the input is 94.8% wrong and the denoiser is **99.93% right** — in both variants. | μ is not load-bearing here |
-| 10 | Does μ earn its place? | Not at n=256: `linear` **0.15%** vs `audio_cond` **1.60%**. | Needs the full dataset, where conditioning is weak |
+| 10 | Does μ earn its place? | Not at n=256: `linear` **0.15%** vs `audio_cond` **1.60%**. Margin is inside the noise (see 11). | Needs the full dataset, where conditioning is weak |
+| 11 | How reproducible is any of this? | `audio_cond` n=256, *same config*, four runs: **1.60 / 39.27 / 0.27 / 1.28%**. Inputs bit-identical, so it is training non-determinism. Usually ≤1.6%, occasionally catastrophic. | Small margins need ≥4 seeds; one run can mislead |
+| 12 | Should τ track μ's real accuracy? | **Yes.** Honest prior (`mu_accuracy 0.0`) + refresh every epoch: **0.00 / 0.02%** over 2 seeds. Static optimistic prior, no refresh: **0.27 / 1.28%**. Tighter *and* better. | `refresh_every_n_epochs` on; n=2, so suggestive not settled |
+
+τ is refreshed from μ's measured error (`1 − mu_perr`), re-running the model-free corruption
+sweep with that accuracy. Bins move with it, applied at the next epoch's start. Refresh
+cannot outpace validation — raise `--val-times` to refresh more often.
 
 ## Settled defaults
 
 `denoiser_lr 1e-3` · `mu_loss_weight 0.1` · `weight_decay 0.01` (was silently 0.0) ·
-grad clipping ~irrelevant · τ measured on each variant's own path.
+grad clipping ~irrelevant · τ measured on each variant's own path, refreshed from μ.
 
 ## Open
 
-- **τ is static.** `mu_accuracy: 1.0` assumes μ ends perfect; never recomputed.
-  `refresh_tau` exists, wired to nothing. Optimistic once μ is imperfect.
+- **Occasional catastrophic runs.** One of four identical runs landed at 39% where the
+  others were ≤1.6%. Cause unknown. Any single-run comparison can be that run.
 - **μ unproven.** Every result above is memorisation, where the denoiser can learn
   audio→text outright. μ's case is weak conditioning = full dataset.
 - **σ = α/γ untested.** Reparameterises to `x₀′ ~ N(μ, σ²I)`; drift is σ-invariant.
