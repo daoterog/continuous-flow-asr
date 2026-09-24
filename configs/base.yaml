@@ -87,6 +87,10 @@ metrics:
   perr_bins: 10
   # WER needs a decode per batch, so it is off on train by default.
   wer_bins: {train: 0, val: 10, test: 10}
+  # Token error of argmax(x_t) — the interpolant with no model in the loop. Against
+  # denoiser_perr it shows what the denoiser adds over its own input, and across variants
+  # it shows how much mu actually contributes to the field. One argmax, so it is cheap.
+  input_perr_bins: 10
 
 train:
   num_epochs: 50
