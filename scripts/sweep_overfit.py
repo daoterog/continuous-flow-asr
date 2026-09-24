@@ -64,6 +64,35 @@ def build_grid(args: argparse.Namespace) -> list[dict]:
     ]
 
 
+def epochs_for(args: argparse.Namespace, n_utts: int) -> int:
+    """Epochs for one memorisation-set size.
+
+    With --max-steps, epochs are derived so every size gets the same number of optimizer
+    steps. At fixed epochs a bigger set silently gets more steps (n/batch per epoch), so
+    set size and training budget move together and neither can be attributed.
+    """
+    if not args.max_steps:
+        return args.epochs
+    # With an explicit steps_per_epoch the epoch no longer depends on the set size, so
+    # every job gets the same epochs AND the same steps — and far fewer epoch boundaries,
+    # which cost ~100ms each regardless of how much work the epoch contains.
+    steps_per_epoch = args.steps_per_epoch or max(1, n_utts // args.batch_size)
+    return max(1, round(args.max_steps / steps_per_epoch))
+
+
+def val_every_for(args: argparse.Namespace, n_utts: int) -> int:
+    """Epochs between validations, so every job validates the same NUMBER of times.
+
+    A fixed epoch interval scales badly once epochs are derived from a step budget: at
+    n=64 a 25.6k-step run is 6400 epochs, and validating every 20 would sample 320 times
+    — each sample being num_steps forward passes over the whole slice, which can cost
+    more than the training it is measuring.
+    """
+    if not args.val_times:
+        return args.val_every
+    return max(1, epochs_for(args, n_utts) // args.val_times)
+
+
 def base_overrides(args: argparse.Namespace, n_utts: int) -> list[str]:
     """The settings every job in the sweep shares, for one memorisation-set size."""
     return [
@@ -83,22 +112,33 @@ def base_overrides(args: argparse.Namespace, n_utts: int) -> list[str]:
         "metrics.wer_bins.val=10",
         f"data.batch_size={args.batch_size}",
         "data.num_workers=2",
-        f"train.num_epochs={args.epochs}",
-        f"train.check_val_every_n_epoch={args.val_every}",
+    ] + ([f"data.steps_per_epoch={args.steps_per_epoch}"] if args.steps_per_epoch else []) + [
+        f"train.num_epochs={epochs_for(args, n_utts)}",
+        f"train.check_val_every_n_epoch={val_every_for(args, n_utts)}",
         # Nothing should stop the model memorising.
         "model.denoiser.dropout=0.0",
         "train.weight_decay=0.0",
         f"train.checkpoint={str(args.keep_checkpoints).lower()}",
         "train.precision=16-mixed",
         "train.accelerator=gpu",
-        # Warmup would dominate jobs this short.
-        "train.compile=false",
+        # Compile pays for itself once a job runs for minutes rather than seconds: the
+        # bottleneck at these batch sizes is kernel-launch overhead, which is what it
+        # removes. Warmup is a one-off ~40-70s.
+        f"train.compile={str(args.compile).lower()}",
         f"schedule.sweep_n={args.sweep_n}",
         # The number that actually matters: integrate from noise and score the result.
         "sampling.enabled=true",
         f"sampling.num_steps={args.sample_steps}",
-        f"sampling.every_n_epochs={args.val_every}",
+        f"sampling.every_n_epochs={val_every_for(args, n_utts)}",
         f"sampling.n_utts={min(n_utts, 128)}",
+        *(
+            [
+                f"train.early_stop_on={args.stop_on}",
+                f"train.early_stop_threshold={args.stop_at}",
+            ]
+            if args.stop_at is not None
+            else []
+        ),
         f"logging.project={args.project}",
         f"logging.group={args.group}",
     ] + ([f"logging.entity={args.entity}"] if args.entity else [])
@@ -171,6 +211,8 @@ def train_one(config: str, overrides: list[str]) -> dict:
         "mu_perr": metric("mu_perr/train_overall"),
         "mu_wer": metric("mu_wer/val_overall"),
         "sampled_wer": metric("sampled/wer"),
+        "stopped_epoch": trainer.current_epoch,
+        "stopped_step": int(trainer.global_step),
         "sampled_perr": metric("sampled/perr"),
         "val_perr": metric("denoiser_perr/val_overall"),
         "wandb_url": getattr(logger.experiment, "url", ""),
@@ -222,7 +264,22 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, l
                         "which is how to make the task hard enough for mu to matter")
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--epochs", type=int, default=400)
+    p.add_argument(
+        "--steps-per-epoch", type=int, default=None,
+        help="make an epoch this many steps by sampling with replacement; on small sets "
+             "this removes most of the per-epoch fixed cost",
+    )
+    p.add_argument(
+        "--max-steps", type=int, default=None,
+        help="equalise optimizer steps across --n-utts by deriving epochs per size; "
+             "use this whenever n_utts is swept, or set size and budget are confounded",
+    )
     p.add_argument("--val-every", type=int, default=20, help="epochs between validations")
+    p.add_argument(
+        "--val-times", type=int, default=None,
+        help="validate this many times per run instead of every --val-every epochs; "
+             "keeps scoring cost constant when epochs are derived from --max-steps",
+    )
     p.add_argument("--sweep-n", type=int, default=256, help="utterances in the tau sweep")
     p.add_argument("--sample-steps", type=int, default=16, help="integration steps when sampling")
     p.add_argument("--parallel", type=int, default=1, help="jobs at a time on the one GPU")
@@ -236,6 +293,16 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, l
         help="sweep any config key as an extra axis, e.g. --grid train.grad_clip=1.0,null "
              "--grid flow.mu_loss_weight=1.0,0.1. Repeatable; values parse as YAML.",
     )
+    p.add_argument(
+        "--stop-at", type=float, default=None, metavar="WER",
+        help="stop a job once --stop-on reaches this value, e.g. --stop-at 0.5. A job "
+             "that has memorised the set has nothing left to learn; one that has not "
+             "still runs the full budget, so the sweep becomes 'steps to reach the "
+             "target' rather than 'score at a fixed budget'.",
+    )
+    p.add_argument("--stop-on", default="sampled/wer", help="metric --stop-at watches")
+    p.add_argument("--compile", action="store_true",
+                   help="torch.compile both models; worth it whenever a job runs minutes")
     p.add_argument("--keep-checkpoints", action="store_true",
                    help="save checkpoints so scripts.sample_eval can probe the result")
     p.add_argument("--dry-run", action="store_true", help="print the grid and exit")
@@ -247,10 +314,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args, extra = parse_args(argv)
     combos = build_grid(args)
 
-    print(f"{len(combos)} jobs, {args.parallel} at a time, {args.epochs} epochs on "
-          f"{args.n_utts} utterance(s)")
+    print(f"{len(combos)} jobs, {args.parallel} at a time, on {args.n_utts} utterance(s)")
     for combo in combos:
-        print(f"  {job_name(combo)}")
+        n = combo.get("n_utts", args.n_utts[0])
+        epochs = epochs_for(args, n)
+        per_epoch = args.steps_per_epoch or max(1, n // args.batch_size)
+        print(f"  {job_name(combo):<44} {epochs:>6} epochs x {per_epoch:>4}"
+              f" steps = {epochs * per_epoch:>7,} steps")
     if args.dry_run:
         print("\n(dry run — nothing submitted)")
         return 0
@@ -282,7 +352,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 results.append(out)
                 print(f"  done {out['label']:30s} loss {out['train_loss']:7.4f}  "
                       f"1-step P_e {out['denoiser_perr']:.4f}  "
-                      f"SAMPLED WER {out['sampled_wer']:7.2f}%")
+                      f"SAMPLED WER {out['sampled_wer']:7.2f}%  "
+                      f"@{out.get('stopped_step', 0):,} steps")
             except Exception as exc:
                 print(f"  FAILED {job_name(combo)}: {type(exc).__name__} {exc}")
 
@@ -296,11 +367,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     results.sort(key=lambda r: (r["sampled_wer"], r["train_loss"]))
     width = max(len(r["label"]) for r in results)
     print(f"\n{'run':<{width}} {'loss':>8} {'den P_e':>8} {'den WER':>9} "
-          f"{'mu P_e':>8} {'mu WER':>9} {'SAMPLED WER':>12}")
+          f"{'mu P_e':>8} {'mu WER':>9} {'SAMPLED WER':>12} {'steps':>9}")
     for r in results:
         print(f"{r['label']:<{width}} {r['train_loss']:8.4f} {r['denoiser_perr']:8.4f} "
               f"{r['val_wer']:8.2f}% {r['mu_perr']:8.4f} {r['mu_wer']:8.2f}% "
-              f"{r['sampled_wer']:11.2f}%")
+              f"{r['sampled_wer']:11.2f}% {r.get('stopped_step', 0):9,}")
 
     best = results[0]
     print(f"\nbest by sampled WER: {best['label']}  ({best['sampled_wer']:.2f}%)")
