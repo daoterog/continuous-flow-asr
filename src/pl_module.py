@@ -7,16 +7,18 @@ metric bank is built by `src.metrics.utils`.
 from collections.abc import Callable
 
 import lightning.pytorch as pl
+import numpy as np
 import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
 from transformers import WhisperTokenizerFast
 
 from src.dataset import VocabMap
+from src.metrics import schedule_bin_edges
 from src.metrics.reporting import MetricReporting
 from src.models import build_audio_decoder, build_denoiser
 from src.sampler import sample_tokens, score_samples
-from src.schedule import generation_grid
+from src.schedule import generation_grid, make_tau_inverse, sweep_corruption
 
 
 def make_schedule(spec: DictConfig | dict | str | None) -> Callable | None:
@@ -97,6 +99,7 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         self.tokenizer = tokenizer
         self.vocab_map = vocab_map
         self._sample_batch = None
+        self._pending_tau = None
 
         self.denoiser = build_denoiser(cfg.model.denoiser, vocab_size)
         self.mu_nn = (
@@ -294,9 +297,95 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         self.train(was_training)
 
     def on_validation_epoch_end(self) -> None:
-        """Flush the binned metrics, then sample from noise on a fixed val slice."""
+        """Flush the metrics, sample from noise, then re-derive tau if it is due.
+
+        Order matters. The refresh reads mu's error, so it has to happen after this
+        epoch's numbers exist; the re-binning has to happen after `super()` has logged
+        and reset, since counts collected under the old edges do not describe the new
+        ones. So: read, flush, then swap.
+        """
+        key = "val_mu_perr"
+        measured = (
+            self.metrics[key].overall()
+            if self._refresh_is_due() and key in self.metrics
+            else None
+        )
         super().on_validation_epoch_end()
         self._log_sampled()
+        if measured is not None and measured == measured:  # not NaN
+            self._refresh_schedule(1.0 - measured)
+
+    def on_train_epoch_start(self) -> None:
+        """Apply a pending schedule refresh, before anything accumulates under it.
+
+        Not at the point the refresh is computed: Lightning runs validation before
+        `on_train_epoch_end`, so resetting the metrics there would wipe the train
+        accumulators before they are ever logged. By the start of the next epoch both
+        splits have been flushed and the new edges can take effect cleanly.
+        """
+        super().on_train_epoch_start()
+        if self._pending_tau is None:
+            return
+        new_tau, mu_accuracy = self._pending_tau
+        self._pending_tau = None
+        self.sample_t_fn = new_tau
+        for metric in self.metrics.values():
+            metric.reset()
+            metric.set_edges(schedule_bin_edges(new_tau, metric.num_bins))
+        lo = float(new_tau(0.0))
+        self.log("tau/t0", lo)
+        self.log("tau/mu_accuracy", mu_accuracy)
+        self.print(
+            f"tau refreshed for epoch {self.current_epoch}: mu accuracy "
+            f"{mu_accuracy:.4f}, t in [{lo:.3f}, 1.000] now carries the draw"
+        )
+
+    def _refresh_is_due(self) -> bool:
+        """Whether tau should be re-derived at the end of this validation."""
+        every = int(self.cfg.schedule.get("refresh_every_n_epochs", 0) or 0)
+        return (
+            every > 0
+            and self.sample_t_fn is not None
+            # Without mu there is nothing to re-measure: the linear path's corruption
+            # does not change as the model trains.
+            and self.gamma_fn is not None
+            and not self.trainer.sanity_checking
+            and (self.current_epoch + 1) % every == 0
+        )
+
+    def _refresh_schedule(self, mu_accuracy: float) -> None:
+        """Re-measure tau with mu's *actual* accuracy instead of the assumed one.
+
+        tau is built before training, when mu_nn is at init, so `schedule.mu_accuracy`
+        has to guess how good mu will get. Once mu has trained that guess is replaceable
+        by a measurement: the same model-free corruption of real targets, with a mu whose
+        accuracy matches the one now in the interpolant.
+        """
+        datamodule = getattr(self.trainer, "datamodule", None)
+        if datamodule is None:
+            return
+        cfg = self.cfg.schedule
+        tokens = datamodule.sample_tokens("train", int(cfg.sweep_n), seed=self.cfg.seed)
+        ts = np.linspace(0.0, 1.0, int(cfg.num_bins) + 1).tolist()
+        recovery = sweep_corruption(
+            tokens.to(self.device),
+            self.vocab_size,
+            ts,
+            alpha_fn=self.alpha_fn,
+            beta_fn=self.beta_fn,
+            gamma_fn=self.gamma_fn,
+            mu_accuracy=mu_accuracy,
+        )
+        try:
+            new_tau = make_tau_inverse(ts, recovery, self.vocab_size)
+            # Built here only to surface a bad schedule now rather than mid-epoch.
+            for m in self.metrics.values():
+                schedule_bin_edges(new_tau, m.num_bins)
+        except ValueError as exc:
+            self.print(f"tau refresh skipped at epoch {self.current_epoch}: {exc}")
+            return
+
+        self._pending_tau = (new_tau, mu_accuracy)
 
     def _step(self, batch: dict, split: str) -> torch.Tensor:
         loss, out, t = self.flow_step(batch)

@@ -76,6 +76,24 @@ class TimeBinnedMetric(Metric):
         """
         return torch.bucketize(t.float(), self._edges[1:-1].to(t.device), right=True)
 
+    def set_edges(self, edges: Edges) -> None:
+        """Re-bin in place, keeping the same number of bins.
+
+        Used when tau is refreshed mid-run: the schedule's quantiles move, so the bins
+        have to move with them or they no longer hold ~1/n of the samples each. The bin
+        count is fixed because the accumulator states are sized by it — call reset()
+        first, since counts collected under the old edges do not describe the new ones.
+        """
+        edges = torch.as_tensor(edges, dtype=torch.float32)
+        if edges.numel() - 1 != self.num_bins:
+            raise ValueError(
+                f"re-binning must keep {self.num_bins} bins, got {edges.numel() - 1}"
+            )
+        if not bool((edges[1:] > edges[:-1]).all()):
+            raise ValueError(f"bin edges must be strictly increasing, got {edges}")
+        self._edges = edges
+        self.schedule_bins = True
+
     def bin_edges(self) -> torch.Tensor:
         """(num_bins + 1,) the bin boundaries in t."""
         return self._edges.detach().cpu()

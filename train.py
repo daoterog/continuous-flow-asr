@@ -84,6 +84,11 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, l
         )
     p.add_argument("--offline", action="store_true", help="log without a network")
     p.add_argument("--print-config", action="store_true", help="resolve, print and exit")
+    p.add_argument(
+        "--print-steps", action="store_true",
+        help="print the run's total optimizer steps and exit; jobs/submit/train.sh sizes "
+             "its walltime from this, so it must not need a GPU",
+    )
     return p.parse_args(flags), overrides
 
 
@@ -246,6 +251,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     cfg, args = build_config(argv)
     if args.print_config:
         print(OmegaConf.to_yaml(cfg))
+        return 0
+
+    if args.print_steps:
+        # Sizing only: build the data, count the batches, print, exit. No model, no CUDA,
+        # so this runs on a login node.
+        dm = build_datamodule(cfg)
+        per_epoch = len(dm.train_dataloader())
+        print(f"steps_per_epoch {per_epoch}")
+        print(f"epochs {cfg.train.num_epochs}")
+        print(f"total_steps {per_epoch * cfg.train.num_epochs}")
         return 0
 
     setup_reproducibility(cfg)
