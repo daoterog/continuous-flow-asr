@@ -23,7 +23,11 @@ from src.constants import CONFIGS, SPLITS, data_root_for
 import lightning.pytorch as pl
 import numpy as np
 import torch
-from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
+from lightning.pytorch.callbacks import (
+    EarlyStopping,
+    LearningRateMonitor,
+    ModelCheckpoint,
+)
 from lightning.pytorch.loggers import Logger, WandbLogger
 from omegaconf import DictConfig, OmegaConf
 from transformers import WhisperTokenizerFast
@@ -154,6 +158,7 @@ def build_datamodule(cfg: DictConfig) -> AudioFeatureDataModule:
         num_workers=cfg.data.num_workers,
         seed=cfg.seed,
         pin_memory=torch.cuda.is_available(),
+        steps_per_epoch=cfg.data.get("steps_per_epoch"),
     ).prepare()
 
 
@@ -165,6 +170,23 @@ def build_trainer(cfg: DictConfig, logger: object) -> pl.Trainer:
         callbacks.append(ModelCheckpoint(monitor="total_loss/val", mode="min", save_last=True))
     if logger:  # LearningRateMonitor raises if there is nowhere to write
         callbacks.append(LearningRateMonitor(logging_interval="step"))
+    stop_on = cfg.train.get("early_stop_on")
+    if stop_on:
+        # stopping_threshold fires the moment the metric crosses the target, which is the
+        # point here — an overfit job that has reached 0% WER has nothing left to learn.
+        # patience is set out of reach so a plateau alone never stops the run; only
+        # hitting the target does. The metric must be logged on every validation, so this
+        # assumes the sampling cadence matches check_val_every_n_epoch.
+        callbacks.append(
+            EarlyStopping(
+                monitor=stop_on,
+                mode=cfg.train.get("early_stop_mode", "min"),
+                stopping_threshold=float(cfg.train.get("early_stop_threshold", 0.0)),
+                patience=10**6,
+                check_on_train_epoch_end=False,
+                verbose=True,
+            )
+        )
     return pl.Trainer(
         max_epochs=cfg.train.num_epochs,
         accelerator=cfg.train.accelerator,
