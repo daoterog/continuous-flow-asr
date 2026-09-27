@@ -1,0 +1,11 @@
+# mu_psi geometry only, layered over a variant with `--mu base`.
+# Deliberately past the point of comfort: 59.4M, larger than the `small` denoiser it
+# feeds. If mu at this size does not help, mu capacity is not what limits the flow.
+#
+# Only the variants that actually use mu (a non-null flow.gamma) read this; on
+# configs/linear.yaml it would build a decoder the flow never consults.
+model:
+  audio_decoder:
+    hidden: 768
+    n_heads: 12
+    n_blocks: 6

@@ -1,0 +1,11 @@
+# mu_psi geometry only, layered over a variant with `--mu small`.
+# DRAX's width, four times their depth. Still 18.5M — under their 28M budget, because
+# the compact vocab frees everything their output table spent.
+#
+# Only the variants that actually use mu (a non-null flow.gamma) read this; on
+# configs/linear.yaml it would build a decoder the flow never consults.
+model:
+  audio_decoder:
+    hidden: 512
+    n_heads: 8
+    n_blocks: 4

@@ -1,0 +1,11 @@
+# mu_psi geometry only, layered over a variant with `--mu micro`.
+# One block at the denoiser's smallest width. The floor: enough to test whether mu
+# contributes at all, not enough to transcribe on its own.
+#
+# Only the variants that actually use mu (a non-null flow.gamma) read this; on
+# configs/linear.yaml it would build a decoder the flow never consults.
+model:
+  audio_decoder:
+    hidden: 256
+    n_heads: 4
+    n_blocks: 1

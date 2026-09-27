@@ -1,0 +1,12 @@
+# mu_psi geometry only, layered over a variant with `--mu drax`.
+# DRAX's own p_mid: one transformer block plus a projection. They report 28M, but
+# 26.6M of that is the projection over Whisper's 51,866 tokens; over our 1,192-token
+# compact vocab the identical architecture is 5.9M.
+#
+# Only the variants that actually use mu (a non-null flow.gamma) read this; on
+# configs/linear.yaml it would build a decoder the flow never consults.
+model:
+  audio_decoder:
+    hidden: 512
+    n_heads: 8
+    n_blocks: 1

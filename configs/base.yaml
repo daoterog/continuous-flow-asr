@@ -13,6 +13,10 @@ variant: null
 # model.denoiser below rather than from a size file.
 size: null
 
+# The same for mu_psi, filled in by `--mu` from configs/mu/. Independent of `size`: DRAX
+# hold mu fixed across both their model sizes, so the two are separate axes to ablate.
+mu_size: null
+
 data:
   # `local` -> ./data, `snellius` -> /scratch-shared/cont-flow-asr/data. data_root wins.
   env: local

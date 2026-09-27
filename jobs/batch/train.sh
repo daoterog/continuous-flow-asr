@@ -7,9 +7,19 @@
 #SBATCH --cpus-per-task=16
 # Sized so the features fit the page cache, not so the process fits. Full clean/train.100
 # is 102 GiB of fp16 latents; at 64G it did not cache and every epoch re-read it off GPFS
-# at ~219 utts/s against 657 utts/s warm — a 3x walltime penalty for a request that was
-# already below a 1-GPU fair share of the node (4 GPUs, ~500G).
-#SBATCH --mem=120G
+# at ~219 utts/s against 657 utts/s warm — a 3x walltime penalty.
+#
+# The features are mmap'd, so their pages are charged to this job's cgroup along with the
+# workers. Budget for all of it, not just the data: 102 GiB mapped + ~24 GiB for 16 worker
+# processes + ~8 GiB for the main process, CUDA's host allocations and the non-reclaimable
+# pinned staging buffers. 120G was 14 GiB short of that and the OOM killer took a worker
+# mid-epoch ("killed by signal: Killed"), non-deterministically — clean mapped pages are
+# reclaimable, so the job survives it sometimes and dies others.
+#
+# This only stretches to train.100. Untrimmed train.360 is 372 GiB and cannot be cached at
+# any sane request; pre-pooling the features at audio_stride would cut every figure here
+# by 4x and is the prerequisite for training on more than train.100.
+#SBATCH --mem=160G
 #SBATCH --time=01:00:00
 # A placeholder only. submit/train.sh overrides --time with a value derived from the
 # config's own step count and a measured steps-per-second, so this is what you get if

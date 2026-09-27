@@ -1,0 +1,11 @@
+# mu_psi geometry only, layered over a variant with `--mu tiny`.
+# What configs/audio_cond.yaml has used for every experiment so far, kept so the
+# earlier results stay reproducible.
+#
+# Only the variants that actually use mu (a non-null flow.gamma) read this; on
+# configs/linear.yaml it would build a decoder the flow never consults.
+model:
+  audio_decoder:
+    hidden: 256
+    n_heads: 4
+    n_blocks: 2

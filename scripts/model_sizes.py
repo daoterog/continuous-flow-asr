@@ -25,9 +25,10 @@ import torch  # noqa: E402
 from omegaconf import OmegaConf  # noqa: E402
 
 import src  # noqa: F401, E402  # sets HF_HOME before transformers is imported
-from src.models import build_denoiser  # noqa: E402
+from src.models import build_audio_decoder, build_denoiser  # noqa: E402
 
 SIZES_DIR = REPO_ROOT / "configs" / "sizes"
+MU_DIR = REPO_ROOT / "configs" / "mu"
 BASE_CONFIG = REPO_ROOT / "configs" / "base.yaml"
 BYTES_PER_PARAM = 16  # fp32 weight + fp32 grad + two fp32 AdamW moments
 
@@ -78,6 +79,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"{name:<8} {cfg.hidden_size:>6} {cfg.n_blocks:>4} {cfg.n_heads:>6} "
               f"{total / 1e6:>8.1f}M {100 * blocks / total:>9.0f}% "
               f"{total * BYTES_PER_PARAM / 2**30:>10.2f} {total / args.tokens:>13.0f}")
+
+    mu_paths = sorted(MU_DIR.glob("*.yaml"))
+    if not mu_paths:
+        return 0
+    # mu's canvas width decides its learned query table, so it is a real parameter here
+    # rather than a detail — unlike the denoiser, which is RoPE and carries no positions.
+    canvas = int(OmegaConf.load(BASE_CONFIG).data.canvas_len)
+    mu_rows = []
+    for path in mu_paths:
+        node = OmegaConf.load(path).model.audio_decoder
+        with torch.device("meta"):
+            model = build_audio_decoder(node, args.vocab, canvas)
+        total = sum(p.numel() for p in model.parameters())
+        head = sum(p.numel() for p in model.head.parameters())
+        mu_rows.append((path.stem, node, total, head))
+
+    mu_rows.sort(key=lambda r: r[2])
+    print(f"\nmu_psi (--mu), canvas {canvas}\n")
+    print(f"{'mu':<8} {'hidden':>6} {'blk':>4} {'heads':>6} {'params':>9} "
+          f"{'in head':>9} {'optim GiB':>10}")
+    for name, cfg, total, head in mu_rows:
+        print(f"{name:<8} {cfg.hidden:>6} {cfg.n_blocks:>4} {cfg.n_heads:>6} "
+              f"{total / 1e6:>8.1f}M {100 * head / total:>8.0f}% "
+              f"{total * BYTES_PER_PARAM / 2**30:>10.2f}")
+    if args.vocab < 10_000:
+        print("\nThe 'in head' column is why DRAX's '28M for p_mid' does not transfer: at")
+        print("their 51,866-token vocabulary the projection is ~85% of that number, so 28M")
+        print("buys one transformer block. Run with --vocab 51866 to see it.")
     return 0
 
 
