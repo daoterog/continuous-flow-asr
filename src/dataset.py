@@ -83,8 +83,10 @@ class AudioFeatureDataset(Dataset):
         """One utterance: its (frames, d_model) latents and its raw transcript.
 
         Whisper frames are 20 ms; stride 4 makes them 80 ms, still well under a phoneme,
-        and it cuts the cross-attention keys 4x. The pool runs in float32 so the mean
-        does not accumulate in float16.
+        and it cuts the cross-attention keys 4x. The pool accumulates in float32 so the
+        mean does not sum in float16, then returns to the stored dtype: the result leaves
+        this process through shared memory, and the training step casts it up on the GPU
+        anyway, so widening it here would double the per-batch transfer for nothing.
         """
         shard_idx, offset, length, text = self.utts[idx]
         feats = self._feats(shard_idx)[offset : offset + length]
@@ -98,6 +100,7 @@ class AudioFeatureDataset(Dataset):
                 .view(keep // self.audio_stride, self.audio_stride, d_model)
                 .float()
                 .mean(dim=1)
+                .to(audio.dtype)
             )
         return {"audio": audio, "text": text}
 
