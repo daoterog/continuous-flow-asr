@@ -58,6 +58,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p.add_argument("--warmup", type=int, default=10, help="untimed steps first")
     p.add_argument("--n-utts", type=int, default=2048, help="training subset to read from")
     p.add_argument("--only", nargs="+", default=None, help="run only these trial labels")
+    p.add_argument(
+        "--repeats", type=int, default=1,
+        help="time each trial this many times and keep the fastest; 2 guards against a "
+             "one-off stall on a shared filesystem",
+    )
+    p.add_argument(
+        "--no-warm", action="store_true",
+        help="skip the cache-warming pass (only if the data is already hot)",
+    )
     return p.parse_args(argv)
 
 
@@ -90,6 +99,36 @@ class StepTimer:
         """(seconds, steps) of steady state."""
         torch.cuda.synchronize()
         return time.perf_counter() - self.started, self.steps
+
+
+def warm_cache(config: str, args: argparse.Namespace) -> float:
+    """Read the whole training subset once, so no trial pays for a cold filesystem.
+
+    On GPFS the first pass over the features is far slower than the rest, and without
+    this the trial order decides the winner: each trial inherits a warmer cache than the
+    last, which makes per-step time *fall* as batch size rises — an impossible result
+    that is easy to mistake for a real one.
+    """
+    import train as T
+
+    cfg, _ = T.build_config([
+        "--config", config, "--offline",
+        f"data.env={args.env}",
+        f"data.subset_n.train={args.n_utts}",
+        "data.subset_n.val=8",
+        "data.batch_size=64",
+        "data.num_workers=8",
+        "schedule.enabled=false",
+    ])
+    dm = T.build_datamodule(cfg)
+    started = time.perf_counter()
+    total = 0
+    for batch in dm.train_dataloader():
+        total += int(batch["audio"].shape[0])
+    elapsed = time.perf_counter() - started
+    print(f"warming the filesystem cache: {total} utts in {elapsed:.1f}s "
+          f"({total / max(elapsed, 1e-9):.0f} utts/s cold)\n")
+    return elapsed
 
 
 def time_one(config: str, overrides: list[str], args: argparse.Namespace) -> dict:
@@ -158,13 +197,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print(f"device: {torch.cuda.get_device_name(0)}   data root: {args.env}")
     print(f"timing {args.steps} steps (+{args.warmup} warmup) per trial, "
-          f"reading from {args.n_utts} utterances\n")
+          f"reading from {args.n_utts} utterances")
+    if not args.no_warm:
+        warm_cache(args.config, args)
     print(f"{'trial':<30} {'ms/step':>9} {'utts/s':>9} {'peak GiB':>9}")
 
     results = []
     for label, overrides in trials:
         try:
-            r = time_one(args.config, overrides, args)
+            runs = [time_one(args.config, overrides, args) for _ in range(args.repeats)]
+            r = min(runs, key=lambda d: d["ms_per_step"])
         except torch.cuda.OutOfMemoryError:
             print(f"{label:<30} {'OOM':>9}")
             torch.cuda.empty_cache()
