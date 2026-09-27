@@ -48,6 +48,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     p.add_argument("--config", default="configs/linear.yaml")
+    p.add_argument(
+        "--env", choices=["local", "snellius"], default="local",
+        help="which data root the features live under; the same flag the download and "
+             "precompute scripts take. On the cluster this must be snellius, or the "
+             "features resolve to the empty data/ inside the repo",
+    )
     p.add_argument("--steps", type=int, default=40, help="timed steps per trial")
     p.add_argument("--warmup", type=int, default=10, help="untimed steps first")
     p.add_argument("--n-utts", type=int, default=2048, help="training subset to read from")
@@ -96,6 +102,7 @@ def time_one(config: str, overrides: list[str], args: argparse.Namespace) -> dic
     total = args.warmup + args.steps
     cfg, _ = T.build_config([
         "--config", config, "--offline",
+        f"data.env={args.env}",
         f"data.subset_n.train={args.n_utts}",
         f"data.subset_n.val={min(args.n_utts, 64)}",
         f"data.steps_per_epoch={total}",
@@ -149,7 +156,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.only:
         trials = [t for t in TRIALS if t[0] in args.only]
 
-    print(f"device: {torch.cuda.get_device_name(0)}")
+    print(f"device: {torch.cuda.get_device_name(0)}   data root: {args.env}")
     print(f"timing {args.steps} steps (+{args.warmup} warmup) per trial, "
           f"reading from {args.n_utts} utterances\n")
     print(f"{'trial':<30} {'ms/step':>9} {'utts/s':>9} {'peak GiB':>9}")
@@ -163,7 +170,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             torch.cuda.empty_cache()
             continue
         except Exception as exc:
-            print(f"{label:<30} FAILED {type(exc).__name__}: {str(exc)[:40]}")
+            # Wide enough to keep the actionable part: the resolver's message names the
+            # directories it looked in and the command that would create them.
+            first_line = " ".join(str(exc).split("\n")[0].split())
+            print(f"{label:<30} FAILED {type(exc).__name__}: {first_line[:120]}")
+            if not results:  # a first-trial failure is almost always config, not the trial
+                print("  full error:\n    " + str(exc).replace("\n", "\n    "))
+                return 1
             continue
         results.append((label, r))
         print(f"{label:<30} {r['ms_per_step']:9.1f} {r['utts_per_s']:9.0f} "
