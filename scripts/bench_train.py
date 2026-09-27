@@ -200,6 +200,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     trials = TRIALS
     if args.only:
+        # A label that matches nothing is almost always a stale checkout rather than a
+        # typo, and silently running the subset that does match burns a whole job to
+        # re-measure one row. Name the misses and stop.
+        unknown = [name for name in args.only if name not in dict(TRIALS)]
+        if unknown:
+            print("no such trial: " + ", ".join(repr(u) for u in unknown))
+            print("known trials:\n  " + "\n  ".join(label for label, _ in TRIALS))
+            return 1
         trials = [t for t in TRIALS if t[0] in args.only]
 
     print(f"device: {torch.cuda.get_device_name(0)}   data root: {args.env}")
