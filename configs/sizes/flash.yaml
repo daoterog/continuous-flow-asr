@@ -1,0 +1,13 @@
+# Denoiser geometry only, layered over any variant with `--size flash`.
+# Drax-flash's geometry. DRAX report 250M for it; over our 1,192-token compact
+# vocab the same shape is 118M, because Whisper's tables were 130M of their count.
+#
+# mu (model.audio_decoder) is deliberately NOT scaled here: DRAX hold their
+# audio-conditioned p_mid at 28M across both model sizes, and the variant configs
+# own that field. Only the variants that use mu define it at all.
+model:
+  denoiser:
+    hidden_size: 1280
+    cond_dim: 128
+    n_heads: 20
+    n_blocks: 4

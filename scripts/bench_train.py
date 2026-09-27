@@ -54,6 +54,23 @@ TRIALS: list[tuple[str, list[str]]] = [
       "train.matmul_precision=high"]),
     ("batch 512 + workers 16 + compile",
      ["data.batch_size=512", "data.num_workers=16", "train.compile=true"]),
+    # The size ladder, at the settings the rows above settled on. compile is left off:
+    # its warmup grows with the model and would land inside the timed window on the deeper
+    # geometries. Read these as relative cost per size; compile's gain applies on top.
+    *[
+        (f"size {name}", ["--size", name, "data.batch_size=256", "data.num_workers=16"])
+        for name in ("tiny", "small", "base", "flash", "large")
+    ],
+    # Canvas width. 96 drops 8.4% of the corpus and train.100 is the longest split, so the
+    # loss falls on the training data; 128 keeps 99.75%, 224 keeps everything at 70%
+    # padding. Self-attention is quadratic in this and cross-attention linear, so the cost
+    # is worth measuring rather than assuming.
+    *[
+        (f"canvas {c} + small",
+         ["--size", "small", f"data.canvas_len={c}",
+          "data.batch_size=256", "data.num_workers=16"])
+        for c in (96, 128, 224)
+    ],
 ]
 
 

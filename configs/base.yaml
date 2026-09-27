@@ -8,6 +8,11 @@ seed: 0
 # Left null it is filled in from the config file's stem.
 variant: null
 
+# Which entry of configs/sizes/ shaped the denoiser, filled in by `--size`. A hyperparameter
+# like `variant`, so a size sweep is filterable in wandb; null means the geometry came from
+# model.denoiser below rather than from a size file.
+size: null
+
 data:
   # `local` -> ./data, `snellius` -> /scratch-shared/cont-flow-asr/data. data_root wins.
   env: local
@@ -15,7 +20,16 @@ data:
   # The checkpoint the features were precomputed with; names the cache directory.
   model: openai/whisper-large-v3
 
-  canvas_len: 96
+  # Wide enough for the whole corpus: measured over clean/{train.100,validation,test},
+  # tokens per utterance run mean 67, p99 113, max 215 — and train.100 is the longest
+  # split (mean 71.5), so a short canvas costs training data first. 96 dropped 8.4% of all
+  # utterances; 128 keeps 99.75%; 224 keeps everything.
+  #
+  # Anything over canvas_len is filtered out, so this also silently decides how much of
+  # test is scored. Padding is a real target the model learns to emit, but it is 70% of
+  # the field here, and the binned metrics count pad positions in their denominator — so
+  # P_e and the binned loss are NOT comparable across different canvas_len values.
+  canvas_len: 224
   # mean-pool the 1500 Whisper frames: stride 4 makes them 80 ms and cuts the
   # cross-attention keys 4x.
   audio_stride: 4

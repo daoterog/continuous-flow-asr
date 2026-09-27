@@ -2,12 +2,14 @@
 
     python train.py --config configs/linear.yaml
     python train.py --config configs/audio_cond.yaml train.num_epochs=10
+    python train.py --config configs/linear.yaml --size small
     python train.py --config configs/three_term.yaml \
         --train-configs clean other --train-splits train.100 train.360
 
 The YAML is the source of truth. `--*-configs` / `--*-splits` mirror the flags on
-scripts/precompute_whisper.py and override the `data.splits` node; anything else is a
-plain OmegaConf dotlist override.
+scripts/precompute_whisper.py and override the `data.splits` node; `--size` layers a
+denoiser geometry from configs/sizes/ over the variant; anything else is a plain
+OmegaConf dotlist override.
 """
 
 import argparse
@@ -38,6 +40,10 @@ from src.schedule import make_tau_inverse, sweep_corruption
 
 # `train.num_epochs=10`, `data.subset_n.train=64` — an OmegaConf dotlist assignment.
 DOTLIST = re.compile(r"^[A-Za-z_][\w.]*=")
+
+# Denoiser geometries, read off the directory so a new size file needs no code change.
+SIZES_DIR = Path(__file__).resolve().parent / "configs" / "sizes"
+SIZES = sorted(p.stem for p in SIZES_DIR.glob("*.yaml"))
 
 
 def load_config(path: Path) -> DictConfig:
@@ -82,6 +88,11 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, l
             f"--{role}-splits", nargs="+", choices=SPLITS, default=None,
             help=f"override data.splits.{role}.splits",
         )
+    p.add_argument(
+        "--size", choices=SIZES, default=None,
+        help="denoiser geometry from configs/sizes/. Layers over the variant config, "
+             "which owns the flow and mu; a dotlist override still wins over it",
+    )
     p.add_argument("--offline", action="store_true", help="log without a network")
     p.add_argument("--print-config", action="store_true", help="resolve, print and exit")
     p.add_argument(
@@ -93,9 +104,16 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, l
 
 
 def build_config(argv: Sequence[str] | None = None) -> tuple[DictConfig, argparse.Namespace]:
-    """YAML, then the split flags, then the dotlist overrides."""
+    """YAML, then --size, then the split flags, then the dotlist overrides."""
     args, overrides = parse_args(argv)
     cfg = load_config(args.config)
+
+    # Merged after the variant so the geometry is orthogonal to the flow: --size sets only
+    # model.denoiser, leaving gamma and mu to the variant config. Before the dotlist, so a
+    # single key can still be poked without editing the size file.
+    if args.size is not None:
+        cfg = OmegaConf.merge(cfg, load_config(SIZES_DIR / f"{args.size}.yaml"))
+        cfg.size = args.size
 
     for role in ROLES:
         for field in ("configs", "splits"):
