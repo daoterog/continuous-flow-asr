@@ -46,6 +46,14 @@ TRIALS: list[tuple[str, list[str]]] = [
     ("batch 512 + workers 16", ["data.batch_size=512", "data.num_workers=16"]),
     ("batch 256 + workers 16 + compile",
      ["data.batch_size=256", "data.num_workers=16", "train.compile=true"]),
+    # Once the fp16 pool freed the dataloader, compile started paying (+33% at batch 256)
+    # and inductor began asking for TF32. Both had measured neutral while the step was
+    # waiting on data, so the compute-side knobs are worth a second look here.
+    ("batch 256 + workers 16 + compile + matmul high",
+     ["data.batch_size=256", "data.num_workers=16", "train.compile=true",
+      "train.matmul_precision=high"]),
+    ("batch 512 + workers 16 + compile",
+     ["data.batch_size=512", "data.num_workers=16", "train.compile=true"]),
 ]
 
 
