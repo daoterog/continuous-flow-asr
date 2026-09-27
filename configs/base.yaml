@@ -25,7 +25,10 @@ data:
   # where the per-epoch fixed cost otherwise dominates.
   steps_per_epoch: null
   compact_vocab: true
-  num_workers: 4
+  # 16 on an A100 node with 16 cores: measured 849 -> 952 -> 1058 utts/s at 4 -> 8 -> 16
+  # workers. Loading, not the step, is what bounds throughput here, so this is the single
+  # largest lever. A 6-core laptop wants 4; match it to the cores you actually have.
+  num_workers: 16
 
   # One role = configs x splits, the same cross product the precompute scripts take.
   # Overridable as --train-configs / --train-splits / --val-configs / ... on the CLI.

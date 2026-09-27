@@ -16,10 +16,15 @@ CONFIG="${1:?usage: $0 <config.yaml> [overrides...]}"
 shift || true
 OVERRIDES="$*"
 
-# Throughput. Measured on an RTX 3060 at batch 16: ~11 steps/s solo. An A100 is faster
-# per step, but these steps are launch-bound rather than compute-bound, so the gain is
-# smaller than the FLOPs suggest — hence a deliberately low default until a real run
-# measures it. Override with STEPS_PER_SEC once you have a number from the smoke run.
+# Throughput, measured on an A100 node (scripts/bench_train.py, batch 256 + 16 workers +
+# compile). Two regimes, 15x apart, and which one applies is decided by whether the data
+# fits the job's 64G of RAM:
+#   ~3350 utts/s  reading a subset the page cache holds
+#   ~220 utts/s   reading more than it holds — ~800 MiB/s off GPFS, the real ceiling
+# train.100 is 102 GiB untrimmed, so a full-data run is the second regime. Size off it.
+#
+# This is a utts/s ceiling, so steps/s falls as the batch grows: STEPS_PER_SEC ~ 220/batch.
+# The default suits the default batch of 32; at batch 256 pass STEPS_PER_SEC=0.9.
 STEPS_PER_SEC="${STEPS_PER_SEC:-6}"
 SAFETY="${SAFETY:-1.3}"
 OVERHEAD_S="${OVERHEAD_S:-600}"   # module load, conda, tokenizer, tau sweep, first epoch
