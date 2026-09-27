@@ -56,7 +56,7 @@ def make_metrics(
             # denoiser_perr it separates what the field already carried from what the
             # denoiser added, which is the only way to see mu's effect on the input.
             metrics[f"{split}_input_perr"] = BinnedTokenError(
-                input_perr_bins, edges=edges_for(input_perr_bins)
+                input_perr_bins, edges=edges_for(input_perr_bins), pad_id=pad_id
             )
         for name in names:
             if loss_bins:
@@ -65,7 +65,7 @@ def make_metrics(
                 )
             if perr_bins:
                 metrics[f"{split}_{name}_perr"] = BinnedTokenError(
-                    perr_bins, edges=edges_for(perr_bins)
+                    perr_bins, edges=edges_for(perr_bins), pad_id=pad_id
                 )
             if wer_bins.get(split):
                 n = wer_bins[split]

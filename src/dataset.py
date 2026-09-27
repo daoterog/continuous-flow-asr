@@ -300,6 +300,7 @@ class AudioFeatureDataModule(pl.LightningDataModule):
 
         self.datasets: dict[str, Subset] = {}
         self.dirs: dict[str, list[Path]] = {}
+        self.mean_len: dict[str, float] = {}
         self.vocab_map: VocabMap | None = None
         self.vocab_size: int | None = None
         self.pad_id: int | None = None
@@ -352,6 +353,9 @@ class AudioFeatureDataModule(pl.LightningDataModule):
                     eligible, cap, replace=False
                 )
             self.datasets[role] = Subset(raw[role], sorted(eligible.tolist()))
+            # Kept for the summary: it is the ratio that says how much of the canvas the
+            # token-level metrics are really about, the rest being padding they exclude.
+            self.mean_len[role] = float(lengths[eligible].mean()) if len(eligible) else 0.0
 
         self._is_set_up = True
 
@@ -436,5 +440,14 @@ class AudioFeatureDataModule(pl.LightningDataModule):
         for role in ROLES:
             dirs = ", ".join(f"{d.parent.name}/{d.name}" for d in self.dirs[role])
             kept, total = len(self.datasets[role]), len(self.datasets[role].dataset)
-            lines.append(f"  {role:5s} {kept:>7,} of {total:>7,} utts   [{dirs}]")
+            # The padding share is printed because it is what separates a token-level
+            # metric from a word-level one: at 80% padding a model with every real token
+            # wrong still scores 0.2 if pad positions are counted. The metrics exclude
+            # them, so this line says how much of the canvas each number is actually about.
+            mean_len = self.mean_len[role]
+            lines.append(
+                f"  {role:5s} {kept:>7,} of {total:>7,} utts   "
+                f"mean {mean_len:5.1f} tok ({100 * (1 - mean_len / self.canvas_len):2.0f}% "
+                f"of canvas is pad)   [{dirs}]"
+            )
         return "\n".join(lines)

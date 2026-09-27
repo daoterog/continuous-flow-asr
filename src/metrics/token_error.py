@@ -15,15 +15,29 @@ class BinnedTokenError(TimeBinnedMetric):
 
     Cheap — a comparison and two sums, no decoding — so it can run every epoch and let
     tau be re-estimated from the model rather than from the model-free corruption sweep.
+
+    Pad positions are excluded from the denominator when `pad_id` is given. They are still
+    a real training target — emitting end-of-text is how a non-autoregressive sample knows
+    where to stop, so the loss keeps scoring them — but as a *measurement* they are nearly
+    free: padding is the commonest target and is learned first. Counting it sets a floor on
+    how bad P_e can look. On a 224-wide canvas holding utterances of ~43 tokens, 81% of
+    positions are padding, so a model with every real token wrong still reports 0.19.
     """
 
     inputs = ("pred_ids", "target_ids", "t")
     label = r"$P_e$ (token error)"
     ylim = (0, 1.02)
 
-    def __init__(self, num_bins: int = 100, edges: Edges = None, **kwargs: object) -> None:
+    def __init__(
+        self,
+        num_bins: int = 100,
+        edges: Edges = None,
+        pad_id: int | None = None,
+        **kwargs: object,
+    ) -> None:
         """Track a running wrong-token count and total per t-bin."""
         super().__init__(num_bins=num_bins, edges=edges, **kwargs)
+        self.pad_id = pad_id
         self.add_state("errors", default=torch.zeros(self.num_bins), dist_reduce_fx="sum")
         self.add_state("count", default=torch.zeros(self.num_bins), dist_reduce_fx="sum")
 
@@ -32,8 +46,13 @@ class BinnedTokenError(TimeBinnedMetric):
     ) -> None:
         """Accumulate one batch of (B, L) predictions against (B, L) targets."""
         idx = self._bin_indices(t)
-        wrong = (pred_ids != target_ids).sum(dim=1).float()
-        total = torch.full_like(wrong, target_ids.size(1))
+        scored = (
+            torch.ones_like(target_ids, dtype=torch.bool)
+            if self.pad_id is None
+            else target_ids != self.pad_id
+        )
+        wrong = ((pred_ids != target_ids) & scored).sum(dim=1).float()
+        total = scored.sum(dim=1).float()
         self.errors.scatter_add_(0, idx, wrong)
         self.count.scatter_add_(0, idx, total)
 

@@ -108,6 +108,12 @@ def sweep_corruption(
     This is the prior tau is built from before any training: how much of the transcript
     the field carries on its own. Pass the schedules the run will actually train with, or
     tau describes a different probability path than the model sees.
+
+    The mean runs over every canvas position, padding included, and still matches the
+    model-measured P_e that BinnedTokenError reports over real tokens only: recovery here
+    depends on t and V alone — the spike sits on whichever token is true, so a pad position
+    is recovered with exactly the same probability as a word. Averaging over all positions
+    and over real ones agree in expectation, so the prior and the refresh stay comparable.
     """
     return [
         (
