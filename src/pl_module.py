@@ -387,8 +387,33 @@ class FlowMatching(MetricReporting, pl.LightningModule):
 
         self._pending_tau = (new_tau, mu_accuracy)
 
+    def _check_finite(self, loss: torch.Tensor, out: dict, split: str) -> None:
+        """Stop the run the first time the objective is not finite.
+
+        A NaN or inf propagates into the weights on the next optimizer step and every
+        metric afterwards is meaningless, but nothing about the run looks wrong: the
+        process keeps going, the job is not killed, and wandb keeps accepting the NaNs it
+        is handed. Hours of a cluster reservation go into a model that cannot recover.
+
+        Costs one `isfinite` on a scalar already on the GPU, and only syncs when it trips.
+        """
+        if torch.isfinite(loss):
+            return
+        parts = "  ".join(
+            f"{name}_loss={float(rec['loss']):.4g}"
+            for name, rec in out.items()
+            if "loss" in rec
+        )
+        raise RuntimeError(
+            f"non-finite {split} loss at epoch {self.current_epoch}, "
+            f"global step {self.global_step}: total={float(loss):.4g}  {parts}. "
+            f"Training stopped rather than carrying NaN into the weights — lower "
+            f"train.denoiser_lr, or set train.grad_clip if it is null."
+        )
+
     def _step(self, batch: dict, split: str) -> torch.Tensor:
         loss, out, t = self.flow_step(batch)
+        self._check_finite(loss, out, split)
         self.log_losses(loss, out, split, batch_size=batch["tokens"].size(0))
         self.update_metrics(out, batch["tokens"], t, split)
         return loss
