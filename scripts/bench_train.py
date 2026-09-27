@@ -39,6 +39,13 @@ TRIALS: list[tuple[str, list[str]]] = [
     ("batch 64 + workers 8", ["data.batch_size=64", "data.num_workers=8"]),
     ("batch 64 + workers 16", ["data.batch_size=64", "data.num_workers=16"]),
     ("batch 64 + compile", ["data.batch_size=64", "train.compile=true"]),
+    # Batch and workers both helped on their own and neither was near a limit, so the
+    # combination is the untested cell. Peak was 4.44 GiB at batch 256 on a 40 GB card.
+    ("batch 128 + workers 16", ["data.batch_size=128", "data.num_workers=16"]),
+    ("batch 256 + workers 16", ["data.batch_size=256", "data.num_workers=16"]),
+    ("batch 512 + workers 16", ["data.batch_size=512", "data.num_workers=16"]),
+    ("batch 256 + workers 16 + compile",
+     ["data.batch_size=256", "data.num_workers=16", "train.compile=true"]),
 ]
 
 
