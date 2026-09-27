@@ -54,8 +54,20 @@ class AudioDecoder(nn.Module):
                     ),
                     "n3": nn.LayerNorm(hidden),
                     "ff": nn.Sequential(
-                        nn.Linear(hidden, d_ff), nn.GELU(), nn.Linear(d_ff, hidden)
+                        nn.Linear(hidden, d_ff),
+                        nn.GELU(),
+                        nn.Dropout(dropout),
+                        nn.Linear(d_ff, hidden),
                     ),
+                    # MultiheadAttention's own `dropout` only masks attention weights.
+                    # These cover what the standard block also drops: each sub-layer's
+                    # output, on the way into the residual. Without them `dropout` leaves
+                    # the feed-forward path — two thirds of a block's parameters —
+                    # unregularised. nn.Dropout holds no parameters and is the identity
+                    # at p=0.0, so the default configuration is unchanged.
+                    "d1": nn.Dropout(dropout),
+                    "d2": nn.Dropout(dropout),
+                    "d3": nn.Dropout(dropout),
                 }
             )
             for _ in range(n_blocks)
@@ -69,10 +81,10 @@ class AudioDecoder(nn.Module):
         x = self.queries.expand(audio.size(0), -1, -1)
         for b in self.blocks:
             h = b["n1"](x)
-            x = x + b["sa"](h, h, h, need_weights=False)[0]
+            x = x + b["d1"](b["sa"](h, h, h, need_weights=False)[0])
             h = b["n2"](x)
-            x = x + b["xa"](h, a, a, need_weights=False)[0]
-            x = x + b["ff"](b["n3"](x))
+            x = x + b["d2"](b["xa"](h, a, a, need_weights=False)[0])
+            x = x + b["d3"](b["ff"](b["n3"](x)))
         return self.head(self.norm_out(x))
 
 

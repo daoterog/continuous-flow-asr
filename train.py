@@ -16,7 +16,9 @@ import argparse
 import os
 import re
 import sys
+import time
 from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 
 import src.constants  # noqa: F401  # sets HF_HOME; must precede transformers
@@ -218,10 +220,42 @@ def build_datamodule(cfg: DictConfig) -> AudioFeatureDataModule:
     ).prepare()
 
 
+class Heartbeat(pl.Callback):
+    """One timestamped line per epoch on stdout, owned by nobody but this process.
+
+    When a cluster run goes quiet, the first question is whether *training* stopped or
+    only *logging* did — and the wandb history cannot answer it, because if the logger is
+    the thing that died the history ends either way. This writes straight to the job's
+    stdout, so the SLURM .out file settles it: if these lines keep coming after the
+    metrics stop, the training loop is alive and the logger is at fault; if they stop
+    too, the loop itself is stuck, and the last one names the epoch it stuck on.
+
+    Flushed explicitly because stdout is a file here, not a tty, so it is block-buffered
+    and an unflushed line is exactly the evidence that goes missing when a job is killed.
+    """
+
+    def __init__(self) -> None:
+        """Record the start so each line carries elapsed time as well as wall clock."""
+        super().__init__()
+        self.started = time.monotonic()
+
+    def on_train_epoch_end(self, trainer: pl.Trainer, module: pl.LightningModule) -> None:
+        """Epoch, global step, elapsed minutes, and the training loss if it is in hand."""
+        loss = trainer.callback_metrics.get("total_loss/train")
+        loss_s = f"  loss {float(loss):.4f}" if loss is not None else ""
+        print(
+            f"[heartbeat] {datetime.now():%H:%M:%S}  "
+            f"epoch {trainer.current_epoch + 1}/{trainer.max_epochs}  "
+            f"step {trainer.global_step}  "
+            f"{(time.monotonic() - self.started) / 60:.1f} min{loss_s}",
+            flush=True,
+        )
+
+
 def build_trainer(cfg: DictConfig, logger: object) -> pl.Trainer:
     """Trainer with gradient clipping, LR logging and a val-loss checkpoint."""
     checkpoint = cfg.train.get("checkpoint", True)
-    callbacks = []
+    callbacks: list[pl.Callback] = [Heartbeat()]
     if checkpoint:
         callbacks.append(ModelCheckpoint(monitor="total_loss/val", mode="min", save_last=True))
     if logger:  # LearningRateMonitor raises if there is nowhere to write
