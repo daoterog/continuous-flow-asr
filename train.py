@@ -41,9 +41,13 @@ from src.schedule import make_tau_inverse, sweep_corruption
 # `train.num_epochs=10`, `data.subset_n.train=64` — an OmegaConf dotlist assignment.
 DOTLIST = re.compile(r"^[A-Za-z_][\w.]*=")
 
-# Denoiser geometries, read off the directory so a new size file needs no code change.
+# Denoiser and mu geometries, read off their directories so a new file needs no code
+# change. They are separate axes: --size shapes the denoiser, --mu shapes mu_psi, and the
+# variant config decides whether mu enters the flow at all.
 SIZES_DIR = Path(__file__).resolve().parent / "configs" / "sizes"
 SIZES = sorted(p.stem for p in SIZES_DIR.glob("*.yaml"))
+MU_DIR = Path(__file__).resolve().parent / "configs" / "mu"
+MU_SIZES = sorted(p.stem for p in MU_DIR.glob("*.yaml"))
 
 
 def load_config(path: Path) -> DictConfig:
@@ -93,6 +97,11 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, l
         help="denoiser geometry from configs/sizes/. Layers over the variant config, "
              "which owns the flow and mu; a dotlist override still wins over it",
     )
+    p.add_argument(
+        "--mu", choices=MU_SIZES, default=None,
+        help="mu_psi geometry from configs/mu/. Only meaningful on a variant whose "
+             "flow.gamma is set, since that is what puts mu in the interpolant",
+    )
     p.add_argument("--offline", action="store_true", help="log without a network")
     p.add_argument("--print-config", action="store_true", help="resolve, print and exit")
     p.add_argument(
@@ -114,6 +123,15 @@ def build_config(argv: Sequence[str] | None = None) -> tuple[DictConfig, argpars
     if args.size is not None:
         cfg = OmegaConf.merge(cfg, load_config(SIZES_DIR / f"{args.size}.yaml"))
         cfg.size = args.size
+    if args.mu is not None:
+        if cfg.flow.get("gamma") is None:
+            raise ValueError(
+                f"--mu {args.mu} on {args.config.name}, whose flow.gamma is null: mu would "
+                f"be built and trained but never enter the interpolant. Use a variant that "
+                f"sets gamma (audio_cond, three_term), or drop --mu."
+            )
+        cfg = OmegaConf.merge(cfg, load_config(MU_DIR / f"{args.mu}.yaml"))
+        cfg.mu_size = args.mu
 
     for role in ROLES:
         for field in ("configs", "splits"):
