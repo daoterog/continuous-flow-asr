@@ -84,6 +84,22 @@ flow:
   # with mu itself perfect either way. mu converges easily and does not need the weight.
   mu_loss_weight: 0.1
 
+  # How much a padding position counts in the cross-entropy, before a weighted mean.
+  # 1.0 is a plain mean over the canvas, where ~70% of the terms are "emit end-of-text" at
+  # canvas_len 224 over ~67-token utterances. Lowering it both drops padding's share of the
+  # gradient and, since the denominator shrinks too, scales up what each real token
+  # contributes — so part of any speed-up is an effective LR increase on content and the
+  # two have to be swept together. Never set it to 0 without checking length control:
+  # emitting end-of-text is how a non-autoregressive sample knows where to stop.
+  pad_loss_weight: 1.0
+
+  # Length scale, in tokens, over which a padding position decays from full weight to
+  # pad_loss_weight as it gets further from the end of the transcript. 0 or null weighs
+  # every pad the same. The point is that the first pad is the stop decision and the rest
+  # are free, so a decay of a few tokens keeps length control at full strength while
+  # dropping the tail that dilutes the objective. Inert while pad_loss_weight is 1.0.
+  pad_decay: 0.0
+
 schedule:
   # Draw t through tau^-1 rather than uniformly. Off, ~65% of every batch lands below the
   # dead zone where x_t carries nothing.
@@ -134,6 +150,11 @@ sampling:
   num_steps: 16
   every_n_epochs: 5
   n_utts: 64
+  # Utterances integrated at once. n_utts decides how many are scored, this decides peak
+  # memory: the integrator holds several (B, canvas_len, vocab_size) fields, which is
+  # 11 GiB for 256 utterances over Whisper's full vocabulary. null follows data.batch_size,
+  # which training already fits while also holding gradients.
+  batch_size: null
   # Feed back a one-hot argmax instead of the softmax. The softmax is closer to what
   # training showed the model, so it is the default.
   hard: false
