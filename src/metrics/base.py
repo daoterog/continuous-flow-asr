@@ -50,6 +50,12 @@ class TimeBinnedMetric(Metric):
     Equal-width bins by default. Pass `edges` to bin some other way; in particular
     schedule_bin_edges(sample_t_fn, n), which is what keeps every bin populated once t is
     drawn through a reparameterization rather than uniformly.
+
+    `num_bins=1` is the degenerate case, and is how a quantity that cannot vary with t is
+    measured — mu_psi's forward takes audio and nothing else, so its prediction is the
+    same whichever bin its batch drew. One bin makes `overall()` the whole quantity, and
+    `metrics.utils.is_binned` reads False, which suppresses the histogram, the
+    low_t/high_t pair and the bin-edge summary downstream.
     """
 
     def __init__(self, num_bins: int = 10, edges: Edges = None, **kwargs: object) -> None:

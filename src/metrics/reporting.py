@@ -83,6 +83,14 @@ class MetricReporting:
             f"total_loss/{split}", loss, on_step=False, on_epoch=True, batch_size=batch_size
         )
         for name in self.names:
+            # `flush_metrics` already emits {name}_loss/{split}_overall from BinnedLoss,
+            # which is this same number — they agree to float32 precision, since both are
+            # a batch-size-weighted mean of the per-sequence losses. Logging only the
+            # `_overall` form keeps loss reading like perr and wer. The fallback matters:
+            # with metrics.loss_bins at 0 there is no BinnedLoss, and without this the
+            # per-model term would vanish from the run entirely.
+            if f"{split}_{name}_loss" in self.metrics:
+                continue
             self.log(
                 f"{name}_loss/{split}",
                 out[name]["loss"],
