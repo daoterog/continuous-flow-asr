@@ -289,8 +289,19 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         self.eval()
         audio = batch["audio"].to(self.device).float()
         tokens = batch["tokens"].to(self.device)
-        pred = self.sample(
-            audio, int(cfg.get("num_steps", 16)), hard=bool(cfg.get("hard", False))
+        # Sampled in chunks so peak memory follows the chunk, not n_utts. The integrator
+        # holds several (B, canvas_len, vocab_size) fields at once, which is 0.13 GiB per
+        # utterance-hundred over the compact vocabulary and 11 GiB over Whisper's full
+        # one — the whole slice in a single call is what put an A100 over at n_utts 256.
+        # Only (B, canvas_len) ids come back, so the concatenation is free.
+        chunk = int(cfg.get("batch_size") or self.cfg.data.batch_size)
+        num_steps = int(cfg.get("num_steps", 16))
+        hard = bool(cfg.get("hard", False))
+        pred = torch.cat(
+            [
+                self.sample(audio[i : i + chunk], num_steps, hard=hard)
+                for i in range(0, audio.size(0), chunk)
+            ]
         )
         wer, token_error = score_samples(
             pred, tokens, self.tokenizer, self.pad_id, self.vocab_map
