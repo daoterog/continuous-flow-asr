@@ -117,6 +117,11 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         self.gamma_fn = make_schedule(flow.get("gamma"))
         self.stop_grad_mu = bool(flow.get("stop_grad_mu", True))
         self.mu_loss_weight = float(flow.get("mu_loss_weight", 1.0))
+        self.pad_loss_weight = float(flow.get("pad_loss_weight", 1.0))
+        if not 0.0 <= self.pad_loss_weight <= 1.0:
+            raise ValueError(
+                f"flow.pad_loss_weight must be in [0, 1], got {self.pad_loss_weight}"
+            )
 
         if self.gamma_fn is not None and self.mu_nn is None:
             raise ValueError(
@@ -158,19 +163,66 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             i_t = i_t + self.gamma_fn(t)[:, None, None] * mu
         return i_t
 
-    @staticmethod
-    def sequence_ce(logits: torch.Tensor, tokens: torch.Tensor) -> torch.Tensor:
+    def sequence_ce(self, logits: torch.Tensor, tokens: torch.Tensor) -> torch.Tensor:
         """(B,) cross-entropy, one value per row instead of a batch scalar.
 
-        Its mean equals F.cross_entropy(..., reduction="mean") because every row is
-        exactly canvas_len wide, so the training signal is unchanged — but keeping the
-        per-row values is what lets BinnedLoss attribute a loss to the t that produced it.
+        Keeping the per-row values is what lets BinnedLoss attribute a loss to the t that
+        produced it.
+
+        `flow.pad_loss_weight` scales the padding positions before a weighted mean. At
+        weight 1 this is the plain mean over the canvas, where ~70% of the terms are
+        "emit end-of-text" on a 224-wide canvas holding ~67-token utterances. Lowering it
+        does two things at once, and they are easy to confuse: it removes padding's share
+        of the gradient, AND, because the denominator shrinks with it, multiplies what
+        each real token contributes by up to canvas_len / n_real ~ 3.3. Some of any gain
+        is therefore an effective learning-rate increase on content, which is why the
+        sweep that tests this has to vary the learning rate alongside it.
+
+        Padding is still a real target at any weight above 0: emitting end-of-text is how
+        a non-autoregressive sample knows where to stop, and a model that never stops
+        scores over 100% WER through insertions alone.
         """
         b, _, vocab_size = logits.shape
         per_token = F.cross_entropy(
             logits.reshape(-1, vocab_size), tokens.reshape(-1), reduction="none"
-        )
-        return per_token.view(b, -1).mean(dim=1)
+        ).view(b, -1)
+        weights = self.token_weights(tokens)
+        if weights is None:
+            return per_token.mean(dim=1)
+        return (per_token * weights).sum(dim=1) / weights.sum(dim=1).clamp(min=1e-8)
+
+    def token_weights(self, tokens: torch.Tensor) -> torch.Tensor | None:
+        """(B, L) loss weights, or None when every position counts the same.
+
+        Real tokens weigh 1. A padding position weighs
+
+            floor + (1 - floor) * exp(-(d - 1) / pad_decay)
+
+        where d is its distance into the padding run, so the first pad — the end-of-text
+        that tells a non-autoregressive sample where to stop — keeps full weight and the
+        far tail decays to `flow.pad_loss_weight`. That is the distinction a flat weight
+        cannot make: predicting padding 150 positions past the transcript is free, while
+        predicting it one position past is the entire length decision, and a model that
+        gets it wrong scores over 100% WER through insertions alone.
+
+        `flow.pad_decay` of 0 or null gives the flat weight at every distance.
+
+        Padding is assumed to be a contiguous suffix, which is what `collate` produces and
+        what `ids_to_text` already relies on when it cuts at the first pad.
+        """
+        floor = float(self.pad_loss_weight)
+        decay = float(self.cfg.flow.get("pad_decay", 0.0) or 0.0)
+        if floor == 1.0:
+            return None
+        is_pad = tokens == self.pad_id
+        if decay <= 0.0:
+            return torch.where(is_pad, tokens.new_tensor(floor, dtype=torch.float),
+                               tokens.new_tensor(1.0, dtype=torch.float))
+        n_real = (~is_pad).sum(dim=1, keepdim=True)
+        pos = torch.arange(tokens.size(1), device=tokens.device).expand_as(tokens)
+        distance = (pos - n_real + 1).clamp(min=1).float()
+        decayed = floor + (1.0 - floor) * torch.exp(-(distance - 1.0) / decay)
+        return torch.where(is_pad, decayed, torch.ones_like(decayed))
 
     def flow_step(self, batch: dict) -> tuple[torch.Tensor, dict, torch.Tensor]:
         """One forward pass: the objective, the per-model records, and the t that drew it.
