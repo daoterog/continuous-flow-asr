@@ -101,6 +101,8 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         self.vocab_map = vocab_map
         self._sample_batch = None
         self._pending_tau = None
+        self._mu_accuracy_ema = 0.0
+        self._mu_ema_steps = 0
 
         self.denoiser = build_denoiser(cfg.model.denoiser, vocab_size)
         self.mu_nn = (
@@ -305,16 +307,57 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         and reset, since counts collected under the old edges do not describe the new
         ones. So: read, flush, then swap.
         """
-        key = "val_mu_perr"
-        measured = (
-            self.metrics[key].overall()
-            if self._refresh_is_due() and key in self.metrics
+        # tau decides which t the next epochs train on, so deriving it from validation
+        # would let held-out data steer training. The train split is also the honest
+        # description of the path: during training the field carries mu's output on
+        # *training* audio, so that is the accuracy the interpolant actually has.
+        source = str(self.cfg.schedule.get("refresh_from", "train"))
+        raw = {
+            split: self.metrics[f"{split}_mu_perr"].overall()
+            for split in ("train", "val")
+            if f"{split}_mu_perr" in self.metrics
+        }
+        measured = raw.get(source)
+        # Updated on every validation, not only when a refresh is due: the average should
+        # see every reading it can, and rebuilding tau is the expensive half. That also
+        # makes the momentum's lag count epochs rather than refreshes.
+        accuracy = (
+            self._smooth_mu_accuracy(1.0 - measured)
+            if measured is not None and measured == measured  # not NaN
             else None
         )
         super().on_validation_epoch_end()
         self._log_sampled()
-        if measured is not None and measured == measured:  # not NaN
-            self._refresh_schedule(1.0 - measured)
+        if accuracy is None:
+            return
+        # Both raw signals go out beside the smoothed one: their gap is how far mu has
+        # memorised the training transcripts, and tau built on `train` is only meaningful
+        # while that gap stays small.
+        self.log("tau/mu_accuracy_ema", accuracy)
+        for split, perr in raw.items():
+            self.log(f"tau/mu_accuracy_{split}", 1.0 - perr)
+        if len(raw) == 2:
+            self.log("tau/mu_generalisation_gap", raw["val"] - raw["train"])
+        if self._refresh_is_due():
+            self._refresh_schedule(accuracy)
+
+    def _smooth_mu_accuracy(self, measured: float) -> float:
+        """Bias-corrected EMA of mu's accuracy, so tau tracks its trend and not SGD wobble.
+
+        Across six completed runs only ~65% of epochs improved mu's error and the residual
+        about a local trend matched the average step, so tau fed the latest reading chases
+        noise. Called once per validation, so the lag is ``m / (1 - m)`` epochs regardless
+        of the refresh cadence. It biases accuracy slightly low, which is the safe
+        direction. Not checkpointed, so a requeue restarts the average.
+        """
+        m = float(self.cfg.schedule.get("mu_accuracy_momentum", 0.0) or 0.0)
+        if not 0.0 <= m < 1.0:
+            raise ValueError(f"schedule.mu_accuracy_momentum must be in [0, 1), got {m}")
+        if m == 0.0:
+            return measured
+        self._mu_accuracy_ema = m * self._mu_accuracy_ema + (1.0 - m) * measured
+        self._mu_ema_steps += 1
+        return self._mu_accuracy_ema / (1.0 - m**self._mu_ema_steps)
 
     def on_train_epoch_start(self) -> None:
         """Apply a pending schedule refresh, before anything accumulates under it.
