@@ -18,7 +18,14 @@ from transformers import WhisperTokenizerFast
 from src.dataset import VocabMap
 
 from .base import TimeBinnedMetric
-from .utils import check_metrics, edge_values, make_metrics, section_for, split_key
+from .utils import (
+    check_metrics,
+    edge_values,
+    is_binned,
+    make_metrics,
+    section_for,
+    split_key,
+)
 
 
 class MetricReporting:
@@ -91,11 +98,15 @@ class MetricReporting:
                 continue
             section = section_for(key)
             self.log(f"{section}/{split}_overall", metric.overall())
-            low, high = edge_values(metric)
-            if low is not None:
-                self.log(f"{section}/{split}_low_t", low)
-                self.log(f"{section}/{split}_high_t", high)
-            self._log_bins(f"{section}/{split}_bins", metric)
+            # An audio-only model has one bin, so low_t, high_t and every histogram bar
+            # are the same number as overall. Emitting them would triple the panels and
+            # invite reading a flat line as a finding.
+            if is_binned(metric):
+                low, high = edge_values(metric)
+                if low is not None:
+                    self.log(f"{section}/{split}_low_t", low)
+                    self.log(f"{section}/{split}_high_t", high)
+                self._log_bins(f"{section}/{split}_bins", metric)
             metric.reset()
 
     def _log_bins(self, key: str, metric: TimeBinnedMetric) -> None:
@@ -147,7 +158,9 @@ class MetricReporting:
         self.logger.experiment.define_metric("epoch")
         # define_metric globs are suffix-only ("prefix*"), and the histograms sit at the
         # tail of each section's key — so declare them one by one. All are known here.
-        for key in self.metrics:
+        for key, metric in self.metrics.items():
+            if not is_binned(metric):
+                continue
             split, _, _ = split_key(key)
             self.logger.experiment.define_metric(
                 f"{section_for(key)}/{split}_bins", step_metric="epoch"
@@ -164,6 +177,8 @@ class MetricReporting:
         if not isinstance(self.logger, WandbLogger):
             return
         for key, metric in self.metrics.items():
+            if not is_binned(metric):
+                continue
             split, _, _ = split_key(key)
             where = f"{section_for(key)}/{split}"
             self.logger.experiment.summary[f"bin_edges/{where}"] = (

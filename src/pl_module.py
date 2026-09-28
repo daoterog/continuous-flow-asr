@@ -16,6 +16,7 @@ from transformers import WhisperTokenizerFast
 from src.dataset import VocabMap
 from src.metrics import schedule_bin_edges
 from src.metrics.reporting import MetricReporting
+from src.metrics.utils import is_binned
 from src.models import build_audio_decoder, build_denoiser
 from src.sampler import sample_tokens, score_samples
 from src.schedule import generation_grid, make_tau_inverse, sweep_corruption
@@ -331,7 +332,11 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         self.sample_t_fn = new_tau
         for metric in self.metrics.values():
             metric.reset()
-            metric.set_edges(schedule_bin_edges(new_tau, metric.num_bins))
+            # An unbinned metric's single bin already spans all of t; re-cutting it to
+            # the new schedule would be a no-op at best and a degenerate edge array at
+            # worst, since schedule_bin_edges expects to divide the range.
+            if is_binned(metric):
+                metric.set_edges(schedule_bin_edges(new_tau, metric.num_bins))
         lo = float(new_tau(0.0))
         self.log("tau/t0", lo)
         self.log("tau/mu_accuracy", mu_accuracy)

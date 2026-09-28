@@ -23,6 +23,27 @@ SPLITS = ("train", "val", "test")
 # default; loss and P_e are scatter-adds and stay on everywhere.
 DEFAULT_WER_BINS = {"train": 0, "val": 10, "test": 10}
 
+# Models whose prediction does not depend on t. mu_psi's forward takes audio and nothing
+# else, so the same utterance yields the same logits whichever t-bin its batch happened to
+# draw — binning mu reports how the t draws landed, not anything about mu. These get a
+# single bin, which makes `overall()` the entire quantity and suppresses the per-bin
+# histogram, the low_t/high_t pair and the bin-edge summary, all of which would be either
+# constant or noise. The denoiser and the interpolant do vary with t and stay binned.
+AUDIO_ONLY = ("mu",)
+
+
+def bins_for(name: str, n: int) -> int:
+    """Bin count for one model's metric: one bin if it cannot vary with t, else `n`.
+
+    A zero stays zero — that is how the config switches a metric off entirely.
+    """
+    return 1 if (n and name in AUDIO_ONLY) else n
+
+
+def is_binned(metric: TimeBinnedMetric) -> bool:
+    """Whether this metric resolves in t. A single bin is a scalar wearing the same API."""
+    return getattr(metric, "num_bins", 1) > 1
+
 
 def make_metrics(
     names: tuple[str, ...],
@@ -59,18 +80,22 @@ def make_metrics(
                 input_perr_bins, edges=edges_for(input_perr_bins), pad_id=pad_id
             )
         for name in names:
-            if loss_bins:
+            # An audio-only model collapses to one bin; edges_for is then pointless, so
+            # it is not called and the metric keeps the default full-range bin.
+            binned = name not in AUDIO_ONLY
+
+            if n := bins_for(name, loss_bins):
                 metrics[f"{split}_{name}_loss"] = BinnedLoss(
-                    loss_bins, edges=edges_for(loss_bins)
+                    n, edges=edges_for(n) if binned else None
                 )
-            if perr_bins:
+            if n := bins_for(name, perr_bins):
                 metrics[f"{split}_{name}_perr"] = BinnedTokenError(
-                    perr_bins, edges=edges_for(perr_bins), pad_id=pad_id
+                    n, edges=edges_for(n) if binned else None, pad_id=pad_id
                 )
-            if wer_bins.get(split):
-                n = wer_bins[split]
+            if n := bins_for(name, wer_bins.get(split, 0)):
                 metrics[f"{split}_{name}_wer"] = BinnedWER(
-                    tokenizer, pad_id, vocab_map, num_bins=n, edges=edges_for(n)
+                    tokenizer, pad_id, vocab_map, num_bins=n,
+                    edges=edges_for(n) if binned else None,
                 )
     return metrics
 
@@ -122,7 +147,9 @@ def check_metrics(metrics: nn.ModuleDict, sample_t_fn: Callable | None = None) -
                 f"{key} ({type(m).__name__}) has no `inputs` — declare it, e.g. "
                 f"inputs = ('pred_ids', 'target_ids', 't')"
             )
-        if sample_t_fn is not None and not getattr(m, "schedule_bins", False):
+        # An unbinned metric has one bin spanning all of t, so schedule edges are not
+        # something it is missing — the warning below would be noise.
+        if sample_t_fn is not None and is_binned(m) and not getattr(m, "schedule_bins", False):
             uniform.append(key)
     if uniform:
         warnings.warn(
