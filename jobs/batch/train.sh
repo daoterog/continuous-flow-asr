@@ -25,7 +25,12 @@
 # config's own step count and a measured steps-per-second, so this is what you get if
 # you sbatch this file directly — which you should not.
 #SBATCH --output=slurm_output_%j.out
-#SBATCH --mail-type=BEGIN,END,FAIL
+# BEGIN/END/FAIL are start, clean finish and crash. TIME_LIMIT_90 warns at 90% of the
+# walltime, which is the one that matters here: a run cut off at 90 of 300 epochs looks
+# "finished" in wandb because Lightning's SLURM handler exits cleanly on the signal.
+# REQUEUE fires when that handler resubmits, which otherwise happens silently and starts
+# a second wandb run under a new name.
+#SBATCH --mail-type=BEGIN,END,FAIL,TIME_LIMIT_90,REQUEUE
 #SBATCH --mail-user=daniel.otero.gomez@student.uva.nl
 
 # One training run. Submit via submit/train.sh — do not run this script directly.
