@@ -167,8 +167,16 @@ train:
   # Validation costs a decode per batch when WER is on; on short-epoch runs (an overfit
   # check has a handful of steps per epoch) it is worth checking less often.
   check_val_every_n_epoch: 1
-  # Off for sweeps, where dozens of runs would each write a checkpoint nobody reads.
-  checkpoint: true
+  # Lightning's own .ckpt: a pickle of the whole module, loadable only back into the same
+  # class. Off by default because save_components below covers what it was kept for, in a
+  # form a student model can read. Turn it on for `trainer.test(ckpt_path="best")`, which
+  # needs a real Lightning checkpoint.
+  checkpoint: false
+
+  # Write runs/<run_id>/components/: per-model state_dicts, the manifest needed to rebuild
+  # them, the vocabulary map, and the optimizer state for resuming a cut-short run. Small
+  # enough to keep for every run; see src/checkpoint.py.
+  save_components: true
 
   # Stop as soon as a metric reaches its target — e.g. `sampled/wer` at 0 for an overfit
   # check, where everything after that is wasted compute. null disables it. Only the

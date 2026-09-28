@@ -36,6 +36,7 @@ from lightning.pytorch.loggers import Logger, WandbLogger
 from omegaconf import DictConfig, OmegaConf
 from transformers import WhisperTokenizerFast
 
+from src.checkpoint import ComponentCheckpoint, manifest_for
 from src.dataset import ROLES, AudioFeatureDataModule
 from src.pl_module import FlowMatching, make_schedule
 from src.schedule import make_tau_inverse, sweep_corruption
@@ -252,10 +253,23 @@ class Heartbeat(pl.Callback):
         )
 
 
-def build_trainer(cfg: DictConfig, logger: object) -> pl.Trainer:
+def components_dir(cfg: DictConfig, logger: object) -> Path:
+    """Where this run writes its loadable parts: `<save_dir>/<run_id>/components`.
+
+    Keyed by the wandb run id so the directory and the run page name each other, which is
+    what makes "load run <id>" work offline. Falls back to `local` when there is no
+    logger, e.g. a smoke test with `logger=False`.
+    """
+    run_id = getattr(getattr(logger, "experiment", None), "id", None) or "local"
+    return Path(cfg.logging.save_dir) / str(run_id) / "components"
+
+
+def build_trainer(
+    cfg: DictConfig, logger: object, extra_callbacks: Sequence[pl.Callback] = ()
+) -> pl.Trainer:
     """Trainer with gradient clipping, LR logging and a val-loss checkpoint."""
     checkpoint = cfg.train.get("checkpoint", True)
-    callbacks: list[pl.Callback] = [Heartbeat()]
+    callbacks: list[pl.Callback] = [Heartbeat(), *extra_callbacks]
     if checkpoint:
         callbacks.append(ModelCheckpoint(monitor="total_loss/val", mode="min", save_last=True))
     if logger:  # LearningRateMonitor raises if there is nowhere to write
@@ -350,7 +364,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         sample_t_fn=sample_t_fn,
     )
 
-    trainer = build_trainer(cfg, build_logger(cfg))
+    logger = build_logger(cfg)
+    extra: list[pl.Callback] = []
+    if cfg.train.get("save_components", True):
+        out_dir = components_dir(cfg, logger)
+        extra.append(
+            ComponentCheckpoint(
+                out_dir=out_dir,
+                manifest=manifest_for(
+                    cfg, dm.vocab_size, dm.pad_id, dm.d_model, cfg.data.canvas_len
+                ),
+                vocab_map=dm.vocab_map,
+                monitor="total_loss/val",
+            )
+        )
+        print(f"components  {out_dir}")
+
+    trainer = build_trainer(cfg, logger, extra)
     trainer.fit(model, datamodule=dm)
 
     # Test is deliberately not run here — call it explicitly once the model is final:
