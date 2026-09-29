@@ -73,6 +73,11 @@ def manifest_for(
             "variant": cfg.get("variant"),
             "size": cfg.get("size"),
             "mu_size": cfg.get("mu_size"),
+            # The whole resolved config, so a components directory is enough to rebuild
+            # the data pipeline too — not just the models. The keys above stay spelled out
+            # rather than being read back out of this, because they are the contract and
+            # this is a record.
+            "run_config": OmegaConf.to_container(cfg, resolve=True),
         }
     )
 

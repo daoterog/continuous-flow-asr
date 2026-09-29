@@ -25,6 +25,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from omegaconf import DictConfig, OmegaConf  # noqa: E402
+
+import train as T  # noqa: E402
+from src.checkpoint import load_components, load_manifest  # noqa: E402
+from src.dataset import AudioFeatureDataModule  # noqa: E402
+from src.metrics import ids_to_text  # noqa: E402
+from src.pl_module import FlowMatching  # noqa: E402
 from src.sampler import score_samples  # noqa: E402
 
 
@@ -33,7 +40,22 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("--ckpt", type=Path, required=True, help="Lightning checkpoint to score")
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--ckpt", type=Path, help="Lightning checkpoint to score")
+    src.add_argument(
+        "--components", type=Path,
+        help="a runs/<id>/components directory, as src/checkpoint.py writes. Preferred: "
+             "it carries plain state_dicts rather than a pickled module",
+    )
+    p.add_argument(
+        "--variant", default="best", choices=["best", "final"],
+        help="which saved weights to score, with --components",
+    )
+    p.add_argument(
+        "--config", type=Path, default=None,
+        help="config to rebuild the data from, for a components directory written before "
+             "manifests carried run_config. Defaults to the manifest's own copy",
+    )
     p.add_argument("--role", choices=["train", "val", "test"], default="val")
     p.add_argument("--steps", type=int, nargs="+", default=[1, 2, 4, 8, 16, 32, 64])
     p.add_argument("--n-utts", type=int, default=None, help="cap the split (default: all)")
@@ -43,15 +65,61 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+def _config_from_components(args: argparse.Namespace) -> "DictConfig":
+    """The run config a components directory was written under.
+
+    Manifests carry the whole resolved config; ones written before that do not, so a
+    --config is required for them and the manifest is used to check it matches.
+    """
+    manifest = load_manifest(args.components)
+    if args.config is not None:
+        cfg, _ = __import__("train").build_config(["--config", str(args.config)])
+    elif manifest.get("run_config") is not None:
+        cfg = OmegaConf.create(manifest.run_config)
+    else:
+        raise SystemExit(
+            f"{args.components}/manifest.yaml predates run_config; pass --config with the "
+            f"YAML this run was trained from (variant={manifest.get('variant')}, "
+            f"size={manifest.get('size')}, mu={manifest.get('mu_size')})"
+        )
+    for key, want in (("canvas_len", manifest.canvas_len),):
+        got = cfg.data[key]
+        if got != want:
+            raise SystemExit(
+                f"data.{key} is {got} but the weights were saved at {want}; the config "
+                f"does not describe this run"
+            )
+    return cfg
+
+
+def _model_from_components(
+    args: argparse.Namespace, cfg: DictConfig, dm: AudioFeatureDataModule
+) -> FlowMatching:
+    """A FlowMatching with the saved state_dicts loaded into its submodules."""
+    manifest, built = load_components(args.components, variant=args.variant)
+    if manifest.vocab_size != dm.vocab_size:
+        raise SystemExit(
+            f"the weights were saved for vocab {manifest.vocab_size} but this data gives "
+            f"{dm.vocab_size}; check data.compact_vocab and the splits"
+        )
+    model = FlowMatching(
+        cfg, vocab_size=dm.vocab_size, pad_id=dm.pad_id, audio_dim=dm.d_model,
+        canvas_len=cfg.data.canvas_len, tokenizer=dm.tokenizer,
+        vocab_map=dm.vocab_map, sample_t_fn=T.build_sample_t_fn(dm, cfg),
+    )
+    for name, sub in built.items():
+        getattr(model, name).load_state_dict(sub.state_dict(), strict=True)
+    return model
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Rebuild the model from its checkpoint, sample the split, and report WER."""
-    import train as T
-    from src.metrics import ids_to_text
-    from src.pl_module import FlowMatching
-
     args = parse_args(argv)
-    checkpoint = torch.load(args.ckpt, map_location="cpu", weights_only=False)
-    cfg = checkpoint["hyper_parameters"]["cfg"]
+    if args.components is not None:
+        cfg = _config_from_components(args)
+    else:
+        checkpoint = torch.load(args.ckpt, map_location="cpu", weights_only=False)
+        cfg = checkpoint["hyper_parameters"]["cfg"]
     if args.n_utts is not None:
         cfg.data.subset_n[args.role] = args.n_utts
     if args.batch_size is not None:
@@ -59,16 +127,19 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     T.setup_reproducibility(cfg)
     dm = T.build_datamodule(cfg)
-    model = FlowMatching.load_from_checkpoint(
-        args.ckpt,
-        map_location="cpu",
-        # The saved hyperparameters include an OmegaConf DictConfig, which torch's
-        # weights_only unpickler refuses. These are checkpoints this repo wrote itself.
-        weights_only=False,
-        tokenizer=dm.tokenizer,
-        vocab_map=dm.vocab_map,
-        sample_t_fn=T.build_sample_t_fn(dm, cfg),
-    )
+    if args.components is not None:
+        model = _model_from_components(args, cfg, dm)
+    else:
+        model = FlowMatching.load_from_checkpoint(
+            args.ckpt,
+            map_location="cpu",
+            # The saved hyperparameters include an OmegaConf DictConfig, which torch's
+            # weights_only unpickler refuses. These are checkpoints this repo wrote itself.
+            weights_only=False,
+            tokenizer=dm.tokenizer,
+            vocab_map=dm.vocab_map,
+            sample_t_fn=T.build_sample_t_fn(dm, cfg),
+        )
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = model.to(device).eval()
 
@@ -82,7 +153,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         for b in loader
     ]
     n_utts = sum(b["tokens"].size(0) for b in batches)
-    print(f"{args.ckpt}\n  variant {cfg.get('variant')}  role {args.role}  "
+    source = args.components or args.ckpt
+    print(f"{source}\n  variant {cfg.get('variant')}  role {args.role}  "
           f"{n_utts:,} utterances  vocab {dm.vocab_size:,}\n")
 
     print(f"{'steps':>6} {'WER %':>9} {'token err':>10}")
