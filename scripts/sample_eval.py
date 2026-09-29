@@ -36,7 +36,13 @@ from src.sampler import score_samples  # noqa: E402
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """Checkpoint, which split to score, and how many steps to try."""
+    """Checkpoint, which split to score, and how many steps to try.
+
+    `a.b=c` tokens are split off as OmegaConf overrides the same way train.py takes them,
+    so the data can be pointed somewhere else — `data.env=snellius` above all, since the
+    features live on scratch there and the config's default resolves to the repo.
+    """
+    flags, overrides = T.split_overrides(sys.argv[1:] if argv is None else argv)
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -62,7 +68,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p.add_argument("--batch-size", type=int, default=None, help="default: the run's own")
     p.add_argument("--hard", action="store_true", help="feed back one-hot instead of softmax")
     p.add_argument("--show", type=int, default=3, help="example transcripts to print")
-    return p.parse_args(argv)
+    args = p.parse_args(flags)
+    args.overrides = overrides
+    return args
 
 
 def _config_from_components(args: argparse.Namespace) -> "DictConfig":
@@ -73,9 +81,11 @@ def _config_from_components(args: argparse.Namespace) -> "DictConfig":
     """
     manifest = load_manifest(args.components)
     if args.config is not None:
-        cfg, _ = __import__("train").build_config(["--config", str(args.config)])
+        cfg, _ = T.build_config(["--config", str(args.config), *args.overrides])
     elif manifest.get("run_config") is not None:
         cfg = OmegaConf.create(manifest.run_config)
+        if args.overrides:
+            cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(args.overrides))
     else:
         raise SystemExit(
             f"{args.components}/manifest.yaml predates run_config; pass --config with the "
@@ -102,6 +112,14 @@ def _model_from_components(
             f"the weights were saved for vocab {manifest.vocab_size} but this data gives "
             f"{dm.vocab_size}; check data.compact_vocab and the splits"
         )
+    # Geometry and probability path come from the manifest, never from --config: the
+    # config supplies the data pipeline, and its model node is whatever that YAML happens
+    # to say rather than what these weights were trained as. Taking it from --config means
+    # remembering to repeat --size and --mu, and getting it wrong fails deep inside
+    # load_state_dict on a missing block.
+    cfg = cfg.copy()
+    cfg.model = OmegaConf.create(manifest.model)
+    cfg.flow = OmegaConf.merge(cfg.flow, OmegaConf.create(manifest.flow))
     model = FlowMatching(
         cfg, vocab_size=dm.vocab_size, pad_id=dm.pad_id, audio_dim=dm.d_model,
         canvas_len=cfg.data.canvas_len, tokenizer=dm.tokenizer,
