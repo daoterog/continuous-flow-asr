@@ -96,6 +96,13 @@ def _config_from_components(args: argparse.Namespace) -> "DictConfig":
             f"YAML this run was trained from (variant={manifest.get('variant')}, "
             f"size={manifest.get('size')}, mu={manifest.get('mu_size')})"
         )
+    # Sample on the schedule the run settled into, not the prior it started from.
+    settled = manifest.get("mu_accuracy_final")
+    if settled is not None:
+        prior = cfg.schedule.mu_accuracy
+        cfg.schedule.mu_accuracy = float(settled)
+        print(f"tau from the run's settled mu accuracy {float(settled):.4f}, "
+              f"not the prior {prior}")
     for key, want in (("canvas_len", manifest.canvas_len),):
         got = cfg.data[key]
         if got != want:

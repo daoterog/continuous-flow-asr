@@ -294,7 +294,17 @@ class ComponentCheckpoint(pl.Callback):
         save_components(module, self.out_dir, "best")
 
     def on_fit_end(self, trainer: pl.Trainer, module: pl.LightningModule) -> None:
-        """Write `_final` and, unless told not to, the state needed to resume."""
+        """Write `_final`, the settled schedule, and the state needed to resume."""
+        # tau is rebuilt from schedule.mu_accuracy on load, which is the *prior* — the
+        # value assumed before training. A refreshing run ends somewhere else entirely
+        # (0.43 -> 0.20 on the full vocabulary), so without this the model is sampled on a
+        # different grid than it trained on, silently.
+        settled = getattr(module, "last_mu_accuracy", None)
+        if settled is not None:
+            self.manifest = OmegaConf.merge(
+                self.manifest, OmegaConf.create({"mu_accuracy_final": float(settled)})
+            )
+            save_manifest(self.out_dir, self.manifest, self.vocab_map)
         save_components(module, self.out_dir, "final")
         if self.save_training_state:
             save_training_state(trainer, self.out_dir)

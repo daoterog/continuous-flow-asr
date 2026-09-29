@@ -138,10 +138,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 probs = logits.softmax(-1)
                 mass += float(probs[..., ~reachable].sum(-1).mean())
                 pred = logits.argmax(-1)
-                arg_out += float((~reachable[pred]).float().mean())
-                pe += float((pred != tokens).float().mean())
+                # Real positions only, matching BinnedTokenError: padding is ~80% of the
+                # canvas and is learned first, so counting it puts a floor under P_e and
+                # makes the numbers here incomparable with everything else logged.
+                real = tokens != dm.pad_id
+                n_real = real.sum().clamp(min=1)
+                arg_out += float((~reachable[pred] & real).sum() / n_real)
+                pe += float(((pred != tokens) & real).sum() / n_real)
                 masked = logits.masked_fill(~reachable, float("-inf")).argmax(-1)
-                pe_masked += float((masked != tokens).float().mean())
+                pe_masked += float(((masked != tokens) & real).sum() / n_real)
             n += 1
         k = max(n, 1)
         print(f"{t_val:>6.2f} {mass / k:>12.4f} {100 * arg_out / k:>14.2f}% "

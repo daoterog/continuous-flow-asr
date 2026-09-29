@@ -103,6 +103,10 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         self._pending_tau = None
         self._mu_accuracy_ema = 0.0
         self._mu_ema_steps = 0
+        # The accuracy tau was last rebuilt from. Saved with the run, because rebuilding
+        # tau from `schedule.mu_accuracy` on reload gives the *prior*, not the schedule the
+        # model actually trained under — they diverge as mu learns.
+        self.last_mu_accuracy: float | None = None
 
         self.denoiser = build_denoiser(cfg.model.denoiser, vocab_size)
         self.mu_nn = (
@@ -419,6 +423,7 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         if len(raw) == 2:
             self.log("tau/mu_generalisation_gap", raw["val"] - raw["train"])
         if self._refresh_is_due():
+            self.last_mu_accuracy = accuracy
             self._refresh_schedule(accuracy)
 
     def _smooth_mu_accuracy(self, measured: float) -> float:
