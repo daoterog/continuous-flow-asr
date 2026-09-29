@@ -28,7 +28,9 @@
 #   EVAL_ROLE     — train | val | test        (default val)
 #   EVAL_STEPS    — step counts to try        (default "1 2 4 8 16 32 64 128")
 #   EVAL_VARIANT  — best | final              (default best)
-#   EVAL_BATCH    — utterances per chunk      (default 128)
+#   EVAL_BATCH    — utterances per chunk. Unset uses the run's own training batch, which
+#                   sample_eval then caps to fit the integrator: a full-vocabulary field is
+#                   43x a compact one, so 128 is routine at 1,193 tokens and OOMs at 51,866.
 #   EVAL_OVERRIDES— extra dotlist overrides. The default forces the whole split: a run's
 #                   own config may carry data.subset_n.val from when it trained, and
 #                   scoring two runs on different amounts is what makes them incomparable.
@@ -50,7 +52,7 @@ EVAL_CONFIG="${EVAL_CONFIG:-configs/audio_cond.yaml}"
 EVAL_ROLE="${EVAL_ROLE:-val}"
 EVAL_STEPS="${EVAL_STEPS:-1 2 4 8 16 32 64 128}"
 EVAL_VARIANT="${EVAL_VARIANT:-best}"
-EVAL_BATCH="${EVAL_BATCH:-128}"
+EVAL_BATCH="${EVAL_BATCH:-}"
 EVAL_OVERRIDES="${EVAL_OVERRIDES:-data.subset_n.val=null}"
 
 if [[ -n "${COMPONENTS}" ]]; then
@@ -72,6 +74,6 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 srun python -m scripts.sample_eval \
     "${SOURCE_ARGS[@]}" \
     --role "${EVAL_ROLE}" \
-    --batch-size "${EVAL_BATCH}" \
+    ${EVAL_BATCH:+--batch-size "${EVAL_BATCH}"} \
     --steps ${EVAL_STEPS} \
     data.env=snellius ${EVAL_OVERRIDES}

@@ -69,7 +69,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p.add_argument("--role", choices=["train", "val", "test"], default="val")
     p.add_argument("--steps", type=int, nargs="+", default=[1, 2, 4, 8, 16, 32, 64])
     p.add_argument("--n-utts", type=int, default=None, help="cap the split (default: all)")
-    p.add_argument("--batch-size", type=int, default=None, help="default: the run's own")
+    p.add_argument(
+        "--batch-size", type=int, default=None,
+        help="default: the run's own training batch, capped so the integrator fits",
+    )
+    p.add_argument(
+        "--field-budget-gib", type=float, default=8.0,
+        help="GiB the (B, canvas, vocab) fields may occupy; the cap is derived from it",
+    )
     p.add_argument("--hard", action="store_true", help="feed back one-hot instead of softmax")
     p.add_argument("--show", type=int, default=3, help="example transcripts to print")
     args = p.parse_args(flags)
@@ -120,6 +127,11 @@ def _config_from_components(args: argparse.Namespace) -> "DictConfig":
                 f"does not describe this run"
             )
     return cfg
+
+
+def _vocab_hint(cfg: DictConfig) -> int:
+    """Vocabulary width, before the data is built — the compact map's size is measured."""
+    return 1193 if cfg.data.compact_vocab else 51866
 
 
 def _build(cfg: DictConfig, dm: AudioFeatureDataModule) -> FlowMatching:
@@ -173,6 +185,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         cfg.data.subset_n[args.role] = args.n_utts
     if args.batch_size is not None:
         cfg.data.batch_size = args.batch_size
+    # The integrator keeps roughly six (B, canvas_len, vocab_size) fp32 fields alive at
+    # once. That is 0.13 GiB per utterance-hundred over the compact vocabulary and 5.5 GiB
+    # over Whisper's full one, so a batch that trains happily can be impossible to sample:
+    # 128 is routine at 1,193 tokens and OOMs an A100 at 51,866.
+    per_utt = cfg.data.canvas_len * _vocab_hint(cfg) * 4 * 6 / 2**30
+    cap = max(1, int(args.field_budget_gib / per_utt))
+    if cfg.data.batch_size > cap:
+        print(f"batch {cfg.data.batch_size} -> {cap}: {per_utt:.3f} GiB per utterance "
+              f"of field, against a {args.field_budget_gib:.0f} GiB budget")
+        cfg.data.batch_size = cap
 
     T.setup_reproducibility(cfg)
     dm = T.build_datamodule(cfg)
