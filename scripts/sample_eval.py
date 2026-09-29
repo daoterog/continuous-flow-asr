@@ -28,7 +28,11 @@ if str(REPO_ROOT) not in sys.path:
 from omegaconf import DictConfig, OmegaConf  # noqa: E402
 
 import train as T  # noqa: E402
-from src.checkpoint import load_components, load_manifest  # noqa: E402
+from src.checkpoint import (  # noqa: E402
+    load_components,
+    load_manifest,
+    load_state_into,
+)
 from src.dataset import AudioFeatureDataModule  # noqa: E402
 from src.metrics import ids_to_text  # noqa: E402
 from src.pl_module import FlowMatching  # noqa: E402
@@ -102,6 +106,15 @@ def _config_from_components(args: argparse.Namespace) -> "DictConfig":
     return cfg
 
 
+def _build(cfg: DictConfig, dm: AudioFeatureDataModule) -> FlowMatching:
+    """An unloaded FlowMatching shaped by `cfg`, ready for weights."""
+    return FlowMatching(
+        cfg, vocab_size=dm.vocab_size, pad_id=dm.pad_id, audio_dim=dm.d_model,
+        canvas_len=cfg.data.canvas_len, tokenizer=dm.tokenizer,
+        vocab_map=dm.vocab_map, sample_t_fn=T.build_sample_t_fn(dm, cfg),
+    )
+
+
 def _model_from_components(
     args: argparse.Namespace, cfg: DictConfig, dm: AudioFeatureDataModule
 ) -> FlowMatching:
@@ -120,11 +133,7 @@ def _model_from_components(
     cfg = cfg.copy()
     cfg.model = OmegaConf.create(manifest.model)
     cfg.flow = OmegaConf.merge(cfg.flow, OmegaConf.create(manifest.flow))
-    model = FlowMatching(
-        cfg, vocab_size=dm.vocab_size, pad_id=dm.pad_id, audio_dim=dm.d_model,
-        canvas_len=cfg.data.canvas_len, tokenizer=dm.tokenizer,
-        vocab_map=dm.vocab_map, sample_t_fn=T.build_sample_t_fn(dm, cfg),
-    )
+    model = _build(cfg, dm)
     for name, sub in built.items():
         getattr(model, name).load_state_dict(sub.state_dict(), strict=True)
     return model
@@ -136,8 +145,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.components is not None:
         cfg = _config_from_components(args)
     else:
+        # The checkpoint carries the config it trained under, which is what makes an old
+        # run rescore on its own schedule. Overrides still apply on top — without them the
+        # run's own data.subset_n.val would decide how much of the split gets scored, and
+        # comparing two runs that scored different amounts is what we are trying to stop.
         checkpoint = torch.load(args.ckpt, map_location="cpu", weights_only=False)
         cfg = checkpoint["hyper_parameters"]["cfg"]
+        if args.overrides:
+            cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(args.overrides))
     if args.n_utts is not None:
         cfg.data.subset_n[args.role] = args.n_utts
     if args.batch_size is not None:
@@ -148,16 +163,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.components is not None:
         model = _model_from_components(args, cfg, dm)
     else:
-        model = FlowMatching.load_from_checkpoint(
-            args.ckpt,
-            map_location="cpu",
-            # The saved hyperparameters include an OmegaConf DictConfig, which torch's
-            # weights_only unpickler refuses. These are checkpoints this repo wrote itself.
-            weights_only=False,
-            tokenizer=dm.tokenizer,
-            vocab_map=dm.vocab_map,
-            sample_t_fn=T.build_sample_t_fn(dm, cfg),
-        )
+        model = _build(cfg, dm)
+        for name in ("denoiser", "mu_nn"):
+            if getattr(model, name, None) is not None:
+                load_state_into(getattr(model, name), checkpoint["state_dict"], name)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = model.to(device).eval()
 

@@ -135,6 +135,40 @@ def save_training_state(trainer: pl.Trainer, out_dir: Path) -> Path:
     return path
 
 
+def strip_compile_prefix(state: dict) -> dict:
+    """Drop the `_orig_mod.` torch.compile adds, so weights load into a plain module."""
+    return {k.replace("_orig_mod.", ""): v for k, v in state.items()}
+
+
+def remap_legacy_keys(state: dict) -> dict:
+    """Rename audio-decoder keys written before dropout was inserted into its FF stack.
+
+    `AudioDecoder.ff` is an nn.Sequential, so adding `nn.Dropout` between the activation
+    and the output projection renumbered the projection from 2 to 3 — the dropout itself
+    holds no parameters, but everything after it shifted. Checkpoints written before that
+    change carry `ff.2.weight`, which the current module has no slot for.
+
+    A `ff.2.weight` is the discriminator: in the current layout index 2 is the dropout and
+    never has one. Runs up to `trim-sound-9` need this; later ones pass through untouched.
+    """
+    if not any(k.endswith(".ff.2.weight") for k in state):
+        return state
+    return {k.replace(".ff.2.", ".ff.3."): v for k, v in state.items()}
+
+
+def load_state_into(model: torch.nn.Module, state: dict, name: str) -> None:
+    """Load one component's weights, undoing compile prefixes and legacy naming first."""
+    prefix = f"{name}."
+    own = {
+        k[len(prefix):]: v
+        for k, v in strip_compile_prefix(state).items()
+        if k.startswith(prefix)
+    }
+    if not own:
+        raise KeyError(f"no `{prefix}*` keys in the state dict; found {sorted(state)[:4]}")
+    _unwrap(model).load_state_dict(remap_legacy_keys(own), strict=True)
+
+
 def run_dir(run_id: str, save_dir: str | Path = "runs") -> Path:
     """`<save_dir>/<run_id>/components` — where a run of that wandb id wrote its parts."""
     path = Path(save_dir) / str(run_id) / "components"

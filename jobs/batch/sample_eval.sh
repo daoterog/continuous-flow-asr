@@ -29,6 +29,9 @@
 #   EVAL_STEPS    — step counts to try        (default "1 2 4 8 16 32 64 128")
 #   EVAL_VARIANT  — best | final              (default best)
 #   EVAL_BATCH    — utterances per chunk      (default 128)
+#   EVAL_OVERRIDES— extra dotlist overrides. The default forces the whole split: a run's
+#                   own config may carry data.subset_n.val from when it trained, and
+#                   scoring two runs on different amounts is what makes them incomparable.
 
 set -eo pipefail
 
@@ -48,6 +51,7 @@ EVAL_ROLE="${EVAL_ROLE:-val}"
 EVAL_STEPS="${EVAL_STEPS:-1 2 4 8 16 32 64 128}"
 EVAL_VARIANT="${EVAL_VARIANT:-best}"
 EVAL_BATCH="${EVAL_BATCH:-128}"
+EVAL_OVERRIDES="${EVAL_OVERRIDES:-data.subset_n.val=null}"
 
 if [[ -n "${COMPONENTS}" ]]; then
     # --config supplies the data pipeline only; geometry comes from the manifest.
@@ -59,7 +63,7 @@ else
     SOURCE_ARGS=(--ckpt "${CKPT}")
     echo "checkpoint: ${CKPT}"
 fi
-echo "role      : ${EVAL_ROLE}"
+echo "role      : ${EVAL_ROLE}   overrides ${EVAL_OVERRIDES}"
 echo "steps     : ${EVAL_STEPS}"
 echo "node      : $(hostname)"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
@@ -70,4 +74,4 @@ srun python -m scripts.sample_eval \
     --role "${EVAL_ROLE}" \
     --batch-size "${EVAL_BATCH}" \
     --steps ${EVAL_STEPS} \
-    data.env=snellius
+    data.env=snellius ${EVAL_OVERRIDES}
