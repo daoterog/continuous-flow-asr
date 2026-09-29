@@ -41,12 +41,11 @@ from src.dataset import ROLES, AudioFeatureDataModule
 from src.pl_module import FlowMatching, make_schedule
 from src.schedule import make_tau_inverse, sweep_corruption
 
-# `train.num_epochs=10`, `data.subset_n.train=64` — an OmegaConf dotlist assignment.
+# Used to parse OmegaConf dotlist assignments like
+# `train.num_epochs=10`, `data.subset_n.train=64`
 DOTLIST = re.compile(r"^[A-Za-z_][\w.]*=")
 
-# Denoiser and mu geometries, read off their directories so a new file needs no code
-# change. They are separate axes: --size shapes the denoiser, --mu shapes mu_psi, and the
-# variant config decides whether mu enters the flow at all.
+# Read NN sizes
 SIZES_DIR = Path(__file__).resolve().parent / "configs" / "sizes"
 SIZES = sorted(p.stem for p in SIZES_DIR.glob("*.yaml"))
 MU_DIR = Path(__file__).resolve().parent / "configs" / "mu"
@@ -98,19 +97,19 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, l
     p.add_argument(
         "--size", choices=SIZES, default=None,
         help="denoiser geometry from configs/sizes/. Layers over the variant config, "
-             "which owns the flow and mu; a dotlist override still wins over it",
+            "which owns the flow and mu; a dotlist override still wins over it",
     )
     p.add_argument(
         "--mu", choices=MU_SIZES, default=None,
         help="mu_psi geometry from configs/mu/. Only meaningful on a variant whose "
-             "flow.gamma is set, since that is what puts mu in the interpolant",
+            "flow.gamma is set, since that is what puts mu in the interpolant",
     )
     p.add_argument("--offline", action="store_true", help="log without a network")
     p.add_argument("--print-config", action="store_true", help="resolve, print and exit")
     p.add_argument(
         "--print-steps", action="store_true",
         help="print the run's total optimizer steps and exit; jobs/submit/train.sh sizes "
-             "its walltime from this, so it must not need a GPU",
+            "its walltime from this, so it must not need a GPU",
     )
     return p.parse_args(flags), overrides
 
@@ -120,9 +119,8 @@ def build_config(argv: Sequence[str] | None = None) -> tuple[DictConfig, argpars
     args, overrides = parse_args(argv)
     cfg = load_config(args.config)
 
-    # Merged after the variant so the geometry is orthogonal to the flow: --size sets only
-    # model.denoiser, leaving gamma and mu to the variant config. Before the dotlist, so a
-    # single key can still be poked without editing the size file.
+    # Parse cli args, load denoiser config, then mu config.
+    # Order matters because denoiser args must match some of mu args.
     if args.size is not None:
         cfg = OmegaConf.merge(cfg, load_config(SIZES_DIR / f"{args.size}.yaml"))
         cfg.size = args.size

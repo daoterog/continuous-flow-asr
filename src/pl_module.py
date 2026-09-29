@@ -589,10 +589,22 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         optimizer = torch.optim.AdamW(
             groups, weight_decay=train.get("weight_decay", 0.0), fused=fused
         )
+        total_steps = int(self.trainer.estimated_stepping_batches)
+        # OneCycleLR takes warmup as a fraction; DRAX and most of the literature state it
+        # in steps, and a fraction silently rescales with the epoch count — 0.3 is 26,640
+        # steps over 400 epochs and 6,660 over 100, which are different schedules wearing
+        # the same number. null keeps OneCycleLR's own default.
+        warmup = self.cfg.train.get("warmup_steps")
+        pct_start = 0.3 if warmup is None else min(max(int(warmup) / total_steps, 1e-3), 0.5)
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer,
             max_lr=max_lr if len(max_lr) > 1 else max_lr[0],
-            total_steps=int(self.trainer.estimated_stepping_batches),
+            total_steps=total_steps,
+            pct_start=pct_start,
+        )
+        self.print(
+            f"OneCycleLR: {total_steps:,} steps, peak {max_lr}, "
+            f"warmup {int(pct_start * total_steps):,} ({pct_start:.3f} of the run)"
         )
         return {
             "optimizer": optimizer,

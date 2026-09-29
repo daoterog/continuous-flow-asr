@@ -183,6 +183,11 @@ train:
   # torch.optim.AdamW's own default, which is what the notebook ran under by not passing
   # one. Set 0.0 to turn decay off.
   weight_decay: 0.01
+  # Warmup length in OPTIMIZER STEPS, not a fraction: a fraction rescales with the epoch
+  # count, so the same 0.3 means 6,660 steps at 100 epochs and 26,640 at 400. null keeps
+  # OneCycleLR's default of 0.3. DRAX use 2,500 steps at batch 240.
+  warmup_steps: null
+
   grad_clip: 1.0
   accelerator: auto
   devices: 1
