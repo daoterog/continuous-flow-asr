@@ -310,13 +310,24 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         )
 
     def _sampling_batch(self) -> dict | None:
-        """A fixed slice of val, collated once and reused every time we sample."""
+        """The val utterances to sample, collated once and reused every time.
+
+        `sampling.n_utts` of null means the whole split, which is the only setting under
+        which two runs' sampled WER can be compared: a subset makes the number depend on
+        which utterances it happened to take, and two runs with identical configs but
+        different slices differed by 5.4 points where two sharing a slice differed by 0.6.
+
+        Kept on the CPU. `_log_sampled` moves it a chunk at a time, because the whole
+        validation split as fp32 audio is several GiB and moving it in one piece would
+        undo the chunking it exists to allow.
+        """
         if self._sample_batch is None:
             datamodule = getattr(self.trainer, "datamodule", None)
             if datamodule is None:
                 return None
             subset = datamodule.datasets["val"]
-            n = min(int(self.cfg.sampling.get("n_utts", 64)), len(subset))
+            want = self.cfg.sampling.get("n_utts")
+            n = len(subset) if want is None else min(int(want), len(subset))
             self._sample_batch = datamodule.collate_fn([subset[i] for i in range(n)])
         return self._sample_batch
 
@@ -339,20 +350,26 @@ class FlowMatching(MetricReporting, pl.LightningModule):
 
         was_training = self.training
         self.eval()
-        audio = batch["audio"].to(self.device).float()
-        tokens = batch["tokens"].to(self.device)
-        # Sampled in chunks so peak memory follows the chunk, not n_utts. The integrator
-        # holds several (B, canvas_len, vocab_size) fields at once, which is 0.13 GiB per
-        # utterance-hundred over the compact vocabulary and 11 GiB over Whisper's full
-        # one — the whole slice in a single call is what put an A100 over at n_utts 256.
+        # Sampled in chunks so peak memory follows the chunk, not the number of
+        # utterances. The integrator holds several (B, canvas_len, vocab_size) fields at
+        # once, which is 0.13 GiB per utterance-hundred over the compact vocabulary and
+        # 11 GiB over Whisper's full one — the whole slice in one call is what put an A100
+        # over at 256 utterances. Each chunk is moved to the device here rather than the
+        # batch as a whole: the full validation split as fp32 audio is several GiB, and
+        # transferring it in one piece would reintroduce exactly the peak this avoids.
         # Only (B, canvas_len) ids come back, so the concatenation is free.
         chunk = int(cfg.get("batch_size") or self.cfg.data.batch_size)
         num_steps = int(cfg.get("num_steps", 16))
         hard = bool(cfg.get("hard", False))
+        tokens = batch["tokens"].to(self.device)
         pred = torch.cat(
             [
-                self.sample(audio[i : i + chunk], num_steps, hard=hard)
-                for i in range(0, audio.size(0), chunk)
+                self.sample(
+                    batch["audio"][i : i + chunk].to(self.device).float(),
+                    num_steps,
+                    hard=hard,
+                )
+                for i in range(0, batch["audio"].size(0), chunk)
             ]
         )
         wer, token_error = score_samples(
