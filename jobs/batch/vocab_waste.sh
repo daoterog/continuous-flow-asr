@@ -23,9 +23,9 @@
 #   EVAL_TIMES    — flow times to probe                 (default "0.3 0.5 0.7 0.9")
 #   EVAL_BATCHES  — batches to average over             (default 8)
 #   EVAL_VARIANT  — best | final                        (default best)
-#   EVAL_OVERRIDES— dotlist overrides. Must include data.compact_vocab=false for a
-#                   full-vocabulary run, or the rebuilt data will not match the weights
-#                   and the manifest's vocab_size check will stop the job.
+#   EVAL_OVERRIDES— dotlist overrides. data.compact_vocab comes from the run's manifest,
+#                   so it does not need setting here and should not be: forcing it would
+#                   fight the only record of what the weights were trained over.
 
 set -eo pipefail
 
@@ -46,7 +46,7 @@ EVAL_ROLE="${EVAL_ROLE:-val}"
 EVAL_TIMES="${EVAL_TIMES:-0.3 0.5 0.7 0.9}"
 EVAL_BATCHES="${EVAL_BATCHES:-8}"
 EVAL_VARIANT="${EVAL_VARIANT:-best}"
-EVAL_OVERRIDES="${EVAL_OVERRIDES:-data.compact_vocab=false data.subset_n.train=8000}"
+EVAL_OVERRIDES="${EVAL_OVERRIDES:-}"
 
 if [[ -n "${COMPONENTS}" ]]; then
     SOURCE_ARGS=(--components "${COMPONENTS}" --config "${EVAL_CONFIG}"

@@ -96,6 +96,15 @@ def _config_from_components(args: argparse.Namespace) -> "DictConfig":
             f"YAML this run was trained from (variant={manifest.get('variant')}, "
             f"size={manifest.get('size')}, mu={manifest.get('mu_size')})"
         )
+    # The manifest knows which vocabulary the weights were trained over, so take it from
+    # there rather than from --config. Getting it wrong changes vocab_size by 43x and the
+    # weights simply will not fit; making the caller remember it is a trap.
+    want_compact = manifest.get("compact_vocab")
+    if want_compact is not None and cfg.data.compact_vocab != bool(want_compact):
+        print(f"data.compact_vocab {cfg.data.compact_vocab} -> {bool(want_compact)} "
+              f"(from the manifest)")
+        cfg.data.compact_vocab = bool(want_compact)
+
     # Sample on the schedule the run settled into, not the prior it started from.
     settled = manifest.get("mu_accuracy_final")
     if settled is not None:
