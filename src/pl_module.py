@@ -11,6 +11,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
+from torchmetrics import Metric
 from transformers import WhisperTokenizerFast
 
 from src.dataset import VocabMap
@@ -109,6 +110,10 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         # tau from `schedule.mu_accuracy` on reload gives the *prior*, not the schedule the
         # model actually trained under — they diverge as mu learns.
         self.last_mu_accuracy: float | None = None
+        # EMA of the measured recovery curve, on a fixed t grid so moving bins do not
+        # mix. Not checkpointed; it re-converges within m/(1-m) refreshes.
+        self._recovery_ema = None
+        self._recovery_ema_steps = 0
 
         self.denoiser = build_denoiser(cfg.model.denoiser, vocab_size)
         self.mu_nn = (
@@ -477,6 +482,52 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         self.print(
             f"tau refreshed for epoch {self.current_epoch}: mu accuracy "
             f"{mu_accuracy:.4f}, t in [{lo:.3f}, 1.000] now carries the draw"
+        )
+
+    def _smoothed_measured_tau(self, metric: Metric) -> Callable:
+        """Tau from the denoiser's recovery, averaged across refreshes on a fixed t grid.
+
+        Two things make a plain EMA wrong here. The bins move every refresh, so bin k does
+        not cover the same t twice and per-bin averaging would mix different parts of the
+        flow — the readings are interpolated onto a fixed grid first. And the signal is
+        noisy: measured over completed runs, the jitter in denoiser_perr's lowest bin
+        (0.019) is larger than its mean epoch-to-epoch step (0.018), so more than half of
+        each move is noise that tau would otherwise chase.
+
+        `schedule.recovery_momentum` of 0 uses the latest reading unsmoothed. It is a
+        separate knob from `mu_accuracy_momentum`: that one smooths a scalar, mu's
+        accuracy, and only reaches the simulated curve.
+        """
+        seen = metric.seen().detach().cpu().numpy()
+        ts = metric.bin_centers().numpy()[seen]
+        rec = metric.recovery().detach().cpu().numpy()[seen]
+        if rec.size == 0 or rec.max() < 0.05:
+            raise ValueError(
+                f"the model recovers at most {rec.max() if rec.size else 0:.3f} of tokens "
+                f"in any bin; tau would collapse onto t=1. Train further first."
+            )
+        grid = np.linspace(0.0, 1.0, int(self.cfg.schedule.num_bins) + 1)
+        # Held flat below the lowest measured t rather than pinned to 1/V. Pinning the
+        # chance anchor is what Eq. 25 does for the corruption sweep, whose decoder really
+        # is at chance at t=0 — but the denoiser reads the audio and is at ~0.25 error in
+        # its lowest bin, so pinning would put a cliff in tau across a region nothing was
+        # measured in, and tau^-1 would pour most of the draws into it.
+        on_grid = np.interp(grid, np.concatenate([ts, [1.0]]),
+                            np.concatenate([rec, [1.0]]), left=float(rec[0]))
+        m = float(self.cfg.schedule.get("recovery_momentum", 0.0) or 0.0)
+        if m > 0.0:
+            if self._recovery_ema is None:
+                self._recovery_ema = np.zeros_like(on_grid)
+                self._recovery_ema_steps = 0
+            self._recovery_ema = m * self._recovery_ema + (1.0 - m) * on_grid
+            self._recovery_ema_steps += 1
+            on_grid = self._recovery_ema / (1.0 - m**self._recovery_ema_steps)
+        # Normalised by the curve's OWN worst error, not by chance: tau then reads as the
+        # fraction of the model's achievable improvement made by t, which is what a
+        # reparameterisation over a measured curve can mean.
+        return make_tau_inverse(
+            grid.tolist(), on_grid.tolist(), self.vocab_size,
+            p_e0=float(1.0 - on_grid[0]),
         )
 
     def _refresh_is_due(self) -> bool:

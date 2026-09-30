@@ -36,13 +36,7 @@ def argmax_threshold(vocab_size: int) -> float:
 def simulate_mu(
     tokens: torch.Tensor, vocab_size: int, accuracy: float, generator: torch.Generator | None = None
 ) -> torch.Tensor:
-    """A stand-in for the audio decoder's output, right on `accuracy` of positions.
-
-    tau has to be measured before training, when mu_nn is still at init and its real
-    output carries nothing. A one-hot at a stated accuracy is the honest placeholder: it
-    says "assume mu will be this good" rather than silently assuming it does not exist.
-    Once the model has trained, `refresh_tau` replaces this with its measured P_e.
-    """
+    """Swaps tokens for random ones with probability 1-accuracy, then one-hot encodes."""
     right = torch.rand(tokens.shape, device=tokens.device, generator=generator) < accuracy
     wrong = torch.randint(
         0, vocab_size, tokens.shape, device=tokens.device, generator=generator
@@ -58,20 +52,20 @@ def corrupt_and_decode(
     alpha_fn: Callable | None = None,
     beta_fn: Callable | None = None,
     gamma_fn: Callable | None = None,
-    mu_accuracy: float = 1.0,
+    mu_accuracy: float = 0.0,
     chunk: int = 8,
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     """The interpolant with no model in the loop: argmax of alpha*x0 + beta*x1 [+ gamma*mu].
 
-    Per canvas position the true slot lands at beta(t) + alpha(t)*N(0,1) and each of the
-    other V-1 slots at alpha(t)*N(0,1). argmax recovers the token only when the spike
-    beats the largest of those V-1 draws, which sits near sqrt(2 ln V).
+    Per canvas position:
+        - the **true** slot lands at beta(t) + alpha(t)*N(0,1)
+        - and for the others V-1 slots at alpha(t)*N(0,1)
 
-    gamma_fn must be the schedule actually being trained. Measuring a mu variant on the
-    linear path understates how much its field knows — at t=0.6 with gamma=1-t the real
-    recovery is ~0.23 against the linear path's ~0.04 — and tau built from the wrong
-    curve puts the training mass in the wrong place.
+    argmax recovers the token only when the spike beats the largest of those V-1 draws.
+
+    When using mu we need to consider it's accuracy, because the interpolant depends on
+    mu's output.
 
     Chunked because a (B, L, V) float field is large and randn_like allocates a second one.
     """
@@ -100,7 +94,7 @@ def sweep_corruption(
     alpha_fn: Callable | None = None,
     beta_fn: Callable | None = None,
     gamma_fn: Callable | None = None,
-    mu_accuracy: float = 1.0,
+    mu_accuracy: float = 0.0,
     chunk: int = 8,
 ) -> list[float]:
     """Token recovery under the interpolant alone, one value per t in `ts`.
@@ -129,17 +123,28 @@ def sweep_corruption(
     ]
 
 
-def tau_from_recovery(recovery: np.ndarray | list[float], vocab_size: int) -> np.ndarray:
+def tau_from_recovery(
+    recovery: np.ndarray | list[float], vocab_size: int, p_e0: float | None = None
+) -> np.ndarray:
     """Eq. 25: tau(t) = 1 - P_e(t)/P_e(0), cumulative decoding progress in [0, 1].
 
-    P_e(0) = (V-1)/V because an argmax over pure noise is right 1/V of the time, so the
-    1/P_e(0) here is the paper's |V|/(|V|-1). Forced monotone: tau has to be invertible
-    and the measured curve is a finite sample.
+    P_e(0) defaults to (V-1)/V because an argmax over pure noise is right 1/V of the time,
+    so the 1/P_e(0) here is the paper's |V|/(|V|-1). Forced monotone: tau has to be
+    invertible and the measured curve is a finite sample.
+
+    That anchor holds for the CORRUPTION SWEEP, whose decoder is a bare argmax and really
+    is at chance when t = 0. It does not hold for a curve measured from the denoiser: the
+    denoiser reads the audio, so its P_e at the bottom of the measured range is ~0.25, not
+    ~0.999. Dividing by the chance anchor then reports tau ~ 0.75 at the first measured
+    point, and tau^-1 pours three quarters of the draws into the unmeasured region below
+    it. Pass the curve's own worst P_e instead, and tau becomes the fraction of the
+    model's achievable improvement made by t.
     """
     recovery = np.asarray(recovery, dtype=np.float64)
     p_e = 1.0 - recovery
-    p_e0 = 1.0 - 1.0 / vocab_size
-    tau = np.clip(1.0 - p_e / p_e0, 0.0, 1.0)
+    if p_e0 is None:
+        p_e0 = 1.0 - 1.0 / vocab_size
+    tau = np.clip(1.0 - p_e / max(p_e0, 1e-12), 0.0, 1.0)
     return np.maximum.accumulate(tau)
 
 
@@ -148,11 +153,11 @@ def make_tau_inverse(
     recovery: np.ndarray | list[float],
     vocab_size: int,
     flat_eps: float = 1e-3,
+    p_e0: float | None = None,
 ) -> Callable:
     """Build t = tau^-1(u), the map from a uniform draw to a flow time.
 
-    This is the INVERSE of Eq. 25. The paper samples t such that tau(t) ~ U[0,1], so what
-    training and the generation grid both need is u -> t, not t -> tau.
+    This is the per-token error rate.
 
     Two details the naive inversion gets wrong:
       * tau is ~0 across the whole dead zone (t < ~0.65 at Whisper's vocabulary). Keeping
@@ -169,7 +174,7 @@ def make_tau_inverse(
     full CUDA sync, blocking on every kernel still in flight — inside the hot loop.
     """
     ts = np.asarray(ts, dtype=np.float64)
-    tau = tau_from_recovery(recovery, vocab_size)
+    tau = tau_from_recovery(recovery, vocab_size, p_e0=p_e0)
     tau[tau < flat_eps] = 0.0
 
     keep = np.concatenate([np.diff(tau) > 0, [True]])  # last index of every flat run

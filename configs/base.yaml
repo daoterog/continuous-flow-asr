@@ -152,6 +152,14 @@ schedule:
   # measured under `simulated`.
   refresh_curve_from: simulated
 
+  # Smoothing on the MEASURED recovery curve before tau is rebuilt from it, on a fixed t
+  # grid so that moving bin edges do not mix different parts of the flow. Separate from
+  # mu_accuracy_momentum, which smooths a scalar (mu's accuracy) and only reaches the
+  # simulated curve. Measured over completed runs, the jitter in denoiser_perr's lowest
+  # bin (0.019) exceeds its mean epoch-to-epoch step (0.018), so more than half of each
+  # move is noise tau would otherwise chase. Inert when refresh_curve_from is simulated.
+  recovery_momentum: 0.0
+
   # Re-derive tau from the model's own P_e every N validations, replacing the
   # corruption-sweep prior. 0 disables it. The bins move with it, so histograms are not
   # comparable across a refresh — the underlying t-distribution genuinely changed.
