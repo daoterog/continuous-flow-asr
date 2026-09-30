@@ -144,8 +144,7 @@ def build_config(argv: Sequence[str] | None = None) -> tuple[DictConfig, argpars
         cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(overrides))
     if args.offline:
         cfg.logging.offline = True
-    # The config's stem rides along as a hyperparameter so runs can be grouped and
-    # filtered by variant; the run's *name* is left for wandb to generate.
+    # Variant is referenced as stem in the config, here we just override it
     if cfg.get("variant") is None:
         cfg.variant = args.config.stem
     return cfg, args
@@ -160,10 +159,6 @@ def build_sample_t_fn(dm: AudioFeatureDataModule, cfg: DictConfig) -> object | N
     if torch.cuda.is_available():
         tokens = tokens.cuda()
     ts = np.linspace(0.0, 1.0, cfg.schedule.num_bins + 1).tolist()
-    # The sweep must follow the path this run trains on. Measuring a mu variant on the
-    # linear path understates what its field carries and puts tau's mass in the wrong
-    # place; mu_accuracy states how good mu is assumed to be, since mu_nn is still at
-    # init when tau is measured.
     gamma_fn = make_schedule(cfg.flow.get("gamma"))
     recovery = sweep_corruption(
         tokens,
@@ -172,24 +167,18 @@ def build_sample_t_fn(dm: AudioFeatureDataModule, cfg: DictConfig) -> object | N
         alpha_fn=make_schedule(cfg.flow.get("alpha", "linear_down")),
         beta_fn=make_schedule(cfg.flow.get("beta", "linear_up")),
         gamma_fn=gamma_fn,
-        mu_accuracy=float(cfg.schedule.get("mu_accuracy", 1.0)),
+        mu_accuracy=float(cfg.schedule.get("mu_accuracy", 0.0)),
     )
     tau_inverse = make_tau_inverse(ts, recovery, dm.vocab_size)
     lo, hi = float(tau_inverse(0.0)), float(tau_inverse(1.0))
     path = "with mu" if gamma_fn is not None else "linear"
     print(f"tau: sweep over {tokens.size(0)} utts on the {path} path, "
-          f"t in [{lo:.3f}, {hi:.3f}] carries the draw")
+        f"t in [{lo:.3f}, {hi:.3f}] carries the draw")
     return tau_inverse
 
 
 def setup_reproducibility(cfg: DictConfig) -> None:
-    """Seed every RNG and fix the matmul precision, before anything touches CUDA.
-
-    `workers=True` gives each DataLoader worker its own derived seed, which is what makes
-    the data order — and so the whole run — repeat. Under `train.deterministic` the
-    reductions are pinned too; cuBLAS needs a fixed workspace for that and reads the
-    environment variable once, at CUDA init.
-    """
+    """Seed every RNG and fix the matmul precision, before anything touches CUDA."""
     torch.set_float32_matmul_precision(cfg.train.get("matmul_precision", "highest"))
     if cfg.train.get("deterministic", False):
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
@@ -220,17 +209,14 @@ def build_datamodule(cfg: DictConfig) -> AudioFeatureDataModule:
 
 
 class Heartbeat(pl.Callback):
-    """One timestamped line per epoch on stdout, owned by nobody but this process.
-
-    When a cluster run goes quiet, the first question is whether *training* stopped or
+    """When a cluster run goes quiet, the first question is whether *training* stopped or
     only *logging* did — and the wandb history cannot answer it, because if the logger is
-    the thing that died the history ends either way. This writes straight to the job's
-    stdout, so the SLURM .out file settles it: if these lines keep coming after the
-    metrics stop, the training loop is alive and the logger is at fault; if they stop
-    too, the loop itself is stuck, and the last one names the epoch it stuck on.
+    the thing that died the history ends either way.
 
-    Flushed explicitly because stdout is a file here, not a tty, so it is block-buffered
-    and an unflushed line is exactly the evidence that goes missing when a job is killed.
+    This writes straight to the job's stdout, so the SLURM .out file settles it:
+    if these lines keep coming after the metrics stop, the training loop is alive and
+    the logger is at fault; if they stop too, the loop itself is stuck, and the last one
+    names the epoch it stuck on.
     """
 
     def __init__(self) -> None:
@@ -252,12 +238,7 @@ class Heartbeat(pl.Callback):
 
 
 def components_dir(cfg: DictConfig, logger: object) -> Path:
-    """Where this run writes its loadable parts: `<save_dir>/<run_id>/components`.
-
-    Keyed by the wandb run id so the directory and the run page name each other, which is
-    what makes "load run <id>" work offline. Falls back to `local` when there is no
-    logger, e.g. a smoke test with `logger=False`.
-    """
+    """Where this run writes its loadable parts: `<save_dir>/<run_id>/components`."""
     run_id = getattr(getattr(logger, "experiment", None), "id", None) or "local"
     return Path(cfg.logging.save_dir) / str(run_id) / "components"
 
@@ -270,15 +251,10 @@ def build_trainer(
     callbacks: list[pl.Callback] = [Heartbeat(), *extra_callbacks]
     if checkpoint:
         callbacks.append(ModelCheckpoint(monitor="total_loss/val", mode="min", save_last=True))
-    if logger:  # LearningRateMonitor raises if there is nowhere to write
+    if logger:
         callbacks.append(LearningRateMonitor(logging_interval="step"))
     stop_on = cfg.train.get("early_stop_on")
     if stop_on:
-        # stopping_threshold fires the moment the metric crosses the target, which is the
-        # point here — an overfit job that has reached 0% WER has nothing left to learn.
-        # patience is set out of reach so a plateau alone never stops the run; only
-        # hitting the target does. The metric must be logged on every validation, so this
-        # assumes the sampling cadence matches check_val_every_n_epoch.
         callbacks.append(
             EarlyStopping(
                 monitor=stop_on,
@@ -308,17 +284,12 @@ def build_trainer(
 
 
 def build_logger(cfg: DictConfig) -> Logger:
-    """WandbLogger, online unless `logging.offline` (or --offline) is set.
-
-    WANDB_MODE has to be in the environment before the run is created, so it is set here
-    rather than passed down.
-    """
+    """WandbLogger, online unless `logging.offline` (or --offline) is set."""
     if cfg.logging.offline:
         os.environ["WANDB_MODE"] = "offline"
     return WandbLogger(
         entity=cfg.logging.get("entity"),
         project=cfg.logging.project,
-        # name=None lets wandb generate one; `variant` in the config identifies the run.
         name=cfg.logging.get("name"),
         group=cfg.logging.get("group") or cfg.get("variant"),
         tags=[cfg.variant] if cfg.get("variant") else None,
@@ -336,8 +307,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.print_steps:
-        # Sizing only: build the data, count the batches, print, exit. No model, no CUDA,
-        # so this runs on a login node.
+        # Sizing only: build the data, count the batches, print, exit.
+        # No model, no CUDA, so this runs on a login node.
         dm = build_datamodule(cfg)
         per_epoch = len(dm.train_dataloader())
         print(f"steps_per_epoch {per_epoch}")

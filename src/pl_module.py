@@ -39,10 +39,7 @@ def make_schedule(spec: DictConfig | dict | str | None) -> Callable | None:
     spec = OmegaConf.to_container(spec) if isinstance(spec, DictConfig) else dict(spec)
     kind = spec.pop("type")
 
-    # `scale` matters most on gamma. At scale 1 the audio_cond schedule has gamma == alpha,
-    # so once mu is trained the interpolant is ~(1-t) x0 + x1 at every t: the answer is in
-    # the input always, and the denoiser can learn to copy instead of to denoise. Scaling
-    # gamma below 1 leaves a real denoising problem at low t.
+    # `scale` matters most on gamma. At scale 1 the audio_cond schedule has gamma == alpha
     scale = spec.pop("scale", 1.0)
 
     if kind == "linear_up":

@@ -62,13 +62,7 @@ class MetricReporting:
     def update_metrics(
         self, out: dict, target_ids: torch.Tensor, t: torch.Tensor, split: str
     ) -> None:
-        """Feed one batch's per-model records to every metric of this split.
-
-        Each metric is fed `metric.update(*(record[k] for k in metric.inputs))`, so this
-        never has to know what a metric is.
-        """
-        # Iterates `out` rather than self.names: "input" has predictions but no loss,
-        # so its record carries only the keys its metrics actually declare.
+        """Feed one batch's per-model records to every metric of this split."""
         for name, part in out.items():
             record = {"pred_ids": part["pred_ids"], "target_ids": target_ids, "t": t}
             if "loss_per_seq" in part:
