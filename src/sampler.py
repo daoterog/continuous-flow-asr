@@ -75,24 +75,7 @@ def sample_tokens(
     x1_init: torch.Tensor | None = None,
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
-    """Integrate from noise to (B, canvas_len) token ids.
-
-    grid: increasing flow times, normally `generation_grid(tau_inverse, num_steps)` — the
-    same construction as the metric bin edges, which is why one bin is one step.
-
-    x0 is drawn once and held fixed for the whole trajectory; that is what makes the
-    rebuild equal to an Euler step of the drift.
-
-    x1_init seeds the endpoint term for the very first state. It matters because the tau
-    grid does not start at 0 — it starts at the right edge of the dead zone, typically
-    ~0.2 — so training's state there already contains beta(t0) * x1, while the sampler
-    has no estimate yet. Left as None that term is simply dropped, which is exact only
-    when beta(t0) = 0. Passing mu supplies the audio-only estimate of x1, which is the
-    best guess available before the denoiser has been called at all.
-
-    hard=True feeds back a one-hot argmax instead of the softmax. The softmax is closer
-    to what training showed the model (x1 is a point on the simplex), so it is default.
-    """
+    """Integrate from noise to (B, canvas_len) token ids."""
     batch = audio.size(0)
     x0 = torch.randn(
         batch, canvas_len, vocab_size, device=audio.device, generator=generator
