@@ -129,13 +129,28 @@ schedule:
   # logged as tau/mu_accuracy_measured and tau/mu_accuracy_ema.
   mu_accuracy_momentum: 0.8
 
-  # Which split's mu accuracy rebuilds tau. `train`, because tau decides which t the next
+  # Which split's numbers rebuild tau. `train`, because tau decides which t the next
   # epochs are trained on, so measuring it on `val` would let held-out data steer training
   # — and because the training path really is built from mu's output on training audio.
   # The cost is that a memorising mu reports near-perfect accuracy (measured: 1.000 on
   # train against 0.490 on val for --mu small) and tau is then built on a fiction. Watch
   # tau/mu_generalisation_gap; at --mu micro the two agree to 0.036.
-  refresh_from: train
+  refresh_split: train
+
+  # Which P_e curve a refresh rebuilds tau from.
+  #
+  #   simulated — the model-free corruption sweep with mu's measured accuracy: plain argmax
+  #               on the interpolant, no trained model in the loop. What Eq. 25 is about.
+  #   measured  — the denoiser's own binned P_e.
+  #
+  # They disagree sharply. On a converged run the interpolant is 0.964 wrong in the lowest
+  # t bin where the denoiser is 0.251 wrong, because the denoiser can read the audio and
+  # the field cannot. So `simulated` gives that region ~10% of the training mass and
+  # `measured` gives it ~86%. Sampling starts at low t, so `measured` may be what sampled
+  # WER wants — but the denoiser's low-t skill comes from the audio rather than from t, so
+  # tau then credits t with progress it did not cause. Untested; every result so far was
+  # measured under `simulated`.
+  refresh_curve_from: simulated
 
   # Re-derive tau from the model's own P_e every N validations, replacing the
   # corruption-sweep prior. 0 disables it. The bins move with it, so histograms are not

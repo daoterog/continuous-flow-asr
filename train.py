@@ -209,7 +209,9 @@ def build_datamodule(cfg: DictConfig) -> AudioFeatureDataModule:
 
 
 class Heartbeat(pl.Callback):
-    """When a cluster run goes quiet, the first question is whether *training* stopped or
+    """Used to identify possibly failed training runs.
+
+    When a cluster run goes quiet, the first question is whether *training* stopped or
     only *logging* did — and the wandb history cannot answer it, because if the logger is
     the thing that died the history ends either way.
 

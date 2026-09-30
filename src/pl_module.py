@@ -19,7 +19,12 @@ from src.metrics.reporting import MetricReporting
 from src.metrics.utils import is_binned
 from src.models import build_audio_decoder, build_denoiser
 from src.sampler import sample_tokens, score_samples
-from src.schedule import generation_grid, make_tau_inverse, sweep_corruption
+from src.schedule import (
+    generation_grid,
+    make_tau_inverse,
+    refresh_tau,
+    sweep_corruption,
+)
 
 
 def make_schedule(spec: DictConfig | dict | str | None) -> Callable | None:
@@ -392,7 +397,7 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         # would let held-out data steer training. The train split is also the honest
         # description of the path: during training the field carries mu's output on
         # *training* audio, so that is the accuracy the interpolant actually has.
-        source = str(self.cfg.schedule.get("refresh_from", "train"))
+        source = str(self.cfg.schedule.get("refresh_split", "train"))
         raw = {
             split: self.metrics[f"{split}_mu_perr"].overall()
             for split in ("train", "val")
@@ -484,17 +489,50 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         )
 
     def _refresh_schedule(self, mu_accuracy: float) -> None:
-        """Re-measure tau with mu's *actual* accuracy instead of the assumed one.
+        """Re-derive tau. `schedule.refresh_curve_from` decides from which P_e curve.
 
-        tau is built before training, when mu_nn is at init, so `schedule.mu_accuracy`
-        has to guess how good mu will get. Once mu has trained that guess is replaceable
-        by a measurement: the same model-free corruption of real targets, with a mu whose
-        accuracy matches the one now in the interpolant.
+        `simulated` re-runs the model-free corruption of real targets with mu's measured
+        accuracy: plain argmax on the interpolant, no trained model in the loop. It answers
+        "how much does the *field* carry at t", which is what Eq. 25 is about. Only mu is
+        simulated; the decoder is the argmax itself.
+
+        `measured` uses the denoiser's own binned P_e instead. The two are far apart —
+        measured on a converged run, the interpolant is 0.964 wrong in the lowest t bin
+        where the denoiser is 0.251 wrong, because the denoiser can read the audio and the
+        field cannot. Under `sweep` that region looks dead and takes ~10% of the training
+        mass; under `denoiser` it takes ~86%, since tau reads the denoiser's early
+        competence as decoding progress. Which is right is empirical: sampling starts at
+        low t, so training there may be what sampled WER needs — but the denoiser's low-t
+        recovery comes from the audio rather than from t, so tau then credits t with
+        progress it did not cause.
         """
         datamodule = getattr(self.trainer, "datamodule", None)
         if datamodule is None:
             return
         cfg = self.cfg.schedule
+        curve = str(cfg.get("refresh_curve_from", "simulated"))
+        if curve == "measured":
+            key = f"{self.cfg.schedule.get('refresh_split', 'train')}_denoiser_perr"
+            # nn.ModuleDict has no .get(), so this cannot be the usual one-liner.
+            if key not in self.metrics:
+                self.print(f"tau refresh skipped: no {key} metric to read")
+                return
+            metric = self.metrics[key]
+            try:
+                new_tau = refresh_tau(metric, self.vocab_size)
+                for m in self.metrics.values():
+                    if is_binned(m):
+                        schedule_bin_edges(new_tau, m.num_bins)
+            except ValueError as exc:
+                self.print(f"tau refresh skipped at epoch {self.current_epoch}: {exc}")
+                return
+            self._pending_tau = (new_tau, mu_accuracy)
+            return
+        if curve != "simulated":
+            raise ValueError(
+                f"schedule.refresh_curve_from must be 'simulated' or 'measured', "
+                f"got {curve!r}"
+            )
         tokens = datamodule.sample_tokens("train", int(cfg.sweep_n), seed=self.cfg.seed)
         ts = np.linspace(0.0, 1.0, int(cfg.num_bins) + 1).tolist()
         recovery = sweep_corruption(
