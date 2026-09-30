@@ -57,7 +57,12 @@ EVAL_STEPS="${EVAL_STEPS:-1 2 4 8 16 32 64 128}"
 EVAL_VARIANT="${EVAL_VARIANT:-best}"
 EVAL_BATCH="${EVAL_BATCH:-}"
 EVAL_OVERRIDES="${EVAL_OVERRIDES:-data.subset_n.val=null}"
-EVAL_HARD="${EVAL_HARD:-}"
+# Tested by value, not by emptiness: ${EVAL_HARD:+--hard} expands for ANY non-empty
+# string, so EVAL_HARD=0 would still pass the flag while the log said otherwise.
+case "${EVAL_HARD:-0}" in
+    1|true|TRUE|yes) HARD_ARGS=(--hard); EVAL_HARD=1 ;;
+    *)               HARD_ARGS=();       EVAL_HARD=0 ;;
+esac
 
 if [[ -n "${COMPONENTS}" ]]; then
     # --config supplies the data pipeline only; geometry comes from the manifest.
@@ -79,6 +84,6 @@ srun python -m scripts.sample_eval \
     "${SOURCE_ARGS[@]}" \
     --role "${EVAL_ROLE}" \
     ${EVAL_BATCH:+--batch-size "${EVAL_BATCH}"} \
-    ${EVAL_HARD:+--hard} \
+    "${HARD_ARGS[@]}" \
     --steps ${EVAL_STEPS} \
     data.env=snellius ${EVAL_OVERRIDES}
