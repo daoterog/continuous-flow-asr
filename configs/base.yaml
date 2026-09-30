@@ -182,8 +182,25 @@ sampling:
   # 11 GiB for 256 utterances over Whisper's full vocabulary. null follows data.batch_size,
   # which training already fits while also holding gradients.
   batch_size: null
-  # Feed back a one-hot argmax instead of the softmax. The softmax is closer to what
-  # training showed the model, so it is the default.
+  # Seed the first state's endpoint term with mu. The tau grid does not start at 0 — it
+  # starts at the edge of the dead zone, ~0.19 on a converged compact run — so training's
+  # state there already carries beta(t0) * x1, roughly 19% of the endpoint term. Left
+  # false the sampler drops it entirely and begins from a state weaker in signal than
+  # anything training showed the model, at the one step whose errors propagate furthest.
+  # With gamma = 1 - t, true makes the first state alpha(t0) * x0 + mu exactly.
+  init_from_mu: false
+
+  # Feed back a one-hot argmax instead of the softmax between integration steps.
+  #
+  # `true` is what training actually showed the model: flow_step builds the interpolant
+  # from F.one_hot(tokens), a VERTEX of the simplex, never an interior point. A softmax
+  # spreads the endpoint term — at t=0.5 a 0.5-confident step contributes a 0.25 spike
+  # where training always had 0.50 — and a weaker spike makes the next step less certain
+  # still, so the error compounds along the trajectory. This is a candidate explanation
+  # for sampled WER being far worse than the one-step metrics imply.
+  #
+  # `false` is kept as the default only because every result so far was measured under it.
+  # Costs nothing to check: scripts/sample_eval.py --hard on any saved run.
   hard: false
 
 metrics:

@@ -10,6 +10,8 @@ import lightning.pytorch as pl
 import numpy as np
 import torch
 import torch.nn.functional as F
+import wandb
+from lightning.pytorch.loggers import WandbLogger
 from omegaconf import DictConfig, OmegaConf
 from torchmetrics import Metric
 from transformers import WhisperTokenizerFast
@@ -141,10 +143,6 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             )
 
         if cfg.train.get("compile"):
-            # Compiled submodules rather than the whole LightningModule: the hooks stay
-            # in eager Python and only the model graphs are traced. Note this prefixes
-            # state_dict keys with `_orig_mod.`, so a checkpoint from a compiled run
-            # needs `compile: true` to load back cleanly.
             mode = cfg.train.get("compile_mode", "default")
             self.denoiser = torch.compile(self.denoiser, mode=mode)
             if self.mu_nn is not None:
@@ -278,12 +276,7 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         return loss, out, t
 
     def generation_grid(self, num_steps: int) -> list[float]:
-        """The sampler's time grid — uniform in tau when t was drawn through tau^-1.
-
-        Training and generation have to share this: under the reparameterization the
-        model has seen almost nothing below the dead zone, so integrating on a
-        uniform-in-t grid would run it far out of distribution.
-        """
+        """The sampler's time grid — uniform in tau when t was drawn through tau^-1."""
         if self.sample_t_fn is None:
             return torch.linspace(0, 1, num_steps + 1).tolist()
         return [float(t) for t in generation_grid(self.sample_t_fn, num_steps)]
@@ -361,14 +354,6 @@ class FlowMatching(MetricReporting, pl.LightningModule):
 
         was_training = self.training
         self.eval()
-        # Sampled in chunks so peak memory follows the chunk, not the number of
-        # utterances. The integrator holds several (B, canvas_len, vocab_size) fields at
-        # once, which is 0.13 GiB per utterance-hundred over the compact vocabulary and
-        # 11 GiB over Whisper's full one — the whole slice in one call is what put an A100
-        # over at 256 utterances. Each chunk is moved to the device here rather than the
-        # batch as a whole: the full validation split as fp32 audio is several GiB, and
-        # transferring it in one piece would reintroduce exactly the peak this avoids.
-        # Only (B, canvas_len) ids come back, so the concatenation is free.
         chunk = int(cfg.get("batch_size") or self.cfg.data.batch_size)
         num_steps = int(cfg.get("num_steps", 16))
         hard = bool(cfg.get("hard", False))
@@ -478,7 +463,9 @@ class FlowMatching(MetricReporting, pl.LightningModule):
                 metric.set_edges(schedule_bin_edges(new_tau, metric.num_bins))
         lo = float(new_tau(0.0))
         self.log("tau/t0", lo)
-        self.log("tau/mu_accuracy", mu_accuracy)
+        if mu_accuracy is not None:
+            self.log("tau/mu_accuracy", mu_accuracy)
+        self._log_tau_shape(new_tau)
         self.print(
             f"tau refreshed for epoch {self.current_epoch}: mu accuracy "
             f"{mu_accuracy:.4f}, t in [{lo:.3f}, 1.000] now carries the draw"
@@ -528,6 +515,35 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         return make_tau_inverse(
             grid.tolist(), on_grid.tolist(), self.vocab_size,
             p_e0=float(1.0 - on_grid[0]),
+        )
+
+    def _log_tau_shape(self, tau_inverse: Callable) -> None:
+        """Record what the new schedule actually draws, not just where it starts.
+
+        `tau/t0` alone says where the draw begins and nothing about how the mass sits
+        inside it, so two very different schedules can report the same number. The
+        quantiles are five scalars that plot as five lines on one panel and show the whole
+        distribution walking over the run; the histogram is the same information as a
+        single panel, which wandb renders as a heatmap with epoch on one axis.
+        """
+        u = torch.rand(4096, generator=torch.Generator().manual_seed(0))
+        drawn = tau_inverse(u)
+        drawn = drawn.detach().cpu().numpy() if torch.is_tensor(drawn) else np.asarray(drawn)
+        for q in (10, 25, 50, 75, 90):
+            self.log(f"tau/t_q{q}", float(np.percentile(drawn, q)))
+        if not isinstance(self.logger, WandbLogger) or self.trainer.sanity_checking:
+            return
+        counts, edges = np.histogram(drawn, bins=40, range=(0.0, 1.0))
+        # commit=False for the same reason the binned metrics use it: this rides along
+        # with whatever step is open rather than opening one Lightning would then trail.
+        self.logger.experiment.log(
+            {
+                "tau/t_drawn": wandb.Histogram(
+                    np_histogram=(counts.tolist(), edges.tolist())
+                ),
+                "epoch": self.current_epoch,
+            },
+            commit=False,
         )
 
     def _refresh_is_due(self) -> bool:
@@ -620,15 +636,7 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         self._pending_tau = (new_tau, mu_accuracy)
 
     def _check_finite(self, loss: torch.Tensor, out: dict, split: str) -> None:
-        """Stop the run the first time the objective is not finite.
-
-        A NaN or inf propagates into the weights on the next optimizer step and every
-        metric afterwards is meaningless, but nothing about the run looks wrong: the
-        process keeps going, the job is not killed, and wandb keeps accepting the NaNs it
-        is handed. Hours of a cluster reservation go into a model that cannot recover.
-
-        Costs one `isfinite` on a scalar already on the GPU, and only syncs when it trips.
-        """
+        """Stop the run the first time the objective is not finite."""
         if torch.isfinite(loss):
             return
         parts = "  ".join(
@@ -689,10 +697,6 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             groups, weight_decay=train.get("weight_decay", 0.0), fused=fused
         )
         total_steps = int(self.trainer.estimated_stepping_batches)
-        # OneCycleLR takes warmup as a fraction; DRAX and most of the literature state it
-        # in steps, and a fraction silently rescales with the epoch count — 0.3 is 26,640
-        # steps over 400 epochs and 6,660 over 100, which are different schedules wearing
-        # the same number. null keeps OneCycleLR's own default.
         warmup = self.cfg.train.get("warmup_steps")
         pct_start = 0.3 if warmup is None else min(max(int(warmup) / total_steps, 1e-3), 0.5)
         scheduler = torch.optim.lr_scheduler.OneCycleLR(

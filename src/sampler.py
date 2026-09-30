@@ -109,7 +109,7 @@ def sample_tokens(
     times = [float(t) for t in grid]
     x_t = state(times[0], x1_init)
     logits = None
-    for t, t_next in pairwise(times):
+    for step, (t, t_next) in enumerate(pairwise(times)):
         time = torch.full((batch,), t, device=audio.device, dtype=torch.float32)
         logits = denoiser(x_t=x_t, time=time, audio_embeddings=audio)
         x1_hat = (
@@ -117,9 +117,11 @@ def sample_tokens(
             if hard
             else F.softmax(logits, dim=-1)
         )
-        x_t = state(t_next, x1_hat)
+        if step < len(times) - 2:
+            # Avoid allocating unnecessary space in the GPU
+            x_t = state(t_next, x1_hat)
+            break
 
-    # At t=1 the state is exactly the last endpoint estimate, so its argmax is the sample.
     return logits.argmax(dim=-1)
 
 

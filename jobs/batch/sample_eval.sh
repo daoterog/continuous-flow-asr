@@ -31,6 +31,9 @@
 #   EVAL_BATCH    — utterances per chunk. Unset uses the run's own training batch, which
 #                   sample_eval then caps to fit the integrator: a full-vocabulary field is
 #                   43x a compact one, so 128 is routine at 1,193 tokens and OOMs at 51,866.
+#   EVAL_HARD     — set to 1 to feed back a one-hot argmax between steps instead of the
+#                   softmax. That is what training showed the model: the interpolant is
+#                   built from F.one_hot(tokens), a vertex, never an interior point.
 #   EVAL_OVERRIDES— extra dotlist overrides. The default forces the whole split: a run's
 #                   own config may carry data.subset_n.val from when it trained, and
 #                   scoring two runs on different amounts is what makes them incomparable.
@@ -54,6 +57,7 @@ EVAL_STEPS="${EVAL_STEPS:-1 2 4 8 16 32 64 128}"
 EVAL_VARIANT="${EVAL_VARIANT:-best}"
 EVAL_BATCH="${EVAL_BATCH:-}"
 EVAL_OVERRIDES="${EVAL_OVERRIDES:-data.subset_n.val=null}"
+EVAL_HARD="${EVAL_HARD:-}"
 
 if [[ -n "${COMPONENTS}" ]]; then
     # --config supplies the data pipeline only; geometry comes from the manifest.
@@ -66,7 +70,7 @@ else
     echo "checkpoint: ${CKPT}"
 fi
 echo "role      : ${EVAL_ROLE}   overrides ${EVAL_OVERRIDES}"
-echo "steps     : ${EVAL_STEPS}"
+echo "steps     : ${EVAL_STEPS}   hard ${EVAL_HARD:-0}"
 echo "node      : $(hostname)"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
@@ -75,5 +79,6 @@ srun python -m scripts.sample_eval \
     "${SOURCE_ARGS[@]}" \
     --role "${EVAL_ROLE}" \
     ${EVAL_BATCH:+--batch-size "${EVAL_BATCH}"} \
+    ${EVAL_HARD:+--hard} \
     --steps ${EVAL_STEPS} \
     data.env=snellius ${EVAL_OVERRIDES}

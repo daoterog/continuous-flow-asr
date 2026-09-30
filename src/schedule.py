@@ -126,20 +126,7 @@ def sweep_corruption(
 def tau_from_recovery(
     recovery: np.ndarray | list[float], vocab_size: int, p_e0: float | None = None
 ) -> np.ndarray:
-    """Eq. 25: tau(t) = 1 - P_e(t)/P_e(0), cumulative decoding progress in [0, 1].
-
-    P_e(0) defaults to (V-1)/V because an argmax over pure noise is right 1/V of the time,
-    so the 1/P_e(0) here is the paper's |V|/(|V|-1). Forced monotone: tau has to be
-    invertible and the measured curve is a finite sample.
-
-    That anchor holds for the CORRUPTION SWEEP, whose decoder is a bare argmax and really
-    is at chance when t = 0. It does not hold for a curve measured from the denoiser: the
-    denoiser reads the audio, so its P_e at the bottom of the measured range is ~0.25, not
-    ~0.999. Dividing by the chance anchor then reports tau ~ 0.75 at the first measured
-    point, and tau^-1 pours three quarters of the draws into the unmeasured region below
-    it. Pass the curve's own worst P_e instead, and tau becomes the fraction of the
-    model's achievable improvement made by t.
-    """
+    """tau(t) = 1 - P_e(t)/P_e(0), cumulative decoding progress in [0, 1]."""
     recovery = np.asarray(recovery, dtype=np.float64)
     p_e = 1.0 - recovery
     if p_e0 is None:
