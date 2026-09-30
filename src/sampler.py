@@ -120,7 +120,6 @@ def sample_tokens(
         if step < len(times) - 2:
             # Avoid allocating unnecessary space in the GPU
             x_t = state(t_next, x1_hat)
-            break
 
     return logits.argmax(dim=-1)
 
