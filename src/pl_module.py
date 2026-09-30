@@ -414,18 +414,22 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         )
         super().on_validation_epoch_end()
         self._log_sampled()
-        if accuracy is None:
-            return
-        # Both raw signals go out beside the smoothed one: their gap is how far mu has
-        # memorised the training transcripts, and tau built on `train` is only meaningful
-        # while that gap stays small.
-        self.log("tau/mu_accuracy_ema", accuracy)
-        for split, perr in raw.items():
-            self.log(f"tau/mu_accuracy_{split}", 1.0 - perr)
-        if len(raw) == 2:
-            self.log("tau/mu_generalisation_gap", raw["val"] - raw["train"])
+        if accuracy is not None:
+            # Both raw signals go out beside the smoothed one: their gap is how far mu has
+            # memorised the training transcripts, and tau built on `train` is only
+            # meaningful while that gap stays small.
+            self.log("tau/mu_accuracy_ema", accuracy)
+            for split, perr in raw.items():
+                self.log(f"tau/mu_accuracy_{split}", 1.0 - perr)
+            if len(raw) == 2:
+                self.log("tau/mu_generalisation_gap", raw["val"] - raw["train"])
+        # Not gated on mu: the `measured` curve is rebuilt from the denoiser's P_e and
+        # needs no mu at all, so a linear run refreshes too. Gating here is what would
+        # leave `linear` silently on its initial schedule, which is precisely the control
+        # the comparison needs.
         if self._refresh_is_due():
-            self.last_mu_accuracy = accuracy
+            if accuracy is not None:
+                self.last_mu_accuracy = accuracy
             self._refresh_schedule(accuracy)
 
     def _smooth_mu_accuracy(self, measured: float) -> float:
@@ -478,17 +482,21 @@ class FlowMatching(MetricReporting, pl.LightningModule):
     def _refresh_is_due(self) -> bool:
         """Whether tau should be re-derived at the end of this validation."""
         every = int(self.cfg.schedule.get("refresh_every_n_epochs", 0) or 0)
+        curve = str(self.cfg.schedule.get("refresh_curve_from", "simulated"))
+        # The simulated curve is the corruption sweep, which only moves as mu's assumed
+        # accuracy moves — so without mu there is nothing to re-measure. The measured curve
+        # is the denoiser's own P_e, which moves as the model trains whether mu exists or
+        # not, so a linear run refreshes under it.
+        needs_mu = curve == "simulated"
         return (
             every > 0
             and self.sample_t_fn is not None
-            # Without mu there is nothing to re-measure: the linear path's corruption
-            # does not change as the model trains.
-            and self.gamma_fn is not None
+            and (self.gamma_fn is not None or not needs_mu)
             and not self.trainer.sanity_checking
             and (self.current_epoch + 1) % every == 0
         )
 
-    def _refresh_schedule(self, mu_accuracy: float) -> None:
+    def _refresh_schedule(self, mu_accuracy: float | None) -> None:
         """Re-derive tau. `schedule.refresh_curve_from` decides from which P_e curve.
 
         `simulated` re-runs the model-free corruption of real targets with mu's measured
@@ -533,6 +541,9 @@ class FlowMatching(MetricReporting, pl.LightningModule):
                 f"schedule.refresh_curve_from must be 'simulated' or 'measured', "
                 f"got {curve!r}"
             )
+        if self.gamma_fn is not None and mu_accuracy is None:
+            self.print("tau refresh skipped: the simulated curve needs mu's accuracy")
+            return
         tokens = datamodule.sample_tokens("train", int(cfg.sweep_n), seed=self.cfg.seed)
         ts = np.linspace(0.0, 1.0, int(cfg.num_bins) + 1).tolist()
         recovery = sweep_corruption(
@@ -542,7 +553,9 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             alpha_fn=self.alpha_fn,
             beta_fn=self.beta_fn,
             gamma_fn=self.gamma_fn,
-            mu_accuracy=mu_accuracy,
+            # Ignored when gamma_fn is None: the linear path has no third term, so there
+            # is no mu in the field to state an accuracy for.
+            mu_accuracy=1.0 if mu_accuracy is None else mu_accuracy,
         )
         try:
             new_tau = make_tau_inverse(ts, recovery, self.vocab_size)
