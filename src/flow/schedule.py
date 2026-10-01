@@ -133,12 +133,16 @@ def make_tau_inverse(
 
     This is the per-token error rate.
 
-    Two details the naive inversion gets wrong:
-      * tau is ~0 across the whole dead zone (t < ~0.65 at Whisper's vocabulary). Keeping
-        the LAST t of each flat run makes tau^-1(0) the right edge of that zone instead
-        of spreading samples linearly across a region where nothing is decided.
-      * a finite sample makes tau wobble by ~1e-4 down there, and those wobbles survive
-        the monotone fix as genuine-looking steps; flat_eps clamps them to exactly 0.
+    Inverting it means reading the graph with the axes swapped, interpolating with tau as
+    x and t as y. Two details that needs:
+      * tau is pinned at 0 across the dead zone, and interpolation needs x strictly
+        increasing. Keeping the LAST t of each flat run makes tau^-1(0) the right edge of
+        that zone instead of spreading samples across a region where nothing is decided.
+      * below flat_eps tau is indistinguishable from 0 — part sampling noise, part real
+        but negligible recovery — and the monotone fix above has already frozen those in
+        as genuine-looking steps. Clamping to exactly 0 is what stops them becoming knots.
+
+    See scripts/explain_tau.py, which rebuilds this with np.interp and plots each stage.
 
     The returned callable carries `tau`, `ts` and `knots` as attributes, for plotting and
     for ``schedule_bin_edges``.

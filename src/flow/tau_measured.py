@@ -26,6 +26,11 @@ class MeasuredTau(TauScheduler):
     refreshes on a linear run too.
     """
 
+    @property
+    def metric_bins(self) -> int:
+        """`num_bins`, overriding `metrics.perr_bins` for the denoiser's error metric."""
+        return int(self.cfg.num_bins)
+
     def refresh(
         self, model: "FlowMatching", datamodule: "AudioFeatureDataModule | None"
     ) -> tuple[Callable | None, str | None]:

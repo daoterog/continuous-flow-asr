@@ -105,7 +105,29 @@ schedule:
   # dead zone where x_t carries nothing.
   enabled: true
   sweep_n: 1024                 # utterances in the model-free corruption sweep
-  num_bins: 100               # resolution of the measured P_e curve
+  # Resolution of the P_e curve tau is built from. One number for both strategies, since
+  # both are asking the same thing — how finely the curve is resolved — and letting them
+  # disagree would only be a way to get one of them wrong.
+  #
+  #   simulated — the sweep is evaluated at num_bins + 1 values of t.
+  #   measured  — the denoiser's error metric is given this many bins, overriding
+  #               metrics.perr_bins, because there the metric IS the curve. Ten bins of
+  #               reporting gives a ten-point tau whatever grid it is interpolated onto.
+  #
+  # 150 is the measured path's optimum and comfortably past the simulated path's.
+  #
+  # simulated (scripts/ablate_tau_bins.py): discretisation falls to the sweep's own
+  # seed-to-seed noise by 80-160 bins depending on mu's accuracy, and is flat to 400.
+  # Below that it climbs fast — 25 bins is 4x the floor, and 10 shifts the 90th percentile
+  # of drawn t by +0.097, a tenth of the whole time axis.
+  #
+  # measured (scripts/ablate_measured_bins.py): more is NOT simply better, because each
+  # bin averages its share of the epoch's tokens. On clean/train.100 (28,539 utts x 75.2
+  # tokens = 2.15M real tokens) the p95 shift in drawn t runs 0.065 at 10 bins, 0.0239 at
+  # 60, 0.0211 at 100, 0.0207 at 150, then back up to 0.0256 at 200 and 0.0287 at 300.
+  # The floor is ~14k tokens per bin, so lower this when training on a subset: at 300k
+  # tokens an epoch the optimum falls to ~30.
+  num_bins: 150
   # How accurate mu is assumed to be while tau is measured. Only used when flow.gamma is
   # set; a refresh under `simulated` replaces the assumption with mu's measured accuracy.
   #
@@ -152,6 +174,7 @@ schedule:
   # tau then credits t with progress it did not cause. Untested; every result so far was
   # measured under `simulated`.
   refresh_curve_from: simulated
+
 
   # Re-derive tau every N training epochs, replacing the corruption-sweep prior. 0
   # disables it. Counted in training epochs, not validations: keyed off validation the

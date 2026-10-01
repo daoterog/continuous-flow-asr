@@ -46,6 +46,11 @@ class TauScheduler:
         """Which split's error the refresh reads."""
         return str(self.cfg.get("refresh_split", "train"))
 
+    @property
+    def metric_bins(self) -> int | None:
+        """Bins the denoiser's error metric needs, or None to leave `metrics.perr_bins`."""
+        return None
+
     def observe_mu(self, metrics: Mapping[str, Metric]) -> None:
         """Take mu's reading for the epoch just finished.
 
