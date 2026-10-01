@@ -10,8 +10,6 @@ import lightning.pytorch as pl
 import numpy as np
 import torch
 import torch.nn.functional as F
-import wandb
-from lightning.pytorch.loggers import WandbLogger
 from omegaconf import DictConfig, OmegaConf
 from torchmetrics import Metric
 from transformers import WhisperTokenizerFast
@@ -435,7 +433,7 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         self.log("tau/t0", lo)
         if mu_accuracy is not None:
             self.log("tau/mu_accuracy", mu_accuracy)
-        self._log_tau_shape(new_tau)
+        self.log_tau_shape(new_tau)
         self.print(
             f"tau refreshed for epoch {self.current_epoch}: mu accuracy "
             f"{mu_accuracy:.4f}, t in [{lo:.3f}, 1.000] now carries the draw"
@@ -461,26 +459,6 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         return make_tau_inverse(
             grid.tolist(), on_grid.tolist(), self.vocab_size,
             p_e0=float(1.0 - on_grid[0]),
-        )
-
-    def _log_tau_shape(self, tau_inverse: Callable) -> None:
-        """Record what the new schedule actually draws, not just where it starts."""
-        u = torch.rand(4096, generator=torch.Generator().manual_seed(0))
-        drawn = tau_inverse(u)
-        drawn = drawn.detach().cpu().numpy() if torch.is_tensor(drawn) else np.asarray(drawn)
-        for q in (10, 25, 50, 75, 90):
-            self.log(f"tau/t_q{q}", float(np.percentile(drawn, q)))
-        if not isinstance(self.logger, WandbLogger) or self.trainer.sanity_checking:
-            return
-        counts, edges = np.histogram(drawn, bins=40, range=(0.0, 1.0))
-        self.logger.experiment.log(
-            {
-                "tau/t_drawn": wandb.Histogram(
-                    np_histogram=(counts.tolist(), edges.tolist())
-                ),
-                "epoch": self.current_epoch,
-            },
-            commit=False,
         )
 
     def _refresh_is_due(self) -> bool:

@@ -141,6 +141,31 @@ class MetricReporting:
             commit=False,
         )
 
+    def log_tau_shape(self, tau_inverse: Callable) -> None:
+        """Record what a schedule actually draws, not just where it starts.
+
+        t0 alone says where the support begins; these say how the draw is spread inside
+        it, which is what moves when tau is refreshed. The sample is seeded so successive
+        epochs differ because the schedule moved, not because the draw did.
+        """
+        u = torch.rand(4096, generator=torch.Generator().manual_seed(0))
+        drawn = tau_inverse(u)
+        drawn = drawn.detach().cpu().numpy() if torch.is_tensor(drawn) else np.asarray(drawn)
+        for q in (10, 25, 50, 75, 90):
+            self.log(f"tau/t_q{q}", float(np.percentile(drawn, q)))
+        if not isinstance(self.logger, WandbLogger) or self.trainer.sanity_checking:
+            return
+        counts, edges = np.histogram(drawn, bins=40, range=(0.0, 1.0))
+        self.logger.experiment.log(
+            {
+                "tau/t_drawn": wandb.Histogram(
+                    np_histogram=(counts.tolist(), edges.tolist())
+                ),
+                "epoch": self.current_epoch,
+            },
+            commit=False,
+        )
+
     def _define_bin_metrics(self) -> None:
         """Plot the histogram panels against the epoch, not the global step.
 
@@ -150,6 +175,7 @@ class MetricReporting:
         if not isinstance(self.logger, WandbLogger):
             return
         self.logger.experiment.define_metric("epoch")
+        self.logger.experiment.define_metric("tau/t_drawn", step_metric="epoch")
         # define_metric globs are suffix-only ("prefix*"), and the histograms sit at the
         # tail of each section's key — so declare them one by one. All are known here.
         for key, metric in self.metrics.items():
