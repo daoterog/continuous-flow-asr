@@ -152,14 +152,6 @@ schedule:
   # measured under `simulated`.
   refresh_curve_from: simulated
 
-  # Smoothing on the MEASURED recovery curve before tau is rebuilt from it, on a fixed t
-  # grid so that moving bin edges do not mix different parts of the flow. Separate from
-  # mu_accuracy_momentum, which smooths a scalar (mu's accuracy) and only reaches the
-  # simulated curve. Measured over completed runs, the jitter in denoiser_perr's lowest
-  # bin (0.019) exceeds its mean epoch-to-epoch step (0.018), so more than half of each
-  # move is noise tau would otherwise chase. Inert when refresh_curve_from is simulated.
-  recovery_momentum: 0.0
-
   # Re-derive tau from the model's own P_e every N validations, replacing the
   # corruption-sweep prior. 0 disables it. The bins move with it, so histograms are not
   # comparable across a refresh — the underlying t-distribution genuinely changed.
@@ -192,15 +184,11 @@ sampling:
 
   # Feed back a one-hot argmax instead of the softmax between integration steps.
   #
-  # `true` is what training actually showed the model: flow_step builds the interpolant
-  # from F.one_hot(tokens), a VERTEX of the simplex, never an interior point. A softmax
-  # spreads the endpoint term — at t=0.5 a 0.5-confident step contributes a 0.25 spike
-  # where training always had 0.50 — and a weaker spike makes the next step less certain
-  # still, so the error compounds along the trajectory. This is a candidate explanation
-  # for sampled WER being far worse than the one-step metrics imply.
-  #
-  # `false` is kept as the default only because every result so far was measured under it.
-  # Costs nothing to check: scripts/sample_eval.py --hard on any saved run.
+  # Training builds the interpolant from F.one_hot(tokens), a vertex of the simplex, so
+  # true is arguably the closer match — but x_t carries the previous prediction forward,
+  # so a hard feed may also let the model reinforce its own guess instead of revising it.
+  # Untested: the one attempt to measure it ran against a sampler that was exiting after
+  # a single step, so both arms were really 1-step samples.
   hard: false
 
 metrics:

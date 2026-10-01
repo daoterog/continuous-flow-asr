@@ -6,31 +6,15 @@ sampler the same u -> t map. Two curves can feed it:
 
   * the model-free corruption sweep below — what the interpolant alone does to a target,
     available before a single step of training;
-  * the model's own P_e, via ``refresh_tau`` — which moves left as the denoiser learns to
-    read the audio and recovers tokens the corrupted field alone could not.
+  * the model's own P_e, via FlowMatching._smoothed_measured_tau — which moves left as
+    the denoiser learns to read the audio and recovers tokens the corrupted field alone could not.
 """
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-
-if TYPE_CHECKING:
-    from src.metrics import BinnedTokenError
-
-
-def argmax_threshold(vocab_size: int) -> float:
-    """The t above which the interpolant's argmax starts recovering the true token.
-
-    The crossover sits where the signal beats the largest of V draws from N(0, 1-t):
-    t/(1-t) > E[max], i.e. t > E[max]/(1 + E[max]). sqrt(2 ln V) is the leading-order
-    term and runs a little high — measured, E[max] is 4.24 at V=51,866 against a
-    predicted 4.66.
-    """
-    e_max = np.sqrt(2 * np.log(vocab_size))
-    return float(e_max / (1 + e_max))
 
 
 def simulate_mu(
@@ -213,33 +197,3 @@ def generation_grid(tau_inverse: Callable, num_steps: int) -> np.ndarray:
     metrics' bin edges are the same construction, which is why one bin is one step.
     """
     return tau_inverse(np.linspace(0.0, 1.0, num_steps + 1))
-
-
-def refresh_tau(
-    metric: "BinnedTokenError", vocab_size: int, min_recovery: float = 0.05
-) -> Callable:
-    """Re-derive tau^-1 from the model's own P_e instead of the corruption prior.
-
-    The sweep's tau is what the interpolant does to a target with no model involved. Once
-    the denoiser can read the audio it recovers tokens the corrupted field alone could
-    not, so its P_e curve — and the schedule that should follow from it — moves left.
-    Bins with no samples are dropped; under an existing reparameterization the low-t bins
-    are empty by construction.
-
-    Takes the live metric rather than a history snapshot: that is what is in hand at
-    ``on_validation_epoch_end``, and it is the same numbers.
-    """
-    seen = metric.seen().detach().cpu().numpy()
-    ts_seen = metric.bin_centers().numpy()[seen]
-    rec_seen = metric.recovery().detach().cpu().numpy()[seen]
-    if rec_seen.size == 0 or rec_seen.max() < min_recovery:
-        raise ValueError(
-            f"the model recovers at most {rec_seen.max() if rec_seen.size else 0:.3f} of "
-            f"tokens in any bin.\nP_e is flat at 1, so tau would be 0 everywhere and the "
-            f"schedule would collapse onto t=1.\nTrain further before refreshing, or lower "
-            f"min_recovery if that is deliberate."
-        )
-    # tau is defined on [0, 1]; pin the endpoints so the inverse stays total.
-    ts_full = np.concatenate([[0.0], ts_seen, [1.0]])
-    rec_full = np.concatenate([[1.0 / vocab_size], rec_seen, [1.0]])
-    return make_tau_inverse(ts_full, rec_full, vocab_size)

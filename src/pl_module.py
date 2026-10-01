@@ -110,10 +110,6 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         # tau from `schedule.mu_accuracy` on reload gives the *prior*, not the schedule the
         # model actually trained under — they diverge as mu learns.
         self.last_mu_accuracy: float | None = None
-        # EMA of the measured recovery curve, on a fixed t grid so moving bins do not
-        # mix. Not checkpointed; it re-converges within m/(1-m) refreshes.
-        self._recovery_ema = None
-        self._recovery_ema_steps = 0
 
         self.denoiser = build_denoiser(cfg.model.denoiser, vocab_size)
         self.mu_nn = (
@@ -401,25 +397,38 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         self._mu_ema_steps += 1
         return self._mu_accuracy_ema / (1.0 - m**self._mu_ema_steps)
 
-    def on_train_epoch_start(self) -> None:
-        """Apply a pending schedule refresh, before anything accumulates under it.
+    def on_validation_epoch_start(self) -> None:
+        """Clear the val accumulators before the pass fills them."""
+        super().on_validation_epoch_start()
+        self.reset_metrics("val")
 
-        Not at the point the refresh is computed: Lightning runs validation before
-        `on_train_epoch_end`, so resetting the metrics there would wipe the train
-        accumulators before they are ever logged. By the start of the next epoch both
-        splits have been flushed and the new edges can take effect cleanly.
+    def on_test_epoch_start(self) -> None:
+        """Clear the test accumulators before the pass fills them."""
+        super().on_test_epoch_start()
+        self.reset_metrics("test")
+
+    def on_train_epoch_start(self) -> None:
+        """Clear the train accumulators, then apply a pending schedule refresh.
+
+        Reset here and log at epoch end, so each pass reads as what it is and a metric's
+        contents always describe the epoch in progress — which is what `bin_centers` and a
+        tau refresh both rely on when they read a live metric.
+
+        The refresh is applied here rather than where it is computed because Lightning runs
+        validation before `on_train_epoch_end`: re-binning at that point would change the
+        edges under train counts that had not been logged yet. By the start of the next
+        epoch both splits have been flushed.
         """
         super().on_train_epoch_start()
+        self.reset_metrics("train")
         if self._pending_tau is None:
             return
         new_tau, mu_accuracy = self._pending_tau
         self._pending_tau = None
         self.sample_t_fn = new_tau
+        # set_edges leaves the counts alone, and every split has just been or is about to
+        # be cleared. An unbinned metric's single bin already spans all of t.
         for metric in self.metrics.values():
-            metric.reset()
-            # An unbinned metric's single bin already spans all of t; re-cutting it to
-            # the new schedule would be a no-op at best and a degenerate edge array at
-            # worst, since schedule_bin_edges expects to divide the range.
             if is_binned(metric):
                 metric.set_edges(schedule_bin_edges(new_tau, metric.num_bins))
         lo = float(new_tau(0.0))
@@ -433,19 +442,7 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         )
 
     def _smoothed_measured_tau(self, metric: Metric) -> Callable:
-        """Tau from the denoiser's recovery, averaged across refreshes on a fixed t grid.
-
-        Two things make a plain EMA wrong here. The bins move every refresh, so bin k does
-        not cover the same t twice and per-bin averaging would mix different parts of the
-        flow — the readings are interpolated onto a fixed grid first. And the signal is
-        noisy: measured over completed runs, the jitter in denoiser_perr's lowest bin
-        (0.019) is larger than its mean epoch-to-epoch step (0.018), so more than half of
-        each move is noise that tau would otherwise chase.
-
-        `schedule.recovery_momentum` of 0 uses the latest reading unsmoothed. It is a
-        separate knob from `mu_accuracy_momentum`: that one smooths a scalar, mu's
-        accuracy, and only reaches the simulated curve.
-        """
+        """Tau from the denoiser's recovery, averaged across refreshes on a fixed t grid."""
         seen = metric.seen().detach().cpu().numpy()
         ts = metric.bin_centers().numpy()[seen]
         rec = metric.recovery().detach().cpu().numpy()[seen]
@@ -455,38 +452,19 @@ class FlowMatching(MetricReporting, pl.LightningModule):
                 f"in any bin; tau would collapse onto t=1. Train further first."
             )
         grid = np.linspace(0.0, 1.0, int(self.cfg.schedule.num_bins) + 1)
-        # Held flat below the lowest measured t rather than pinned to 1/V. Pinning the
-        # chance anchor is what Eq. 25 does for the corruption sweep, whose decoder really
-        # is at chance at t=0 — but the denoiser reads the audio and is at ~0.25 error in
-        # its lowest bin, so pinning would put a cliff in tau across a region nothing was
-        # measured in, and tau^-1 would pour most of the draws into it.
-        on_grid = np.interp(grid, np.concatenate([ts, [1.0]]),
-                            np.concatenate([rec, [1.0]]), left=float(rec[0]))
-        m = float(self.cfg.schedule.get("recovery_momentum", 0.0) or 0.0)
-        if m > 0.0:
-            if self._recovery_ema is None:
-                self._recovery_ema = np.zeros_like(on_grid)
-                self._recovery_ema_steps = 0
-            self._recovery_ema = m * self._recovery_ema + (1.0 - m) * on_grid
-            self._recovery_ema_steps += 1
-            on_grid = self._recovery_ema / (1.0 - m**self._recovery_ema_steps)
-        # Normalised by the curve's OWN worst error, not by chance: tau then reads as the
-        # fraction of the model's achievable improvement made by t, which is what a
-        # reparameterisation over a measured curve can mean.
+        on_grid = np.interp(
+            grid,
+            np.concatenate([ts, [1.0]]),
+            np.concatenate([rec, [1.0]]),
+            left=float(rec[0])
+        )
         return make_tau_inverse(
             grid.tolist(), on_grid.tolist(), self.vocab_size,
             p_e0=float(1.0 - on_grid[0]),
         )
 
     def _log_tau_shape(self, tau_inverse: Callable) -> None:
-        """Record what the new schedule actually draws, not just where it starts.
-
-        `tau/t0` alone says where the draw begins and nothing about how the mass sits
-        inside it, so two very different schedules can report the same number. The
-        quantiles are five scalars that plot as five lines on one panel and show the whole
-        distribution walking over the run; the histogram is the same information as a
-        single panel, which wandb renders as a heatmap with epoch on one axis.
-        """
+        """Record what the new schedule actually draws, not just where it starts."""
         u = torch.rand(4096, generator=torch.Generator().manual_seed(0))
         drawn = tau_inverse(u)
         drawn = drawn.detach().cpu().numpy() if torch.is_tensor(drawn) else np.asarray(drawn)
@@ -495,8 +473,6 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         if not isinstance(self.logger, WandbLogger) or self.trainer.sanity_checking:
             return
         counts, edges = np.histogram(drawn, bins=40, range=(0.0, 1.0))
-        # commit=False for the same reason the binned metrics use it: this rides along
-        # with whatever step is open rather than opening one Lightning would then trail.
         self.logger.experiment.log(
             {
                 "tau/t_drawn": wandb.Histogram(
@@ -521,74 +497,44 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         )
 
     def _refresh_schedule(self, mu_accuracy: float | None) -> None:
-        """Re-derive tau. `schedule.refresh_curve_from` decides from which P_e curve.
-
-        `simulated` re-runs the model-free corruption of real targets with mu's measured
-        accuracy: plain argmax on the interpolant, no trained model in the loop. It answers
-        "how much does the *field* carry at t", which is what Eq. 25 is about. Only mu is
-        simulated; the decoder is the argmax itself.
-
-        `measured` uses the denoiser's own binned P_e instead. The two are far apart —
-        measured on a converged run, the interpolant is 0.964 wrong in the lowest t bin
-        where the denoiser is 0.251 wrong, because the denoiser can read the audio and the
-        field cannot. Under `sweep` that region looks dead and takes ~10% of the training
-        mass; under `denoiser` it takes ~86%, since tau reads the denoiser's early
-        competence as decoding progress. Which is right is empirical: sampling starts at
-        low t, so training there may be what sampled WER needs — but the denoiser's low-t
-        recovery comes from the audio rather than from t, so tau then credits t with
-        progress it did not cause.
-        """
+        """Re-derive tau. `schedule.refresh_curve_from` decides from which P_e curve."""
         datamodule = getattr(self.trainer, "datamodule", None)
         if datamodule is None:
             return
         cfg = self.cfg.schedule
         curve = str(cfg.get("refresh_curve_from", "simulated"))
+
         if curve == "measured":
             key = f"{self.cfg.schedule.get('refresh_split', 'train')}_denoiser_perr"
-            # nn.ModuleDict has no .get(), so this cannot be the usual one-liner.
             if key not in self.metrics:
                 self.print(f"tau refresh skipped: no {key} metric to read")
                 return
             metric = self.metrics[key]
-            try:
-                new_tau = self._smoothed_measured_tau(metric)
-                for m in self.metrics.values():
-                    if is_binned(m):
-                        schedule_bin_edges(new_tau, m.num_bins)
-            except ValueError as exc:
-                self.print(f"tau refresh skipped at epoch {self.current_epoch}: {exc}")
+            new_tau = self._smoothed_measured_tau(metric)
+        elif curve == "simulated":
+            if self.gamma_fn is not None and mu_accuracy is None:
+                self.print("tau refresh skipped: the simulated curve needs mu's accuracy")
                 return
-            self._pending_tau = (new_tau, mu_accuracy)
-            return
-        if curve != "simulated":
+
+            tokens = datamodule.sample_tokens(
+                "train", int(cfg.sweep_n), seed=self.cfg.seed
+            )
+            ts = np.linspace(0.0, 1.0, int(cfg.num_bins) + 1).tolist()
+            recovery = sweep_corruption(
+                tokens.to(self.device),
+                self.vocab_size,
+                ts,
+                alpha_fn=self.alpha_fn,
+                beta_fn=self.beta_fn,
+                gamma_fn=self.gamma_fn,
+                mu_accuracy=0.0 if mu_accuracy is None else mu_accuracy,
+            )
+            new_tau = make_tau_inverse(ts, recovery, self.vocab_size)
+        else:
             raise ValueError(
                 f"schedule.refresh_curve_from must be 'simulated' or 'measured', "
                 f"got {curve!r}"
             )
-        if self.gamma_fn is not None and mu_accuracy is None:
-            self.print("tau refresh skipped: the simulated curve needs mu's accuracy")
-            return
-        tokens = datamodule.sample_tokens("train", int(cfg.sweep_n), seed=self.cfg.seed)
-        ts = np.linspace(0.0, 1.0, int(cfg.num_bins) + 1).tolist()
-        recovery = sweep_corruption(
-            tokens.to(self.device),
-            self.vocab_size,
-            ts,
-            alpha_fn=self.alpha_fn,
-            beta_fn=self.beta_fn,
-            gamma_fn=self.gamma_fn,
-            # Ignored when gamma_fn is None: the linear path has no third term, so there
-            # is no mu in the field to state an accuracy for.
-            mu_accuracy=1.0 if mu_accuracy is None else mu_accuracy,
-        )
-        try:
-            new_tau = make_tau_inverse(ts, recovery, self.vocab_size)
-            # Built here only to surface a bad schedule now rather than mid-epoch.
-            for m in self.metrics.values():
-                schedule_bin_edges(new_tau, m.num_bins)
-        except ValueError as exc:
-            self.print(f"tau refresh skipped at epoch {self.current_epoch}: {exc}")
-            return
 
         self._pending_tau = (new_tau, mu_accuracy)
 

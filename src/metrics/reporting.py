@@ -77,13 +77,9 @@ class MetricReporting:
             f"total_loss/{split}", loss, on_step=False, on_epoch=True, batch_size=batch_size
         )
         for name in self.names:
-            # `flush_metrics` already emits {name}_loss/{split}_overall from BinnedLoss,
-            # which is this same number — they agree to float32 precision, since both are
-            # a batch-size-weighted mean of the per-sequence losses. Logging only the
-            # `_overall` form keeps loss reading like perr and wer. The fallback matters:
-            # with metrics.loss_bins at 0 there is no BinnedLoss, and without this the
-            # per-model term would vanish from the run entirely.
             if f"{split}_{name}_loss" in self.metrics:
+                # `log_metrics` already emits {name}_loss/{split}_overall from BinnedLoss,
+                # so we don't need to log it again.
                 continue
             self.log(
                 f"{name}_loss/{split}",
@@ -93,23 +89,25 @@ class MetricReporting:
                 batch_size=batch_size,
             )
 
-    def flush_metrics(self, split: str) -> None:
-        """Emit one split's scalars and histograms, then reset it for the next epoch."""
+    def reset_metrics(self, split: str) -> None:
+        """Clear one split's accumulators. Called at the start of its epoch."""
+        for key, metric in self.metrics.items():
+            if key.startswith(f"{split}_"):
+                metric.reset()
+
+    def log_metrics(self, split: str) -> None:
+        """Emit one split's scalars and histograms. `reset_metrics` clears them."""
         for key, metric in self.metrics.items():
             if not key.startswith(f"{split}_"):
                 continue
             section = section_for(key)
             self.log(f"{section}/{split}_overall", metric.overall())
-            # An audio-only model has one bin, so low_t, high_t and every histogram bar
-            # are the same number as overall. Emitting them would triple the panels and
-            # invite reading a flat line as a finding.
             if is_binned(metric):
                 low, high = edge_values(metric)
                 if low is not None:
                     self.log(f"{section}/{split}_low_t", low)
                     self.log(f"{section}/{split}_high_t", high)
                 self._log_bins(f"{section}/{split}_bins", metric)
-            metric.reset()
 
     def _log_bins(self, key: str, metric: TimeBinnedMetric) -> None:
         """Send one metric's per-bin values to wandb as a histogram over the bin index.
@@ -118,14 +116,12 @@ class MetricReporting:
         it re-bin. The edges are the bin *index*, 0..num_bins, not t: schedule bins are
         quantiles of t, so their widths differ by an order of magnitude and a to-scale t
         axis crushes the whole populated region into a sliver near t=1. Equal widths also
-        mean equal sample counts per bar, which is the honest weighting. The t each bar
-        covers goes to the run summary once, via `_log_bin_edges`.
+        mean equal sample counts per bar, which is the honest weighting.
 
-        Empty bins are reported as 0 because a histogram needs a contiguous edge array.
-        Under schedule bins every bin is populated by construction, so this is rare.
+        The t each bar covers is deliberately not recorded alongside it. Every tau refresh
+        re-cuts the edges, so there is no one geometry the run's histograms share; what
+        the bars span over time is read off the `tau/t_q*` series instead.
         """
-        # Lightning suppresses `self.log` during the sanity-check pass but not a direct
-        # experiment.log, which would prepend a two-batch epoch to every panel.
         if not isinstance(self.logger, WandbLogger) or self.trainer.sanity_checking:
             return
         num_bins = metric.num_bins
@@ -137,10 +133,6 @@ class MetricReporting:
         edges = np.arange(num_bins + 1, dtype=float)
         values = metric.compute().detach().cpu().numpy()
         values = np.where(metric.seen().detach().cpu().numpy(), values, 0.0)
-        # commit=False buffers the histogram into whatever step is open instead of
-        # opening a new one. An explicit step here would land behind the counter
-        # Lightning has already advanced, and wandb drops out-of-order data; letting our
-        # log drive the counter instead would make Lightning's next write the late one.
         self.logger.experiment.log(
             {
                 key: wandb.Histogram(np_histogram=(values.tolist(), edges.tolist())),
@@ -167,28 +159,6 @@ class MetricReporting:
             self.logger.experiment.define_metric(
                 f"{section_for(key)}/{split}_bins", step_metric="epoch"
             )
-        self._log_bin_edges()
-
-    def _log_bin_edges(self) -> None:
-        """Record which t each histogram bar covers.
-
-        The bars are indexed 0..num_bins, so the t edges have to live somewhere or the
-        panel cannot be read back in flow time. They are fixed geometry for the whole
-        run, so the summary is the right place.
-        """
-        if not isinstance(self.logger, WandbLogger):
-            return
-        for key, metric in self.metrics.items():
-            if not is_binned(metric):
-                continue
-            split, _, _ = split_key(key)
-            where = f"{section_for(key)}/{split}"
-            self.logger.experiment.summary[f"bin_edges/{where}"] = (
-                metric.bin_edges().tolist()
-            )
-            self.logger.experiment.summary[f"bin_centers/{where}"] = (
-                metric.bin_centers().tolist()
-            )
 
     def on_fit_start(self) -> None:
         """Declare the histogram panels' step metric before anything is logged."""
@@ -203,14 +173,14 @@ class MetricReporting:
     def on_train_epoch_end(self) -> None:
         """Flush the train metrics."""
         super().on_train_epoch_end()
-        self.flush_metrics("train")
+        self.log_metrics("train")
 
     def on_validation_epoch_end(self) -> None:
         """Flush the val metrics."""
         super().on_validation_epoch_end()
-        self.flush_metrics("val")
+        self.log_metrics("val")
 
     def on_test_epoch_end(self) -> None:
         """Flush the test metrics."""
         super().on_test_epoch_end()
-        self.flush_metrics("test")
+        self.log_metrics("test")
