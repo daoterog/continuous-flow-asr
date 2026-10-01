@@ -39,6 +39,16 @@ class TauScheduler:
         self._ema = 0.0
         self._ema_steps = 0
 
+    @property
+    def curve(self) -> str:
+        """Which P_e curve a refresh reads: the corruption sweep, or the denoiser's own."""
+        return str(self.cfg.get("refresh_curve_from", "simulated"))
+
+    @property
+    def refresh_split(self) -> str:
+        """Which split's error the refresh reads."""
+        return str(self.cfg.get("refresh_split", "train"))
+
     def smooth_mu_accuracy(self, measured: float) -> float:
         """Bias-corrected EMA of mu's accuracy, so tau tracks its trend and not SGD wobble.
 
@@ -64,7 +74,7 @@ class TauScheduler:
         control the comparison needs.
         """
         every = int(self.cfg.get("refresh_every_n_epochs", 0))
-        needs_mu = str(self.cfg.get("refresh_curve_from", "simulated")) == "simulated"
+        needs_mu = self.curve == "simulated"
         return (
             every > 0
             and model.sample_t_fn is not None
@@ -86,10 +96,10 @@ class TauScheduler:
         """
         if datamodule is None:
             return "tau refresh skipped: no datamodule to sweep from"
-        curve = str(self.cfg.get("refresh_curve_from", "simulated"))
+        curve = self.curve
 
         if curve == "measured":
-            key = f"{self.cfg.get('refresh_split', 'train')}_denoiser_perr"
+            key = f"{self.refresh_split}_denoiser_perr"
             if key not in model.metrics:
                 return f"tau refresh skipped: no {key} metric to read"
             new_tau = self._measured_tau(model.metrics[key], model.vocab_size)

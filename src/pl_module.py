@@ -108,7 +108,7 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             loss_bins=cfg.metrics.get("loss_bins", 10),
             perr_bins=cfg.metrics.get("perr_bins", 10),
             wer_bins=OmegaConf.to_container(cfg.metrics.get("wer_bins", {})) or None,
-            input_perr_bins=cfg.metrics.get("input_perr_bins", 0),
+            input_perr_bins=cfg.metrics.get("input_perr_bins", 10),
         )
 
     def on_fit_start(self) -> None:
@@ -264,38 +264,20 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         return self._step(batch, "val")
 
     def on_validation_epoch_end(self) -> None:
-        """Flush the metrics, sample from noise, then re-derive tau if it is due.
+        """Log the metrics, sample from noise, then re-derive tau if it is due.
 
-        Order matters. The refresh reads mu's error, so it has to happen after this
-        epoch's numbers exist; the re-binning has to happen after `super()` has logged
-        and reset, since counts collected under the old edges do not describe the new
-        ones. So: read, flush, then swap.
+        Order matters. A refresh reads this epoch's numbers, so it has to come after they
+        are logged; the re-binning it leads to happens later still, at the next train
+        epoch's start, since counts collected under the old edges do not describe the new
+        ones. So: log, read, then queue the swap.
         """
         super().on_validation_epoch_end()
         self.log_metrics("val")
-        source = str(self.cfg.schedule.get("refresh_split", "train"))
-        raw = {
-            split: self.metrics[f"{split}_mu_perr"].overall()
-            for split in ("train", "val")
-            if f"{split}_mu_perr" in self.metrics
-        }
-        measured = raw.get(source)
-        accuracy = (
-            self.tau.smooth_mu_accuracy(1.0 - measured)
-            if measured is not None and measured == measured  # not NaN
-            else None
-        )
-        super().on_validation_epoch_end()
         self.log_sampled()
-        if accuracy is not None:
-            self.log("tau/mu_accuracy_ema", accuracy)
-            for split, perr in raw.items():
-                self.log(f"tau/mu_accuracy_{split}", 1.0 - perr)
-            if len(raw) == 2:
-                self.log("tau/mu_generalisation_gap", raw["val"] - raw["train"])
+        mu_accuracy = self.log_mu_accuracy()
         if self.tau.is_due(self):
             skipped = self.tau.refresh(
-                self, getattr(self.trainer, "datamodule", None), accuracy
+                self, getattr(self.trainer, "datamodule", None), mu_accuracy
             )
             if skipped is not None:
                 self.print(skipped)
