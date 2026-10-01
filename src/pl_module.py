@@ -142,17 +142,94 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             input_perr_bins=cfg.metrics.get("input_perr_bins", 0),
         )
 
-    def make_interpolant(
-        self, x1: torch.Tensor, t: torch.Tensor, mu: torch.Tensor | None = None
-    ) -> torch.Tensor:
-        """I_t = alpha(t) x0 + beta(t) x1 [+ gamma(t) mu], broadcast over (B, L, V)."""
-        x0 = torch.randn_like(x1)
-        i_t = self.alpha_fn(t)[:, None, None] * x0 + self.beta_fn(t)[:, None, None] * x1
-        if self.gamma_fn is not None and mu is not None:
-            if self.stop_grad_mu:
-                mu = mu.detach()
-            i_t = i_t + self.gamma_fn(t)[:, None, None] * mu
-        return i_t
+    def on_train_epoch_start(self) -> None:
+        """Clear the train accumulators, then apply a pending schedule refresh.
+
+        Reset here and log at epoch end, so each pass reads as what it is and a metric's
+        contents always describe the epoch in progress — which is what `bin_centers` and a
+        tau refresh both rely on when they read a live metric.
+        """
+        super().on_train_epoch_start()
+        self.reset_metrics("train")
+        pending = self.tau.take_pending()
+        if pending is None:
+            return
+        new_tau, mu_accuracy = pending
+        self.sample_t_fn = new_tau
+        for metric in self.metrics.values():
+            if is_binned(metric):
+                metric.set_edges(schedule_bin_edges(new_tau, metric.num_bins))
+        lo = float(new_tau(0.0))
+        self.log("tau/t0", lo)
+        if mu_accuracy is not None:
+            self.log("tau/mu_accuracy", mu_accuracy)
+        self.log_tau_shape(new_tau)
+        # The measured curve carries no mu accuracy, and a linear run has no mu to report.
+        mu_note = "no mu" if mu_accuracy is None else f"mu accuracy {mu_accuracy:.4f}"
+        self.print(
+            f"tau refreshed for epoch {self.current_epoch}: {mu_note}, "
+            f"t in [{lo:.3f}, 1.000] now carries the draw"
+        )
+
+    def training_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
+        """One optimizer step."""
+        return self._step(batch, "train")
+
+    def _step(self, batch: dict, split: str) -> torch.Tensor:
+        loss, out, t = self.flow_step(batch)
+        self._check_finite(loss, out, split)
+        self.log_losses(loss, out, split, batch_size=batch["tokens"].size(0))
+        self.update_metrics(out, batch["tokens"], t, split)
+        return loss
+
+    def flow_step(self, batch: dict) -> tuple[torch.Tensor, dict, torch.Tensor]:
+        """One forward pass: the objective, the per-model records, and the t that drew it."""
+        audio = batch["audio"].float()
+        tokens = batch["tokens"]
+        x1 = F.one_hot(tokens, self.vocab_size).float()
+
+        out = {}
+        mu = None
+        if self.mu_nn is not None:
+            mu_logits = self.mu_nn(audio)
+            mu = F.softmax(mu_logits, dim=-1)
+            mu_loss_per_seq = self.sequence_ce(mu_logits, tokens)
+            out["mu"] = {
+                "loss": mu_loss_per_seq.mean(),
+                "loss_per_seq": mu_loss_per_seq,
+                "pred_ids": mu_logits.argmax(dim=-1),
+            }
+
+        u = torch.rand(tokens.size(0), device=self.device)
+        t = u if self.sample_t_fn is None else self.sample_t_fn(u)
+        i_t = self.make_interpolant(x1=x1, t=t, mu=mu)
+
+        logits = self.denoiser(x_t=i_t, time=t, audio_embeddings=audio)
+        d_loss_per_seq = self.sequence_ce(logits, tokens)
+        out["denoiser"] = {
+            "loss": d_loss_per_seq.mean(),
+            "loss_per_seq": d_loss_per_seq,
+            "pred_ids": logits.argmax(dim=-1),
+        }
+
+        if self.cfg.metrics.get("input_perr_bins"):
+            out["input"] = {"pred_ids": i_t.argmax(dim=-1)}
+
+        loss = out["denoiser"]["loss"]
+        if self.mu_nn is not None:
+            loss = loss + self.mu_loss_weight * out["mu"]["loss"]
+        return loss, out, t
+
+    def sequence_ce(self, logits: torch.Tensor, tokens: torch.Tensor) -> torch.Tensor:
+        """(B,) cross-entropy, one value per row instead of a batch scalar."""
+        b, _, vocab_size = logits.shape
+        per_token = F.cross_entropy(
+            logits.reshape(-1, vocab_size), tokens.reshape(-1), reduction="none"
+        ).view(b, -1)
+        weights = self.token_weights(tokens)
+        if weights is None:
+            return per_token.mean(dim=1)
+        return (per_token * weights).sum(dim=1) / weights.sum(dim=1).clamp(min=1e-8)
 
     def token_weights(self, tokens: torch.Tensor) -> torch.Tensor | None:
         """(B, L) loss weights, or None when every position counts the same.
@@ -200,54 +277,86 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         decayed = floor + (1.0 - floor) * torch.exp(-(distance - 1.0) / decay)
         return torch.where(is_pad, decayed, torch.ones_like(decayed))
 
-    def sequence_ce(self, logits: torch.Tensor, tokens: torch.Tensor) -> torch.Tensor:
-        """(B,) cross-entropy, one value per row instead of a batch scalar."""
-        b, _, vocab_size = logits.shape
-        per_token = F.cross_entropy(
-            logits.reshape(-1, vocab_size), tokens.reshape(-1), reduction="none"
-        ).view(b, -1)
-        weights = self.token_weights(tokens)
-        if weights is None:
-            return per_token.mean(dim=1)
-        return (per_token * weights).sum(dim=1) / weights.sum(dim=1).clamp(min=1e-8)
+    def make_interpolant(
+        self, x1: torch.Tensor, t: torch.Tensor, mu: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """I_t = alpha(t) x0 + beta(t) x1 [+ gamma(t) mu], broadcast over (B, L, V)."""
+        x0 = torch.randn_like(x1)
+        i_t = self.alpha_fn(t)[:, None, None] * x0 + self.beta_fn(t)[:, None, None] * x1
+        if self.gamma_fn is not None and mu is not None:
+            if self.stop_grad_mu:
+                mu = mu.detach()
+            i_t = i_t + self.gamma_fn(t)[:, None, None] * mu
+        return i_t
 
-    def flow_step(self, batch: dict) -> tuple[torch.Tensor, dict, torch.Tensor]:
-        """One forward pass: the objective, the per-model records, and the t that drew it."""
-        audio = batch["audio"].float()
-        tokens = batch["tokens"]
-        x1 = F.one_hot(tokens, self.vocab_size).float()
+    def on_validation_epoch_start(self) -> None:
+        """Clear the val accumulators before the pass fills them."""
+        super().on_validation_epoch_start()
+        self.reset_metrics("val")
 
-        out = {}
-        mu = None
-        if self.mu_nn is not None:
-            mu_logits = self.mu_nn(audio)
-            mu = F.softmax(mu_logits, dim=-1)
-            mu_loss_per_seq = self.sequence_ce(mu_logits, tokens)
-            out["mu"] = {
-                "loss": mu_loss_per_seq.mean(),
-                "loss_per_seq": mu_loss_per_seq,
-                "pred_ids": mu_logits.argmax(dim=-1),
-            }
+    def validation_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
+        """One validation batch."""
+        return self._step(batch, "val")
 
-        u = torch.rand(tokens.size(0), device=self.device)
-        t = u if self.sample_t_fn is None else self.sample_t_fn(u)
-        i_t = self.make_interpolant(x1=x1, t=t, mu=mu)
+    def on_validation_epoch_end(self) -> None:
+        """Flush the metrics, sample from noise, then re-derive tau if it is due.
 
-        logits = self.denoiser(x_t=i_t, time=t, audio_embeddings=audio)
-        d_loss_per_seq = self.sequence_ce(logits, tokens)
-        out["denoiser"] = {
-            "loss": d_loss_per_seq.mean(),
-            "loss_per_seq": d_loss_per_seq,
-            "pred_ids": logits.argmax(dim=-1),
+        Order matters. The refresh reads mu's error, so it has to happen after this
+        epoch's numbers exist; the re-binning has to happen after `super()` has logged
+        and reset, since counts collected under the old edges do not describe the new
+        ones. So: read, flush, then swap.
+        """
+        source = str(self.cfg.schedule.get("refresh_split", "train"))
+        raw = {
+            split: self.metrics[f"{split}_mu_perr"].overall()
+            for split in ("train", "val")
+            if f"{split}_mu_perr" in self.metrics
         }
+        measured = raw.get(source)
+        accuracy = (
+            self.tau.smooth_mu_accuracy(1.0 - measured)
+            if measured is not None and measured == measured  # not NaN
+            else None
+        )
+        super().on_validation_epoch_end()
+        self.log_sampled()
+        if accuracy is not None:
+            self.log("tau/mu_accuracy_ema", accuracy)
+            for split, perr in raw.items():
+                self.log(f"tau/mu_accuracy_{split}", 1.0 - perr)
+            if len(raw) == 2:
+                self.log("tau/mu_generalisation_gap", raw["val"] - raw["train"])
+        if self.tau.is_due(self):
+            skipped = self.tau.refresh(
+                self, getattr(self.trainer, "datamodule", None), accuracy
+            )
+            if skipped is not None:
+                self.print(skipped)
 
-        if self.cfg.metrics.get("input_perr_bins"):
-            out["input"] = {"pred_ids": i_t.argmax(dim=-1)}
+    def on_test_epoch_start(self) -> None:
+        """Clear the test accumulators before the pass fills them."""
+        super().on_test_epoch_start()
+        self.reset_metrics("test")
 
-        loss = out["denoiser"]["loss"]
-        if self.mu_nn is not None:
-            loss = loss + self.mu_loss_weight * out["mu"]["loss"]
-        return loss, out, t
+    def test_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
+        """One test batch. Only reached through an explicit `trainer.test()`."""
+        return self._step(batch, "test")
+
+    def _check_finite(self, loss: torch.Tensor, out: dict, split: str) -> None:
+        """Stop the run the first time the objective is not finite."""
+        if torch.isfinite(loss):
+            return
+        parts = "  ".join(
+            f"{name}_loss={float(rec['loss']):.4g}"
+            for name, rec in out.items()
+            if "loss" in rec
+        )
+        raise RuntimeError(
+            f"non-finite {split} loss at epoch {self.current_epoch}, "
+            f"global step {self.global_step}: total={float(loss):.4g}  {parts}. "
+            f"Training stopped rather than carrying NaN into the weights — lower "
+            f"train.denoiser_lr, or set train.grad_clip if it is null."
+        )
 
     def sample(
         self,
@@ -286,117 +395,6 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             hard=hard,
             x1_init=mu if init_from_mu else None,
         )
-
-    def on_validation_epoch_end(self) -> None:
-        """Flush the metrics, sample from noise, then re-derive tau if it is due.
-
-        Order matters. The refresh reads mu's error, so it has to happen after this
-        epoch's numbers exist; the re-binning has to happen after `super()` has logged
-        and reset, since counts collected under the old edges do not describe the new
-        ones. So: read, flush, then swap.
-        """
-        source = str(self.cfg.schedule.get("refresh_split", "train"))
-        raw = {
-            split: self.metrics[f"{split}_mu_perr"].overall()
-            for split in ("train", "val")
-            if f"{split}_mu_perr" in self.metrics
-        }
-        measured = raw.get(source)
-        accuracy = (
-            self.tau.smooth_mu_accuracy(1.0 - measured)
-            if measured is not None and measured == measured  # not NaN
-            else None
-        )
-        super().on_validation_epoch_end()
-        self.log_sampled()
-        if accuracy is not None:
-            self.log("tau/mu_accuracy_ema", accuracy)
-            for split, perr in raw.items():
-                self.log(f"tau/mu_accuracy_{split}", 1.0 - perr)
-            if len(raw) == 2:
-                self.log("tau/mu_generalisation_gap", raw["val"] - raw["train"])
-        if self.tau.is_due(self):
-            skipped = self.tau.refresh(
-                self, getattr(self.trainer, "datamodule", None), accuracy
-            )
-            if skipped is not None:
-                self.print(skipped)
-
-    def on_validation_epoch_start(self) -> None:
-        """Clear the val accumulators before the pass fills them."""
-        super().on_validation_epoch_start()
-        self.reset_metrics("val")
-
-    def on_test_epoch_start(self) -> None:
-        """Clear the test accumulators before the pass fills them."""
-        super().on_test_epoch_start()
-        self.reset_metrics("test")
-
-    def on_train_epoch_start(self) -> None:
-        """Clear the train accumulators, then apply a pending schedule refresh.
-
-        Reset here and log at epoch end, so each pass reads as what it is and a metric's
-        contents always describe the epoch in progress — which is what `bin_centers` and a
-        tau refresh both rely on when they read a live metric.
-        """
-        super().on_train_epoch_start()
-        self.reset_metrics("train")
-        pending = self.tau.take_pending()
-        if pending is None:
-            return
-        new_tau, mu_accuracy = pending
-        self.sample_t_fn = new_tau
-        # set_edges leaves the counts alone, and every split has just been or is about to
-        # be cleared. An unbinned metric's single bin already spans all of t.
-        for metric in self.metrics.values():
-            if is_binned(metric):
-                metric.set_edges(schedule_bin_edges(new_tau, metric.num_bins))
-        lo = float(new_tau(0.0))
-        self.log("tau/t0", lo)
-        if mu_accuracy is not None:
-            self.log("tau/mu_accuracy", mu_accuracy)
-        self.log_tau_shape(new_tau)
-        # The measured curve carries no mu accuracy, and a linear run has no mu to report.
-        mu_note = "no mu" if mu_accuracy is None else f"mu accuracy {mu_accuracy:.4f}"
-        self.print(
-            f"tau refreshed for epoch {self.current_epoch}: {mu_note}, "
-            f"t in [{lo:.3f}, 1.000] now carries the draw"
-        )
-
-    def _check_finite(self, loss: torch.Tensor, out: dict, split: str) -> None:
-        """Stop the run the first time the objective is not finite."""
-        if torch.isfinite(loss):
-            return
-        parts = "  ".join(
-            f"{name}_loss={float(rec['loss']):.4g}"
-            for name, rec in out.items()
-            if "loss" in rec
-        )
-        raise RuntimeError(
-            f"non-finite {split} loss at epoch {self.current_epoch}, "
-            f"global step {self.global_step}: total={float(loss):.4g}  {parts}. "
-            f"Training stopped rather than carrying NaN into the weights — lower "
-            f"train.denoiser_lr, or set train.grad_clip if it is null."
-        )
-
-    def _step(self, batch: dict, split: str) -> torch.Tensor:
-        loss, out, t = self.flow_step(batch)
-        self._check_finite(loss, out, split)
-        self.log_losses(loss, out, split, batch_size=batch["tokens"].size(0))
-        self.update_metrics(out, batch["tokens"], t, split)
-        return loss
-
-    def training_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
-        """One optimizer step."""
-        return self._step(batch, "train")
-
-    def validation_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
-        """One validation batch."""
-        return self._step(batch, "val")
-
-    def test_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
-        """One test batch. Only reached through an explicit `trainer.test()`."""
-        return self._step(batch, "test")
 
     def configure_optimizers(self) -> dict:
         """AdamW with a per-model LR group, plus OneCycleLR stepped every batch.
