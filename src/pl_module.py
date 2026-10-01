@@ -208,34 +208,20 @@ class FlowMatching(MetricReporting, pl.LightningModule):
     def token_weights(self, tokens: torch.Tensor) -> torch.Tensor | None:
         """(B, L) loss weights, or None when every position counts the same.
 
-        `flow.pad_loss_weight` scales the padding positions before a weighted mean. At
-        weight 1 this is the plain mean over the canvas, where ~70% of the terms are
-        "emit end-of-text" on a 224-wide canvas holding ~67-token utterances. Lowering it
-        does two things at once, and they are easy to confuse: it removes padding's share
-        of the gradient, AND, because the denominator shrinks with it, multiplies what
-        each real token contributes by up to canvas_len / n_real ~ 3.3. Some of any gain
-        is therefore an effective learning-rate increase on content, which is why the
-        sweep that tests this has to vary the learning rate alongside it.
-
-        Padding is still a real target at any weight above 0: emitting end-of-text is how
-        a non-autoregressive sample knows where to stop, and a model that never stops
-        scores over 100% WER through insertions alone.
-
-        Real tokens weigh 1. A padding position weighs
+        Real tokens weigh 1; a pad at distance d into the run weighs
 
             floor + (1 - floor) * exp(-(d - 1) / pad_decay)
 
-        where d is its distance into the padding run, so the first pad — the end-of-text
-        that tells a non-autoregressive sample where to stop — keeps full weight and the
-        far tail decays to `flow.pad_loss_weight`. That is the distinction a flat weight
-        cannot make: predicting padding 150 positions past the transcript is free, while
-        predicting it one position past is the entire length decision, and a model that
-        gets it wrong scores over 100% WER through insertions alone.
+        so the first pad keeps full weight and the tail decays to `flow.pad_loss_weight`
+        (`pad_decay` 0 or null gives that floor flat). The first pad is the whole length
+        decision — a model that never stops scores over 100% WER on insertions — while a
+        pad 150 positions out is free.
 
-        `flow.pad_decay` of 0 or null gives the flat weight at every distance.
+        Lowering the floor also shrinks the weighted mean's denominator, scaling each real
+        token by up to canvas_len / n_real ~ 3.3, so part of any gain is an effective
+        learning-rate rise and a sweep over this has to vary the learning rate too.
 
-        Padding is assumed to be a contiguous suffix, which is what `collate` produces and
-        what `ids_to_text` already relies on when it cuts at the first pad.
+        Padding is assumed to be a contiguous suffix, which is what `collate` produces.
         """
         floor = float(self.pad_loss_weight)
         decay = float(self.cfg.flow.get("pad_decay", 0.0) or 0.0)
