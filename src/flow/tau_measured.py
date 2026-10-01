@@ -41,7 +41,21 @@ class MeasuredTau(TauScheduler):
         metric = model.metrics[key]
         if not bool(metric.seen().any()):
             return None, f"tau refresh skipped: {key} saw no samples this epoch"
+        # A model too weak to anchor a curve is the normal state at the first refresh, not
+        # an error: tau would collapse onto t=1 and starve every t below it. Keep the
+        # schedule it has and look again next time, rather than killing the run.
+        worst = float(metric.recovery()[metric.seen()].max())
+        if worst < self.min_recovery:
+            return None, (
+                f"tau refresh skipped: the model recovers at most {worst:.3f} of tokens "
+                f"in any bin, under the {self.min_recovery} needed to anchor tau"
+            )
         return self._tau_from(metric, model.vocab_size), None
+
+    @property
+    def min_recovery(self) -> float:
+        """Recovery the best bin must reach before its curve is worth inverting."""
+        return float(self.cfg.get("measured_min_recovery", 0.05))
 
     def _tau_from(self, metric: Metric, vocab_size: int) -> Callable:
         """Interpolate the populated bins onto a fixed grid, then invert.
@@ -58,11 +72,6 @@ class MeasuredTau(TauScheduler):
         seen = metric.seen().detach().cpu().numpy()
         ts = metric.bin_centers().numpy()[seen]
         rec = metric.recovery().detach().cpu().numpy()[seen]
-        if rec.max() < 0.05:
-            raise ValueError(
-                f"the model recovers at most {rec.max():.3f} of tokens in any bin; tau "
-                f"would collapse onto t=1. Train further first."
-            )
         grid = np.linspace(0.0, 1.0, int(self.cfg.num_bins) + 1)
         on_grid = np.interp(
             grid,
