@@ -107,7 +107,7 @@ schedule:
   sweep_n: 1024                 # utterances in the model-free corruption sweep
   num_bins: 100               # resolution of the measured P_e curve
   # How accurate mu is assumed to be while tau is measured. Only used when flow.gamma is
-  # set; refresh_tau replaces the assumption with the model's measured accuracy.
+  # set; a refresh under `simulated` replaces the assumption with mu's measured accuracy.
   #
   # 0.0 because tau is built BEFORE training, when mu_nn is at init and its output really
   # does carry nothing. This is not a pessimistic guess — it is the state of the model at
@@ -121,20 +121,21 @@ schedule:
   # train.100 is 0.39-0.57, never close to 1.
   mu_accuracy: 0.0
   # Smoothing on mu's measured accuracy before tau is rebuilt from it. The average updates
-  # every validation while tau is rebuilt only every refresh_every_n_epochs, so the lag is
-  # m/(1-m) epochs whatever the refresh cadence. 0.0 uses the latest reading. Measured over
-  # six runs, only ~65% of epochs improved mu's error and the jitter about the trend was as
-  # large as the average step; 0.8 cuts that 3.6x for a 0.016 lag, biased toward
-  # *under*-stating mu, which is the safe direction. Both the raw and smoothed values are
-  # logged as tau/mu_accuracy_measured and tau/mu_accuracy_ema.
+  # at the end of every training epoch while tau is rebuilt only every
+  # refresh_every_n_epochs, so the lag is m/(1-m) epochs whatever the refresh cadence.
+  # 0.0 uses the latest reading. Measured over six runs, only ~65% of epochs improved mu's
+  # error and the jitter about the trend was as large as the average step; 0.8 cuts that
+  # 3.6x for a 0.016 lag, biased toward *under*-stating mu, which is the safe direction.
+  # The smoothed value is logged as tau/mu_accuracy_ema; the raw reading it averages is
+  # the mu_perr/{split}_overall metric.
   mu_accuracy_momentum: 0.8
 
   # Which split's numbers rebuild tau. `train`, because tau decides which t the next
   # epochs are trained on, so measuring it on `val` would let held-out data steer training
   # — and because the training path really is built from mu's output on training audio.
   # The cost is that a memorising mu reports near-perfect accuracy (measured: 1.000 on
-  # train against 0.490 on val for --mu small) and tau is then built on a fiction. Watch
-  # tau/mu_generalisation_gap; at --mu micro the two agree to 0.036.
+  # train against 0.490 on val for --mu small) and tau is then built on a fiction. Compare
+  # mu_perr/train_overall against mu_perr/val_overall; at --mu micro they agree to 0.036.
   refresh_split: train
 
   # Which P_e curve a refresh rebuilds tau from.
@@ -152,9 +153,13 @@ schedule:
   # measured under `simulated`.
   refresh_curve_from: simulated
 
-  # Re-derive tau from the model's own P_e every N validations, replacing the
-  # corruption-sweep prior. 0 disables it. The bins move with it, so histograms are not
-  # comparable across a refresh — the underlying t-distribution genuinely changed.
+  # Re-derive tau every N training epochs, replacing the corruption-sweep prior. 0
+  # disables it. Counted in training epochs, not validations: keyed off validation the
+  # real cadence would be the overlap of the two, silently dropping refreshes whenever
+  # check_val_every_n_epoch does not divide this. Epoch 0 is skipped, since the metrics a
+  # refresh reads are still empty, so the schedule moves at the start of epochs N, 2N, ...
+  # The bins move with it, so histograms are not comparable across a refresh — the
+  # underlying t-distribution genuinely changed.
   refresh_every_n_epochs: 0
 
 sampling:
