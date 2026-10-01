@@ -45,7 +45,7 @@ def schedule_bin_edges(
 
 
 class TimeBinnedMetric(Metric):
-    """Base for the three metrics below — all they share is the t -> bin mapping.
+    """Base for metrics. All they share is the t -> bin mapping.
 
     Equal-width bins by default. Pass `edges` to bin some other way; in particular
     schedule_bin_edges(sample_t_fn, n), which is what keeps every bin populated once t is
@@ -71,7 +71,6 @@ class TimeBinnedMetric(Metric):
             num_bins = edges.numel() - 1
             self.schedule_bins = True
         self.num_bins = num_bins
-        # a plain attribute, not a Metric state: it is fixed geometry, nothing to reset
         self._edges = edges
 
     def _bin_indices(self, t: torch.Tensor) -> torch.Tensor:

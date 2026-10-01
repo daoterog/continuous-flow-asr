@@ -25,7 +25,6 @@ from src.sampler import sample_tokens, score_samples
 from src.schedule import (
     generation_grid,
     make_tau_inverse,
-    refresh_tau,
     sweep_corruption,
 )
 
@@ -78,7 +77,6 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         cfg: DictConfig,
         vocab_size: int,
         pad_id: int,
-        audio_dim: int,
         canvas_len: int,
         tokenizer: WhisperTokenizerFast,
         vocab_map: VocabMap | None = None,
@@ -172,11 +170,8 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             i_t = i_t + self.gamma_fn(t)[:, None, None] * mu
         return i_t
 
-    def sequence_ce(self, logits: torch.Tensor, tokens: torch.Tensor) -> torch.Tensor:
-        """(B,) cross-entropy, one value per row instead of a batch scalar.
-
-        Keeping the per-row values is what lets BinnedLoss attribute a loss to the t that
-        produced it.
+    def token_weights(self, tokens: torch.Tensor) -> torch.Tensor | None:
+        """(B, L) loss weights, or None when every position counts the same.
 
         `flow.pad_loss_weight` scales the padding positions before a weighted mean. At
         weight 1 this is the plain mean over the canvas, where ~70% of the terms are
@@ -190,18 +185,6 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         Padding is still a real target at any weight above 0: emitting end-of-text is how
         a non-autoregressive sample knows where to stop, and a model that never stops
         scores over 100% WER through insertions alone.
-        """
-        b, _, vocab_size = logits.shape
-        per_token = F.cross_entropy(
-            logits.reshape(-1, vocab_size), tokens.reshape(-1), reduction="none"
-        ).view(b, -1)
-        weights = self.token_weights(tokens)
-        if weights is None:
-            return per_token.mean(dim=1)
-        return (per_token * weights).sum(dim=1) / weights.sum(dim=1).clamp(min=1e-8)
-
-    def token_weights(self, tokens: torch.Tensor) -> torch.Tensor | None:
-        """(B, L) loss weights, or None when every position counts the same.
 
         Real tokens weigh 1. A padding position weighs
 
@@ -226,19 +209,26 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         is_pad = tokens == self.pad_id
         if decay <= 0.0:
             return torch.where(is_pad, tokens.new_tensor(floor, dtype=torch.float),
-                               tokens.new_tensor(1.0, dtype=torch.float))
+                            tokens.new_tensor(1.0, dtype=torch.float))
         n_real = (~is_pad).sum(dim=1, keepdim=True)
         pos = torch.arange(tokens.size(1), device=tokens.device).expand_as(tokens)
         distance = (pos - n_real + 1).clamp(min=1).float()
         decayed = floor + (1.0 - floor) * torch.exp(-(distance - 1.0) / decay)
         return torch.where(is_pad, decayed, torch.ones_like(decayed))
 
-    def flow_step(self, batch: dict) -> tuple[torch.Tensor, dict, torch.Tensor]:
-        """One forward pass: the objective, the per-model records, and the t that drew it.
+    def sequence_ce(self, logits: torch.Tensor, tokens: torch.Tensor) -> torch.Tensor:
+        """(B,) cross-entropy, one value per row instead of a batch scalar."""
+        b, _, vocab_size = logits.shape
+        per_token = F.cross_entropy(
+            logits.reshape(-1, vocab_size), tokens.reshape(-1), reduction="none"
+        ).view(b, -1)
+        weights = self.token_weights(tokens)
+        if weights is None:
+            return per_token.mean(dim=1)
+        return (per_token * weights).sum(dim=1) / weights.sum(dim=1).clamp(min=1e-8)
 
-        Lightning has already moved the batch to the right device, so nothing here calls
-        `.to()`. Losses stay as tensors — `.item()` every step forces a GPU sync.
-        """
+    def flow_step(self, batch: dict) -> tuple[torch.Tensor, dict, torch.Tensor]:
+        """One forward pass: the objective, the per-model records, and the t that drew it."""
         audio = batch["audio"].float()
         tokens = batch["tokens"]
         x1 = F.one_hot(tokens, self.vocab_size).float()
@@ -314,17 +304,7 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         )
 
     def _sampling_batch(self) -> dict | None:
-        """The val utterances to sample, collated once and reused every time.
-
-        `sampling.n_utts` of null means the whole split, which is the only setting under
-        which two runs' sampled WER can be compared: a subset makes the number depend on
-        which utterances it happened to take, and two runs with identical configs but
-        different slices differed by 5.4 points where two sharing a slice differed by 0.6.
-
-        Kept on the CPU. `_log_sampled` moves it a chunk at a time, because the whole
-        validation split as fp32 audio is several GiB and moving it in one piece would
-        undo the chunking it exists to allow.
-        """
+        """The val utterances to sample, collated once and reused every time."""
         if self._sample_batch is None:
             datamodule = getattr(self.trainer, "datamodule", None)
             if datamodule is None:
@@ -336,12 +316,7 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         return self._sample_batch
 
     def _log_sampled(self) -> None:
-        """Sample from noise on a fixed val slice and log the WER it actually achieves.
-
-        This is the only metric here that reflects inference: the binned ones score one
-        denoising step from an x_t built out of the target, which at high t largely
-        measures the input rather than the model.
-        """
+        """Sample from noise on a fixed val slice and log the WER it actually achieves."""
         cfg = self.cfg.get("sampling")
         if cfg is None or not cfg.get("enabled", False) or self.trainer.sanity_checking:
             return
@@ -383,10 +358,6 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         and reset, since counts collected under the old edges do not describe the new
         ones. So: read, flush, then swap.
         """
-        # tau decides which t the next epochs train on, so deriving it from validation
-        # would let held-out data steer training. The train split is also the honest
-        # description of the path: during training the field carries mu's output on
-        # *training* audio, so that is the accuracy the interpolant actually has.
         source = str(self.cfg.schedule.get("refresh_split", "train"))
         raw = {
             split: self.metrics[f"{split}_mu_perr"].overall()
@@ -405,9 +376,6 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         super().on_validation_epoch_end()
         self._log_sampled()
         if accuracy is not None:
-            # Both raw signals go out beside the smoothed one: their gap is how far mu has
-            # memorised the training transcripts, and tau built on `train` is only
-            # meaningful while that gap stays small.
             self.log("tau/mu_accuracy_ema", accuracy)
             for split, perr in raw.items():
                 self.log(f"tau/mu_accuracy_{split}", 1.0 - perr)
@@ -423,15 +391,8 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             self._refresh_schedule(accuracy)
 
     def _smooth_mu_accuracy(self, measured: float) -> float:
-        """Bias-corrected EMA of mu's accuracy, so tau tracks its trend and not SGD wobble.
-
-        Across six completed runs only ~65% of epochs improved mu's error and the residual
-        about a local trend matched the average step, so tau fed the latest reading chases
-        noise. Called once per validation, so the lag is ``m / (1 - m)`` epochs regardless
-        of the refresh cadence. It biases accuracy slightly low, which is the safe
-        direction. Not checkpointed, so a requeue restarts the average.
-        """
-        m = float(self.cfg.schedule.get("mu_accuracy_momentum", 0.0) or 0.0)
+        """Bias-corrected EMA of mu's accuracy, so tau tracks its trend and not SGD wobble."""
+        m = float(self.cfg.schedule.get("mu_accuracy_momentum", 0.0))
         if not 0.0 <= m < 1.0:
             raise ValueError(f"schedule.mu_accuracy_momentum must be in [0, 1), got {m}")
         if m == 0.0:
@@ -548,12 +509,8 @@ class FlowMatching(MetricReporting, pl.LightningModule):
 
     def _refresh_is_due(self) -> bool:
         """Whether tau should be re-derived at the end of this validation."""
-        every = int(self.cfg.schedule.get("refresh_every_n_epochs", 0) or 0)
+        every = int(self.cfg.schedule.get("refresh_every_n_epochs", 0))
         curve = str(self.cfg.schedule.get("refresh_curve_from", "simulated"))
-        # The simulated curve is the corruption sweep, which only moves as mu's assumed
-        # accuracy moves — so without mu there is nothing to re-measure. The measured curve
-        # is the denoiser's own P_e, which moves as the model trains whether mu exists or
-        # not, so a linear run refreshes under it.
         needs_mu = curve == "simulated"
         return (
             every > 0
@@ -594,7 +551,7 @@ class FlowMatching(MetricReporting, pl.LightningModule):
                 return
             metric = self.metrics[key]
             try:
-                new_tau = refresh_tau(metric, self.vocab_size)
+                new_tau = self._smoothed_measured_tau(metric)
                 for m in self.metrics.values():
                     if is_binned(m):
                         schedule_bin_edges(new_tau, m.num_bins)

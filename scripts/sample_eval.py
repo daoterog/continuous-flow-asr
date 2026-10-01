@@ -137,7 +137,7 @@ def _vocab_hint(cfg: DictConfig) -> int:
 def _build(cfg: DictConfig, dm: AudioFeatureDataModule) -> FlowMatching:
     """An unloaded FlowMatching shaped by `cfg`, ready for weights."""
     return FlowMatching(
-        cfg, vocab_size=dm.vocab_size, pad_id=dm.pad_id, audio_dim=dm.d_model,
+        cfg, vocab_size=dm.vocab_size, pad_id=dm.pad_id,
         canvas_len=cfg.data.canvas_len, tokenizer=dm.tokenizer,
         vocab_map=dm.vocab_map, sample_t_fn=T.build_sample_t_fn(dm, cfg),
     )

@@ -190,7 +190,7 @@ def time_one(config: str, overrides: list[str], args: argparse.Namespace) -> dic
     T.setup_reproducibility(cfg)
     dm = T.build_datamodule(cfg)
     model = T.FlowMatching(
-        cfg, vocab_size=dm.vocab_size, pad_id=dm.pad_id, audio_dim=dm.d_model,
+        cfg, vocab_size=dm.vocab_size, pad_id=dm.pad_id,
         canvas_len=cfg.data.canvas_len, tokenizer=dm.tokenizer,
         vocab_map=dm.vocab_map, sample_t_fn=T.build_sample_t_fn(dm, cfg),
     )

@@ -186,7 +186,6 @@ def train_one(config: str, overrides: list[str]) -> dict:
         cfg,
         vocab_size=dm.vocab_size,
         pad_id=dm.pad_id,
-        audio_dim=dm.d_model,
         canvas_len=cfg.data.canvas_len,
         tokenizer=dm.tokenizer,
         vocab_map=dm.vocab_map,
