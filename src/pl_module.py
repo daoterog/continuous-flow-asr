@@ -13,11 +13,11 @@ from omegaconf import DictConfig, OmegaConf
 from transformers import WhisperTokenizerFast
 
 from src.data import VocabMap
+from src.flow import build_tau_scheduler
 from src.flow.coefficients import make_schedule
 from src.flow.sampler import sample_tokens
 from src.flow.sampling_probe import SamplingProbe
 from src.flow.schedule import generation_grid
-from src.flow.tau_scheduler import TauScheduler
 from src.metrics import schedule_bin_edges
 from src.metrics.utils import is_binned
 from src.models import build_audio_decoder, build_denoiser
@@ -66,7 +66,7 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         self.tokenizer = tokenizer
         self.vocab_map = vocab_map
         self.sampling_probe = SamplingProbe(cfg.get("sampling"), cfg.data.batch_size)
-        self.tau = TauScheduler(cfg.schedule, seed=cfg.seed)
+        self.tau = build_tau_scheduler(cfg.schedule, seed=cfg.seed)
 
         self.denoiser = build_denoiser(cfg.model.denoiser, vocab_size)
         self.mu_nn = (
@@ -142,7 +142,7 @@ class FlowMatching(MetricReporting, pl.LightningModule):
                     f"tau refreshed for epoch {self.current_epoch}"
                     f"t in [{lo:.3f}, 1.000] now carries the draw"
                 )
-                if self.tau.curve == "simulated":
+                if self.tau.mu_accuracy is not None:
                     self.print(f"mu accuracy EMA {self.tau.mu_accuracy:.4f}")
         self.reset_metrics("train")
 
@@ -258,9 +258,8 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         """
         super().on_train_epoch_end()
         self.log_metrics("train")
-        if self.tau.curve == "simulated":
-            self.tau.observe_mu(self.metrics)
-            self.log_mu_accuracy()
+        self.tau.observe_mu(self.metrics)
+        self.log_mu_accuracy()
 
     def on_validation_epoch_start(self) -> None:
         """Clear the val accumulators before the pass fills them."""

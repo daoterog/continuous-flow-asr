@@ -21,7 +21,7 @@ from transformers import WhisperTokenizerFast
 
 from src.data import VocabMap
 from src.flow.sampling_probe import SamplingProbe
-from src.flow.tau_scheduler import TauScheduler
+from src.flow.tau_base import TauScheduler
 from src.metrics.base import TimeBinnedMetric
 from src.metrics.utils import (
     check_metrics,
