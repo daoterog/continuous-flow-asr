@@ -6,8 +6,11 @@ sampler the same u -> t map. Two curves can feed it:
 
   * the model-free corruption sweep below — what the interpolant alone does to a target,
     available before a single step of training;
-  * the model's own P_e, via FlowMatching._smoothed_measured_tau — which moves left as
-    the denoiser learns to read the audio and recovers tokens the corrupted field alone could not.
+  * the model's own P_e, via TauScheduler._measured_tau — which moves left as the denoiser
+    learns to read the audio and recovers tokens the corrupted field alone could not.
+
+`src.tau_scheduler` is the stateful driver over these: when to re-derive tau, from which
+curve, and when it is safe to swap.
 """
 
 from collections.abc import Callable

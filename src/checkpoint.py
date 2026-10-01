@@ -299,7 +299,7 @@ class ComponentCheckpoint(pl.Callback):
         # value assumed before training. A refreshing run ends somewhere else entirely
         # (0.43 -> 0.20 on the full vocabulary), so without this the model is sampled on a
         # different grid than it trained on, silently.
-        settled = getattr(module, "last_mu_accuracy", None)
+        settled = getattr(getattr(module, "tau", None), "last_mu_accuracy", None)
         if settled is not None:
             self.manifest = OmegaConf.merge(
                 self.manifest, OmegaConf.create({"mu_accuracy_final": float(settled)})

@@ -7,11 +7,9 @@ it owns is built by `src.metrics.utils`.
 from collections.abc import Callable
 
 import lightning.pytorch as pl
-import numpy as np
 import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
-from torchmetrics import Metric
 from transformers import WhisperTokenizerFast
 
 from src.dataset import VocabMap
@@ -21,11 +19,8 @@ from src.models import build_audio_decoder, build_denoiser
 from src.reporting import MetricReporting
 from src.sampler import sample_tokens
 from src.sampling_probe import SamplingProbe
-from src.schedule import (
-    generation_grid,
-    make_tau_inverse,
-    sweep_corruption,
-)
+from src.schedule import generation_grid
+from src.tau_scheduler import TauScheduler
 
 
 def make_schedule(spec: DictConfig | dict | str | None) -> Callable | None:
@@ -102,13 +97,7 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         self.tokenizer = tokenizer
         self.vocab_map = vocab_map
         self.sampling_probe = SamplingProbe(cfg.get("sampling"), cfg.data.batch_size)
-        self._pending_tau = None
-        self._mu_accuracy_ema = 0.0
-        self._mu_ema_steps = 0
-        # The accuracy tau was last rebuilt from. Saved with the run, because rebuilding
-        # tau from `schedule.mu_accuracy` on reload gives the *prior*, not the schedule the
-        # model actually trained under — they diverge as mu learns.
-        self.last_mu_accuracy: float | None = None
+        self.tau = TauScheduler(cfg.schedule, seed=cfg.seed)
 
         self.denoiser = build_denoiser(cfg.model.denoiser, vocab_size)
         self.mu_nn = (
@@ -313,11 +302,8 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             if f"{split}_mu_perr" in self.metrics
         }
         measured = raw.get(source)
-        # Updated on every validation, not only when a refresh is due: the average should
-        # see every reading it can, and rebuilding tau is the expensive half. That also
-        # makes the momentum's lag count epochs rather than refreshes.
         accuracy = (
-            self._smooth_mu_accuracy(1.0 - measured)
+            self.tau.smooth_mu_accuracy(1.0 - measured)
             if measured is not None and measured == measured  # not NaN
             else None
         )
@@ -329,25 +315,12 @@ class FlowMatching(MetricReporting, pl.LightningModule):
                 self.log(f"tau/mu_accuracy_{split}", 1.0 - perr)
             if len(raw) == 2:
                 self.log("tau/mu_generalisation_gap", raw["val"] - raw["train"])
-        # Not gated on mu: the `measured` curve is rebuilt from the denoiser's P_e and
-        # needs no mu at all, so a linear run refreshes too. Gating here is what would
-        # leave `linear` silently on its initial schedule, which is precisely the control
-        # the comparison needs.
-        if self._refresh_is_due():
-            if accuracy is not None:
-                self.last_mu_accuracy = accuracy
-            self._refresh_schedule(accuracy)
-
-    def _smooth_mu_accuracy(self, measured: float) -> float:
-        """Bias-corrected EMA of mu's accuracy, so tau tracks its trend and not SGD wobble."""
-        m = float(self.cfg.schedule.get("mu_accuracy_momentum", 0.0))
-        if not 0.0 <= m < 1.0:
-            raise ValueError(f"schedule.mu_accuracy_momentum must be in [0, 1), got {m}")
-        if m == 0.0:
-            return measured
-        self._mu_accuracy_ema = m * self._mu_accuracy_ema + (1.0 - m) * measured
-        self._mu_ema_steps += 1
-        return self._mu_accuracy_ema / (1.0 - m**self._mu_ema_steps)
+        if self.tau.is_due(self):
+            skipped = self.tau.refresh(
+                self, getattr(self.trainer, "datamodule", None), accuracy
+            )
+            if skipped is not None:
+                self.print(skipped)
 
     def on_validation_epoch_start(self) -> None:
         """Clear the val accumulators before the pass fills them."""
@@ -365,18 +338,13 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         Reset here and log at epoch end, so each pass reads as what it is and a metric's
         contents always describe the epoch in progress — which is what `bin_centers` and a
         tau refresh both rely on when they read a live metric.
-
-        The refresh is applied here rather than where it is computed because Lightning runs
-        validation before `on_train_epoch_end`: re-binning at that point would change the
-        edges under train counts that had not been logged yet. By the start of the next
-        epoch both splits have been flushed.
         """
         super().on_train_epoch_start()
         self.reset_metrics("train")
-        if self._pending_tau is None:
+        pending = self.tau.take_pending()
+        if pending is None:
             return
-        new_tau, mu_accuracy = self._pending_tau
-        self._pending_tau = None
+        new_tau, mu_accuracy = pending
         self.sample_t_fn = new_tau
         # set_edges leaves the counts alone, and every split has just been or is about to
         # be cleared. An unbinned metric's single bin already spans all of t.
@@ -388,87 +356,12 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         if mu_accuracy is not None:
             self.log("tau/mu_accuracy", mu_accuracy)
         self.log_tau_shape(new_tau)
+        # The measured curve carries no mu accuracy, and a linear run has no mu to report.
+        mu_note = "no mu" if mu_accuracy is None else f"mu accuracy {mu_accuracy:.4f}"
         self.print(
-            f"tau refreshed for epoch {self.current_epoch}: mu accuracy "
-            f"{mu_accuracy:.4f}, t in [{lo:.3f}, 1.000] now carries the draw"
+            f"tau refreshed for epoch {self.current_epoch}: {mu_note}, "
+            f"t in [{lo:.3f}, 1.000] now carries the draw"
         )
-
-    def _smoothed_measured_tau(self, metric: Metric) -> Callable:
-        """Tau from the denoiser's recovery, averaged across refreshes on a fixed t grid."""
-        seen = metric.seen().detach().cpu().numpy()
-        ts = metric.bin_centers().numpy()[seen]
-        rec = metric.recovery().detach().cpu().numpy()[seen]
-        if rec.size == 0 or rec.max() < 0.05:
-            raise ValueError(
-                f"the model recovers at most {rec.max() if rec.size else 0:.3f} of tokens "
-                f"in any bin; tau would collapse onto t=1. Train further first."
-            )
-        grid = np.linspace(0.0, 1.0, int(self.cfg.schedule.num_bins) + 1)
-        on_grid = np.interp(
-            grid,
-            np.concatenate([ts, [1.0]]),
-            np.concatenate([rec, [1.0]]),
-            left=float(rec[0])
-        )
-        return make_tau_inverse(
-            grid.tolist(), on_grid.tolist(), self.vocab_size,
-            p_e0=float(1.0 - on_grid[0]),
-        )
-
-    def _refresh_is_due(self) -> bool:
-        """Whether tau should be re-derived at the end of this validation."""
-        every = int(self.cfg.schedule.get("refresh_every_n_epochs", 0))
-        curve = str(self.cfg.schedule.get("refresh_curve_from", "simulated"))
-        needs_mu = curve == "simulated"
-        return (
-            every > 0
-            and self.sample_t_fn is not None
-            and (self.gamma_fn is not None or not needs_mu)
-            and not self.trainer.sanity_checking
-            and (self.current_epoch + 1) % every == 0
-        )
-
-    def _refresh_schedule(self, mu_accuracy: float | None) -> None:
-        """Re-derive tau. `schedule.refresh_curve_from` decides from which P_e curve."""
-        datamodule = getattr(self.trainer, "datamodule", None)
-        if datamodule is None:
-            return
-        cfg = self.cfg.schedule
-        curve = str(cfg.get("refresh_curve_from", "simulated"))
-
-        if curve == "measured":
-            key = f"{self.cfg.schedule.get('refresh_split', 'train')}_denoiser_perr"
-            if key not in self.metrics:
-                self.print(f"tau refresh skipped: no {key} metric to read")
-                return
-            metric = self.metrics[key]
-            new_tau = self._smoothed_measured_tau(metric)
-        elif curve == "simulated":
-            if self.gamma_fn is not None and mu_accuracy is None:
-                self.print("tau refresh skipped: the simulated curve needs mu's accuracy")
-                return
-
-            tokens = datamodule.sample_tokens(
-                "train", int(cfg.sweep_n), seed=self.cfg.seed
-            )
-            ts = np.linspace(0.0, 1.0, int(cfg.num_bins) + 1).tolist()
-            recovery = sweep_corruption(
-                tokens.to(self.device),
-                self.vocab_size,
-                ts,
-                alpha_fn=self.alpha_fn,
-                beta_fn=self.beta_fn,
-                gamma_fn=self.gamma_fn,
-                mu_accuracy=0.0 if mu_accuracy is None else mu_accuracy,
-            )
-            new_tau = make_tau_inverse(ts, recovery, self.vocab_size)
-        else:
-            raise ValueError(
-                f"schedule.refresh_curve_from must be 'simulated' or 'measured', "
-                f"got {curve!r}"
-            )
-
-        self._pending_tau = (new_tau, mu_accuracy)
 
     def _check_finite(self, loss: torch.Tensor, out: dict, split: str) -> None:
         """Stop the run the first time the objective is not finite."""
