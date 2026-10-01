@@ -1,7 +1,7 @@
 """The flow-matching LightningModule: interpolant, objective and optimizers.
 
-Everything that reports numbers to a logger lives in `src.metrics.reporting`, and the
-metric bank is built by `src.metrics.utils`.
+Everything that reports numbers to a logger lives in `src.reporting`, and the metric bank
+it owns is built by `src.metrics.utils`.
 """
 
 from collections.abc import Callable
@@ -16,10 +16,11 @@ from transformers import WhisperTokenizerFast
 
 from src.dataset import VocabMap
 from src.metrics import schedule_bin_edges
-from src.metrics.reporting import MetricReporting
 from src.metrics.utils import is_binned
 from src.models import build_audio_decoder, build_denoiser
-from src.sampler import sample_tokens, score_samples
+from src.reporting import MetricReporting
+from src.sampler import sample_tokens
+from src.sampling_probe import SamplingProbe
 from src.schedule import (
     generation_grid,
     make_tau_inverse,
@@ -100,7 +101,7 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         self.sample_t_fn = sample_t_fn
         self.tokenizer = tokenizer
         self.vocab_map = vocab_map
-        self._sample_batch = None
+        self.sampling_probe = SamplingProbe(cfg.get("sampling"), cfg.data.batch_size)
         self._pending_tau = None
         self._mu_accuracy_ema = 0.0
         self._mu_ema_steps = 0
@@ -259,12 +260,6 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             loss = loss + self.mu_loss_weight * out["mu"]["loss"]
         return loss, out, t
 
-    def generation_grid(self, num_steps: int) -> list[float]:
-        """The sampler's time grid — uniform in tau when t was drawn through tau^-1."""
-        if self.sample_t_fn is None:
-            return torch.linspace(0, 1, num_steps + 1).tolist()
-        return [float(t) for t in generation_grid(self.sample_t_fn, num_steps)]
-
     def sample(
         self,
         audio: torch.Tensor,
@@ -283,10 +278,16 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             mu = F.softmax(self.mu_nn(audio), dim=-1)
         if init_from_mu is None:
             init_from_mu = bool(self.cfg.get("sampling", {}).get("init_from_mu", False))
+
+        if self.sample_t_fn is None:
+            gen_grid = torch.linspace(0, 1, num_steps + 1).tolist()
+        else:
+            gen_grid = [float(t) for t in generation_grid(self.sample_t_fn, num_steps)]
+
         return sample_tokens(
             self.denoiser,
             audio,
-            self.generation_grid(num_steps),
+            gen_grid,
             self.vocab_size,
             self.canvas_len,
             self.alpha_fn,
@@ -296,53 +297,6 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             hard=hard,
             x1_init=mu if init_from_mu else None,
         )
-
-    def _sampling_batch(self) -> dict | None:
-        """The val utterances to sample, collated once and reused every time."""
-        if self._sample_batch is None:
-            datamodule = getattr(self.trainer, "datamodule", None)
-            if datamodule is None:
-                return None
-            subset = datamodule.datasets["val"]
-            want = self.cfg.sampling.get("n_utts")
-            n = len(subset) if want is None else min(int(want), len(subset))
-            self._sample_batch = datamodule.collate_fn([subset[i] for i in range(n)])
-        return self._sample_batch
-
-    def _log_sampled(self) -> None:
-        """Sample from noise on a fixed val slice and log the WER it actually achieves."""
-        cfg = self.cfg.get("sampling")
-        if cfg is None or not cfg.get("enabled", False) or self.trainer.sanity_checking:
-            return
-        every = int(cfg.get("every_n_epochs", 5))
-        if every <= 0 or (self.current_epoch + 1) % every:
-            return
-        batch = self._sampling_batch()
-        if batch is None:
-            return
-
-        was_training = self.training
-        self.eval()
-        chunk = int(cfg.get("batch_size") or self.cfg.data.batch_size)
-        num_steps = int(cfg.get("num_steps", 16))
-        hard = bool(cfg.get("hard", False))
-        tokens = batch["tokens"].to(self.device)
-        pred = torch.cat(
-            [
-                self.sample(
-                    batch["audio"][i : i + chunk].to(self.device).float(),
-                    num_steps,
-                    hard=hard,
-                )
-                for i in range(0, batch["audio"].size(0), chunk)
-            ]
-        )
-        wer, token_error = score_samples(
-            pred, tokens, self.tokenizer, self.pad_id, self.vocab_map
-        )
-        self.log("sampled/wer", wer, batch_size=tokens.size(0))
-        self.log("sampled/perr", token_error, batch_size=tokens.size(0))
-        self.train(was_training)
 
     def on_validation_epoch_end(self) -> None:
         """Flush the metrics, sample from noise, then re-derive tau if it is due.
@@ -368,7 +322,7 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             else None
         )
         super().on_validation_epoch_end()
-        self._log_sampled()
+        self.log_sampled()
         if accuracy is not None:
             self.log("tau/mu_accuracy_ema", accuracy)
             for split, perr in raw.items():

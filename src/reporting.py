@@ -1,9 +1,13 @@
-"""Everything that writes metrics to the logger, kept out of the model.
+"""Everything that writes numbers to the logger, kept out of the model.
 
 `MetricReporting` is a mixin for a LightningModule: it owns the metric bank, updates it
 each batch, and at each epoch end emits the scalars and the per-bin histograms. It leans
 on `self.log`, `self.logger`, `self.trainer` and `self.current_epoch`, so it only works
 mixed into a LightningModule and must come before it in the bases.
+
+It sits above `src.metrics` rather than inside it — the metrics are measurements, this is
+the layer that decides what reaches wandb and in what shape, which is also why it may
+reach for a `SamplingProbe` while the metrics package may not.
 """
 
 from collections.abc import Callable
@@ -16,9 +20,8 @@ from torch import nn
 from transformers import WhisperTokenizerFast
 
 from src.dataset import VocabMap
-
-from .base import TimeBinnedMetric
-from .utils import (
+from src.metrics.base import TimeBinnedMetric
+from src.metrics.utils import (
     check_metrics,
     edge_values,
     is_binned,
@@ -26,6 +29,7 @@ from .utils import (
     section_for,
     split_key,
 )
+from src.sampling_probe import SamplingProbe
 
 
 class MetricReporting:
@@ -37,6 +41,7 @@ class MetricReporting:
 
     metrics: nn.ModuleDict
     names: tuple[str, ...]
+    sampling_probe: SamplingProbe
 
     def init_metrics(
         self,
@@ -140,6 +145,22 @@ class MetricReporting:
             },
             commit=False,
         )
+
+    def log_sampled(self) -> None:
+        """Log the WER a full integration from noise reaches on the fixed val slice.
+
+        The binned metrics score one denoising step from an x_t built out of the target,
+        so at high t they largely measure their own input; this is the number inference
+        would produce. `SamplingProbe` owns the mechanics — what this adds is `self.log`.
+        """
+        datamodule = getattr(self.trainer, "datamodule", None)
+        if datamodule is None or self.trainer.sanity_checking:
+            return
+        if not self.sampling_probe.is_due(self.current_epoch):
+            return
+        wer, token_error, n_utts = self.sampling_probe.score(self, datamodule)
+        self.log("sampled/wer", wer, batch_size=n_utts)
+        self.log("sampled/perr", token_error, batch_size=n_utts)
 
     def log_tau_shape(self, tau_inverse: Callable) -> None:
         """Record what a schedule actually draws, not just where it starts.

@@ -202,3 +202,39 @@ def corpus_wer(refs: list[str], preds: list[str]) -> float:
         merge_compounds=True,
     )
     return 100 * r["err_rate"]
+
+
+@torch.no_grad()
+def score_samples(
+    pred_ids: torch.Tensor,
+    target_ids: torch.Tensor,
+    tokenizer: "WhisperTokenizerFast",
+    pad_id: int,
+    vocab_map: "VocabMap | None" = None,
+) -> tuple[float, float]:
+    """(WER %, token error rate) for sampled ids against the references.
+
+    Both sides go through the decode and normalisation the binned WER uses, so the number
+    is comparable to what `scripts/score_eval.py` reports.
+
+    The token error counts only positions whose target is a real token. Averaging over the
+    whole canvas instead would fold in the padding tail, which the model learns first and
+    which dominates the count — on a 224-wide canvas over ~43-token utterances it is 81% of
+    positions, so getting every real token wrong would still report 0.19 rather than 1.0.
+    """
+    preds = ids_to_text(pred_ids, tokenizer, pad_id, vocab_map)
+    refs = ids_to_text(target_ids, tokenizer, pad_id, vocab_map)
+    pairs = [
+        (r, p)
+        for r, p in zip(refs, preds, strict=True)
+        if data_utils.normalizer(r).strip()
+    ]
+    wer = corpus_wer([r for r, _ in pairs], [p for _, p in pairs]) if pairs else float("nan")
+    scored = target_ids != pad_id
+    n_scored = int(scored.sum())
+    token_error = (
+        float("nan")
+        if n_scored == 0
+        else (((pred_ids != target_ids) & scored).sum() / n_scored).item()
+    )
+    return wer, token_error

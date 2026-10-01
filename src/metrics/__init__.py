@@ -1,7 +1,7 @@
 """Time-binned metrics: loss, token error and WER as functions of the flow time t.
 
-`base`, `loss`, `token_error` and `wer` are the metrics themselves; `utils` builds and
-validates a bank of them, and `reporting` is the mixin that writes them to a logger.
+`base`, `loss`, `token_error` and `wer` are the metrics themselves, and `utils` builds and
+validates a bank of them. Measuring only — what reaches a logger is `src.reporting`.
 """
 
 from .base import (
@@ -10,9 +10,9 @@ from .base import (
     edit_counts,
     ids_to_text,
     schedule_bin_edges,
+    score_samples,
 )
 from .loss import BinnedLoss
-from .reporting import MetricReporting
 from .token_error import BinnedTokenError
 from .utils import (
     SPLITS,
@@ -29,7 +29,6 @@ __all__ = [
     "BinnedLoss",
     "BinnedTokenError",
     "BinnedWER",
-    "MetricReporting",
     "TimeBinnedMetric",
     "check_metrics",
     "corpus_wer",
@@ -38,6 +37,7 @@ __all__ = [
     "ids_to_text",
     "make_metrics",
     "schedule_bin_edges",
+    "score_samples",
     "section_for",
     "split_key",
 ]

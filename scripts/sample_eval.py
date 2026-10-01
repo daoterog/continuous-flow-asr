@@ -34,9 +34,8 @@ from src.checkpoint import (  # noqa: E402
     load_state_into,
 )
 from src.dataset import AudioFeatureDataModule  # noqa: E402
-from src.metrics import ids_to_text  # noqa: E402
+from src.metrics import ids_to_text, score_samples  # noqa: E402
 from src.pl_module import FlowMatching  # noqa: E402
-from src.sampler import score_samples  # noqa: E402
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
