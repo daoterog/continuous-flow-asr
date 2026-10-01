@@ -17,13 +17,8 @@ import argparse
 import sys
 import time
 from collections.abc import Sequence
-from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-import torch  # noqa: E402
+import torch
 
 # (label, overrides). Ordered so the first row is today's default and everything after
 # is a single change from it, which keeps each line readable as one decision.

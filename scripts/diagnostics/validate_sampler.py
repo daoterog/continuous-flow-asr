@@ -25,18 +25,13 @@ It runs the real stack: the DRAX denoiser, the real interpolant, and src.flow.sa
 import argparse
 import sys
 from collections.abc import Sequence
-from pathlib import Path
 
 import torch
 import torch.nn.functional as F
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from src.flow.coefficients import make_schedule  # noqa: E402
-from src.flow.sampler import sample_tokens  # noqa: E402
-from src.models import build_audio_decoder, build_denoiser  # noqa: E402
+from src.flow.coefficients import make_schedule
+from src.flow.sampler import sample_tokens
+from src.models import build_audio_decoder, build_denoiser
 
 
 def make_transition_matrix(vocab_size: int, k: int, generator: torch.Generator) -> torch.Tensor:

@@ -22,16 +22,12 @@ import itertools
 import re
 import sys
 from collections.abc import Sequence
-from pathlib import Path
 
 import submitit
 import yaml
 
 DOTLIST = re.compile(r"^[A-Za-z_][\w.]*=")
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
 
 # Defaults for the axes worth varying. Learning rate is the one that actually decides
 # whether memorisation happens; the variant and the schedule are here because a bug in

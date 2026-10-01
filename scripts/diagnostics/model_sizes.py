@@ -15,17 +15,14 @@ activation. Activations depend on batch and canvas and are what bench_train meas
 import argparse
 import sys
 from collections.abc import Sequence
-from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+from src.constants import REPO_ROOT
 
-import torch  # noqa: E402
-from omegaconf import OmegaConf  # noqa: E402
+import torch
+from omegaconf import OmegaConf
 
-import src  # noqa: F401, E402  # sets HF_HOME before transformers is imported
-from src.models import build_audio_decoder, build_denoiser  # noqa: E402
+import src  # noqa: F401  # sets HF_HOME before transformers is imported
+from src.models import build_audio_decoder, build_denoiser
 
 SIZES_DIR = REPO_ROOT / "configs" / "sizes"
 MU_DIR = REPO_ROOT / "configs" / "mu"

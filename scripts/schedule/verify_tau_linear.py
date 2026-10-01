@@ -22,18 +22,14 @@ from collections.abc import Sequence
 from itertools import pairwise
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-import matplotlib  # noqa: E402
+import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
-import torch  # noqa: E402
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
 
-from src.flow.schedule import make_tau_inverse, sweep_corruption  # noqa: E402
+from src.flow.schedule import make_tau_inverse, sweep_corruption
 
 
 def measure_p_e(

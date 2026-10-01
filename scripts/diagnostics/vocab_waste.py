@@ -25,21 +25,17 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+import torch
+import torch.nn.functional as F
 
-import torch  # noqa: E402
-import torch.nn.functional as F  # noqa: E402
-
-import train as T  # noqa: E402
-from scripts.evaluation.sample_eval import (  # noqa: E402
+import train as T
+from scripts.evaluation.sample_eval import (
     _build,
     _config_from_components,
     _model_from_components,
 )
-from src.checkpointing import load_state_into  # noqa: E402
-from src.data import VocabMap  # noqa: E402
+from src.checkpointing import load_state_into
+from src.data import VocabMap
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

@@ -15,7 +15,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+from src.constants import REPO_ROOT
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

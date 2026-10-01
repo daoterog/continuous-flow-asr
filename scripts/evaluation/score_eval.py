@@ -30,7 +30,8 @@ import re
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+from src.constants import REPO_ROOT
+
 LEADERBOARD = REPO_ROOT / "open_asr_leaderboard"
 
 # The checkpoint LIVE_TARGETS and CSV_TARGETS were read for. --model is free, so the

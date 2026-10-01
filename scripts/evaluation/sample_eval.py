@@ -20,22 +20,17 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import torch
+from omegaconf import DictConfig, OmegaConf
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from omegaconf import DictConfig, OmegaConf  # noqa: E402
-
-import train as T  # noqa: E402
-from src.checkpointing import (  # noqa: E402
+import train as T
+from src.checkpointing import (
     load_components,
     load_manifest,
     load_state_into,
 )
-from src.data import AudioFeatureDataModule  # noqa: E402
-from src.metrics import ids_to_text, score_samples  # noqa: E402
-from src.pl_module import FlowMatching  # noqa: E402
+from src.data import AudioFeatureDataModule
+from src.metrics import ids_to_text, score_samples
+from src.pl_module import FlowMatching
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

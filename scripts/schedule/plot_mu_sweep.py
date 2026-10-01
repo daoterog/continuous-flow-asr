@@ -22,24 +22,20 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+from src.constants import data_root_for
 
-from src.constants import data_root_for  # noqa: E402
-
-import matplotlib  # noqa: E402
+import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
-import torch  # noqa: E402
-from matplotlib.ticker import PercentFormatter  # noqa: E402
-from transformers import WhisperTokenizerFast  # noqa: E402
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+from matplotlib.ticker import PercentFormatter
+from transformers import WhisperTokenizerFast
 
-from src.data import AudioFeatureDataModule  # noqa: E402
-from src.flow.coefficients import make_schedule  # noqa: E402
-from src.flow.schedule import (  # noqa: E402
+from src.data import AudioFeatureDataModule
+from src.flow.coefficients import make_schedule
+from src.flow.schedule import (
     corrupt_and_decode,
     tau_from_recovery,
 )

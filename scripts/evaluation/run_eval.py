@@ -23,13 +23,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
+from src.constants import REPO_ROOT
+
 from scripts.data.download_librispeech import LOCAL_DATA_ROOT, SNELLIUS_DATA_ROOT
 
 if TYPE_CHECKING:
     import torch
     from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
 LEADERBOARD = REPO_ROOT / "open_asr_leaderboard"
 
 DEFAULT_MODEL = "openai/whisper-large-v3"
