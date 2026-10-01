@@ -56,7 +56,7 @@ if [[ -z "${WALLTIME}" ]]; then
     # reports the utterance count without loading the model.
     # `|| true` is load-bearing: under `set -eo pipefail` a failing python would abort
     # the script instead of reaching the fallback.
-    UTTS="$(cd "${REPO_DIR}" && python -m scripts.precompute_whisper \
+    UTTS="$(cd "${REPO_DIR}" && python -m scripts.data.precompute_whisper \
         --dry-run --env snellius --model "${MODEL}" \
         --configs ${CONFIGS} --splits ${SPLITS} \
         --num-shards "${N_JOBS}" --shard-id 0 2>"${SIZING_ERR}" \

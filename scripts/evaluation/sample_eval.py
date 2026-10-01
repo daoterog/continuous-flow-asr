@@ -10,8 +10,8 @@ one might want do not move together: more steps pull the sample onto the data ma
 (fluent, well-formed) while a single step is the model's best per-token guess. Which one
 wins on WER is an empirical question per checkpoint, so measure it rather than assume.
 
-    python -m scripts.sample_eval --ckpt runs/.../epoch=49.ckpt
-    python -m scripts.sample_eval --ckpt ... --role test --steps 1 4 16 64
+    python -m scripts.evaluation.sample_eval --ckpt runs/.../epoch=49.ckpt
+    python -m scripts.evaluation.sample_eval --ckpt ... --role test --steps 1 4 16 64
 """
 
 import argparse

@@ -58,7 +58,7 @@ def edit_counts(ref: str, pred: str) -> tuple[int, int]:
 
 
 def corpus_wer(refs: list[str], preds: list[str]) -> float:
-    """Percent corpus WER, the way scripts/score_eval.py's kaldialign column computes it.
+    """Percent corpus WER, the way scripts/evaluation/score_eval.py's kaldialign column computes it.
 
     Named `corpus_wer`, not `wer`: `src.metrics.wer` is the submodule holding BinnedWER,
     and a function of that name would be unreachable through the package.
@@ -93,7 +93,7 @@ def score_samples(
     """(WER %, token error rate) for sampled ids against the references.
 
     Both sides go through the decode and normalisation the binned WER uses, so the number
-    is comparable to what `scripts/score_eval.py` reports.
+    is comparable to what `scripts/evaluation/score_eval.py` reports.
 
     The token error counts only positions whose target is a real token. Averaging over the
     whole canvas instead would fold in the padding tail, which the model learns first and

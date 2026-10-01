@@ -9,8 +9,8 @@ It times `trainer.fit` end to end, so a config that starves the GPU on data show
 slow rather than as a good compute number — which is the failure mode that matters on a
 shared filesystem.
 
-    python -m scripts.bench_train --config configs/linear.yaml
-    python -m scripts.bench_train --config configs/linear.yaml --steps 60
+    python -m scripts.diagnostics.bench_train --config configs/linear.yaml
+    python -m scripts.diagnostics.bench_train --config configs/linear.yaml --steps 60
 """
 
 import argparse

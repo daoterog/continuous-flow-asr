@@ -5,7 +5,7 @@ tasks claiming the same utterances, a split missing entirely — none of which t
 number itself would reveal. A rehearsal run through this before the real submission turns
 "the array looked fine" into an assertion.
 
-    python -m scripts.check_eval --results-dir <dir> --expect-total 32 --num-shards 8
+    python -m scripts.evaluation.check_eval --results-dir <dir> --expect-total 32 --num-shards 8
 """
 
 import argparse

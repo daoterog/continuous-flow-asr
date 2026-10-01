@@ -42,7 +42,7 @@ if [[ -z "${WALLTIME}" ]]; then
     # Shard 0 takes ceil(n/N_JOBS) files, so it is the worst-case task.
     # `|| true` is load-bearing: under `set -eo pipefail` a failing python (env not
     # active, no network) would abort the script instead of reaching the fallback.
-    SHARD_BYTES="$(cd "${REPO_DIR}" && python -m scripts.download_librispeech \
+    SHARD_BYTES="$(cd "${REPO_DIR}" && python -m scripts.data.download_librispeech \
         --dry-run --configs ${CONFIGS} --splits ${SPLITS} \
         --num-shards "${N_JOBS}" --shard-id 0 2>"${SIZING_ERR}" \
         | awk '/^shard bytes/ {print $3}' || true)"

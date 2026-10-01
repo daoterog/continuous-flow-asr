@@ -80,7 +80,7 @@ echo "node      : $(hostname)"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
 # data.env=snellius because the features are on scratch, not in the repo's data/.
-srun python -m scripts.sample_eval \
+srun python -m scripts.evaluation.sample_eval \
     "${SOURCE_ARGS[@]}" \
     --role "${EVAL_ROLE}" \
     ${EVAL_BATCH:+--batch-size "${EVAL_BATCH}"} \

@@ -24,7 +24,7 @@ set -eo pipefail
 
 source "${REPO_HOME:-$HOME/continuous-flow-asr}/jobs/batch/_env.sh"
 
-python -m scripts.download_eval_sets \
+python -m scripts.data.download_eval_sets \
     --env snellius \
     --build-cache \
     --num-shards 1 --shard-id 0 \

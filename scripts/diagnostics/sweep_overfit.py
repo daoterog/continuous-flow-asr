@@ -10,9 +10,9 @@ The sweep runs through submitit's local executor, a few jobs at a time because t
 one GPU. Each job is an ordinary `train.py` configuration, so anything learned here
 transfers straight to a real run.
 
-    python -m scripts.sweep_overfit --dry-run          # print the grid and exit
-    python -m scripts.sweep_overfit                    # run it
-    python -m scripts.sweep_overfit --parallel 2       # two jobs at a time
+    python -m scripts.diagnostics.sweep_overfit --dry-run          # print the grid and exit
+    python -m scripts.diagnostics.sweep_overfit                    # run it
+    python -m scripts.diagnostics.sweep_overfit --parallel 2       # two jobs at a time
 
 Results land in wandb under one group, and a summary table prints at the end.
 """
@@ -307,7 +307,7 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, l
     p.add_argument("--compile", action="store_true",
                    help="torch.compile both models; worth it whenever a job runs minutes")
     p.add_argument("--keep-checkpoints", action="store_true",
-                   help="save checkpoints so scripts.sample_eval can probe the result")
+                   help="save checkpoints so scripts.evaluation.sample_eval can probe the result")
     p.add_argument("--dry-run", action="store_true", help="print the grid and exit")
     return p.parse_args(flags), extra
 

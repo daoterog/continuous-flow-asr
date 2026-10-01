@@ -11,7 +11,7 @@
 #
 # Afterwards, to merge the per-task .partN files and print WER against the leaderboard
 # targets. The exact command is echoed at the end of this script with this run's MODEL,
-# RESULTS_DIR and N_JOBS already filled in — the bare `python -m scripts.score_eval` only
+# RESULTS_DIR and N_JOBS already filled in — the bare `python -m scripts.evaluation.score_eval` only
 # scores the right thing when all three were left at their defaults.
 # Cheap enough for the login node (CPU only, seconds); jobs/batch/score_eval.sh is the
 # same step as a job, for chaining with --dependency=afterok.
@@ -72,7 +72,7 @@ if [[ -z "${WALLTIME}" ]]; then
     # neither the audio downloaded nor a model loaded.
     # `|| true` is load-bearing: under `set -eo pipefail` a failing python would abort the
     # script instead of reaching the fallback.
-    UTTS="$(cd "${REPO_DIR}" && python -m scripts.run_eval \
+    UTTS="$(cd "${REPO_DIR}" && python -m scripts.evaluation.run_eval \
         --dry-run --env snellius --source "${SOURCE}" --model "${MODEL}" \
         ${DATASETS:+--datasets ${DATASETS}} \
         ${CONFIGS:+--configs ${CONFIGS}} \
@@ -118,7 +118,7 @@ sbatch \
 # rehearsal or a partial run is usually a deliberate choice.
 echo
 echo "When the array finishes, score it with:"
-echo "  python -m scripts.score_eval \\"
+echo "  python -m scripts.evaluation.score_eval \\"
 echo "      --results-dir ${RESULTS_DIR} \\"
 echo "      --model ${MODEL} \\"
 echo "      --num-shards ${N_JOBS}"

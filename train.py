@@ -7,7 +7,7 @@
         --train-configs clean other --train-splits train.100 train.360
 
 The YAML is the source of truth. `--*-configs` / `--*-splits` mirror the flags on
-scripts/precompute_whisper.py and override the `data.splits` node; `--size` layers a
+scripts/data/precompute_whisper.py and override the `data.splits` node; `--size` layers a
 denoiser geometry from configs/sizes/ over the variant; anything else is a plain
 OmegaConf dotlist override.
 """

@@ -15,8 +15,9 @@ A model that has learned to suppress the unreachable tokens shows near-zero mass
 gain from masking: then the problem is budget, not structure. A model that leaks mass
 there is spending its capacity on tokens that cannot occur, and masking recovers it.
 
-    python -m scripts.vocab_waste --ckpt runs/.../last.ckpt
-    python -m scripts.vocab_waste --components runs/<id>/components --config configs/audio_cond.yaml
+    python -m scripts.diagnostics.vocab_waste --ckpt runs/.../last.ckpt
+    python -m scripts.diagnostics.vocab_waste --components runs/<id>/components \
+        --config configs/audio_cond.yaml
 """
 
 import argparse
@@ -32,7 +33,7 @@ import torch  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
 
 import train as T  # noqa: E402
-from scripts.sample_eval import (  # noqa: E402
+from scripts.evaluation.sample_eval import (  # noqa: E402
     _build,
     _config_from_components,
     _model_from_components,

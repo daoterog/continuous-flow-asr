@@ -116,12 +116,12 @@ schedule:
   #
   # 150 is the measured path's optimum and comfortably past the simulated path's.
   #
-  # simulated (scripts/ablate_tau_bins.py): discretisation falls to the sweep's own
+  # simulated (scripts/schedule/ablate_tau_bins.py): discretisation falls to the sweep's own
   # seed-to-seed noise by 80-160 bins depending on mu's accuracy, and is flat to 400.
   # Below that it climbs fast — 25 bins is 4x the floor, and 10 shifts the 90th percentile
   # of drawn t by +0.097, a tenth of the whole time axis.
   #
-  # measured (scripts/ablate_measured_bins.py): more is NOT simply better, because each
+  # measured (scripts/schedule/ablate_measured_bins.py): more is NOT simply better, because each
   # bin averages its share of the epoch's tokens. On clean/train.100 (28,539 utts x 75.2
   # tokens = 2.15M real tokens) the p95 shift in drawn t runs 0.065 at 10 bins, 0.0239 at
   # 60, 0.0211 at 100, 0.0207 at 150, then back up to 0.0256 at 200 and 0.0287 at 300.
@@ -136,7 +136,7 @@ schedule:
   # the moment the measurement is taken. The corruption sweep agrees: an accuracy-0 mu
   # emits a confident one-hot on a random token, whose gamma(t)~1 spike loses to the noise
   # maximum alpha*sqrt(2 ln V)~3.8, so its P_e curve sits on top of the no-mu path — see
-  # scripts/plot_mu_sweep.py, where 0% and "no mu" coincide.
+  # scripts/schedule/plot_mu_sweep.py, where 0% and "no mu" coincide.
   #
   # The previous default of 1.0 assumed a perfect mu from step one and put the training
   # mass where a perfect mu would have carried the signal. Measured mu accuracy on

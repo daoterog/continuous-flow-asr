@@ -18,8 +18,8 @@ That gives three independent things to check, none of which a broken integrator 
 
 It runs the real stack: the DRAX denoiser, the real interpolant, and src.flow.sampler.
 
-    python -m scripts.validate_sampler
-    python -m scripts.validate_sampler --variant three_term --epochs 60
+    python -m scripts.diagnostics.validate_sampler
+    python -m scripts.diagnostics.validate_sampler --variant three_term --epochs 60
 """
 
 import argparse

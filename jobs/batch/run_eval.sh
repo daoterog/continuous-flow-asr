@@ -48,7 +48,7 @@ source "${REPO_HOME:-$HOME/continuous-flow-asr}/jobs/batch/_env.sh"
 require_pinned_model
 
 # ── run ──────────────────────────────────────────────────────────────────────
-python -m scripts.run_eval \
+python -m scripts.evaluation.run_eval \
     --env snellius \
     --model "${MODEL}" \
     --source "${SOURCE:-audio}" \

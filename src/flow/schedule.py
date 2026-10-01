@@ -142,7 +142,7 @@ def make_tau_inverse(
         but negligible recovery — and the monotone fix above has already frozen those in
         as genuine-looking steps. Clamping to exactly 0 is what stops them becoming knots.
 
-    See scripts/explain_tau.py, which rebuilds this with np.interp and plots each stage.
+    See scripts/schedule/explain_tau.py, which rebuilds this with np.interp and plots each stage.
 
     The returned callable carries `tau`, `ts` and `knots` as attributes, for plotting and
     for ``schedule_bin_edges``.

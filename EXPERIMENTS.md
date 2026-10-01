@@ -1,7 +1,7 @@
 # Experiment log
 
 Continuous flow matching for ASR. All results below are the **overfit harness**
-(`scripts/sweep_overfit.py`): N utterances, val pointed at the same utterances, dropout
+(`scripts/diagnostics/sweep_overfit.py`): N utterances, val pointed at the same utterances, dropout
 and weight decay off. It answers "can the model memorise?", not "does it generalise".
 
 **SAMPLED WER** = integrate from noise, no target anywhere. The only metric that reflects

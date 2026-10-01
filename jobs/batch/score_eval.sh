@@ -38,7 +38,7 @@ require_pinned_model
 NO_ASSERT_FLAG=()
 [[ -n "${NO_ASSERT}" ]] && NO_ASSERT_FLAG=(--no-assert)
 
-python -m scripts.score_eval \
+python -m scripts.evaluation.score_eval \
     --results-dir "${RESULTS_DIR:-${REPO_HOME}/results}" \
     --model "${MODEL}" \
     ${NUM_SHARDS:+--num-shards "${NUM_SHARDS}"} \

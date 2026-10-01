@@ -16,7 +16,7 @@ CONFIG="${1:?usage: $0 <config.yaml> [overrides...]}"
 shift || true
 OVERRIDES="$*"
 
-# Throughput, measured on an A100 node (scripts/bench_train.py, batch 256 + 16 workers +
+# Throughput, measured on an A100 node (scripts/diagnostics/bench_train.py, batch 256 + 16 workers +
 # compile). Two regimes, 15x apart, and which one applies is decided by whether the data
 # fits the job's 64G of RAM:
 #   ~3350 utts/s  reading a subset the page cache holds

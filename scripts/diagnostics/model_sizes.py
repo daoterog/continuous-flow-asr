@@ -2,10 +2,10 @@
 
 Needs no GPU and no data: the models are built on the meta device, so nothing is
 allocated and `large` costs the same to inspect as `tiny`. Use it to decide which sizes
-are worth a real timing run before spending a job on scripts/bench_train.py.
+are worth a real timing run before spending a job on scripts/diagnostics/bench_train.py.
 
-    python -m scripts.model_sizes
-    python -m scripts.model_sizes --vocab 51866   # what DRAX report, for comparison
+    python -m scripts.diagnostics.model_sizes
+    python -m scripts.diagnostics.model_sizes --vocab 51866   # what DRAX report, for comparison
 
 The optimizer column is the fixed cost: under AMP, Lightning keeps fp32 parameters and
 gradients, and AdamW adds two fp32 moments, so 16 bytes per parameter before a single

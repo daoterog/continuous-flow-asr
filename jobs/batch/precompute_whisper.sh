@@ -50,7 +50,7 @@ require_pinned_model
 TRIM_FLAG=()
 [[ -n "${NO_TRIM}" ]] && TRIM_FLAG=(--no-trim)
 
-python -m scripts.precompute_whisper \
+python -m scripts.data.precompute_whisper \
     --env snellius \
     --model "${MODEL}" \
     --configs ${CONFIGS} \

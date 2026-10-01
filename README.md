@@ -19,7 +19,7 @@ Jobs use `~/.conda/envs/flow_asr` directly — **not** `conda activate`, which s
 no-ops in batch shells.
 
 FFmpeg 7.1.1 is required (torchcodec decodes through it). Check with
-`python -m scripts.check_ffmpeg`. On Ubuntu apt caps at 4.4.2, so:
+`python -m scripts.data.check_ffmpeg`. On Ubuntu apt caps at 4.4.2, so:
 
 ```bash
 conda create -y -p ./.ffmpeg -c conda-forge "ffmpeg=7.1.1"
@@ -32,7 +32,7 @@ echo 'export LD_LIBRARY_PATH="$VIRTUAL_ENV/../.ffmpeg/lib:$LD_LIBRARY_PATH"' >> 
 ./jobs/submit/eval_sets.sh      # 1. download ~19 GB + build Arrow cache (2 chained jobs)
 LIMIT=32 ./jobs/submit/rehearse.sh   # 2. dress rehearsal, same array shape, 32 utts
 ./jobs/submit/eval.sh           # 3. real run: 7 datasets, 72k utts, ~1h30
-bash -c 'source jobs/batch/_env.sh && python -m scripts.score_eval'   # 4. score
+bash -c 'source jobs/batch/_env.sh && python -m scripts.evaluation.score_eval'   # 4. score
 ```
 
 Wait for each step. Step 1 emits two job ids; both must finish.

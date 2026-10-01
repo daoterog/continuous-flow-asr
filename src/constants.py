@@ -12,8 +12,8 @@ So any module that imports ``transformers`` or ``normalizer`` starts with::
 
     import src.constants  # noqa: F401
 
-The constants below are duplicated from ``scripts/download_librispeech.py`` and
-``scripts/precompute_whisper.py`` on purpose: training must not drag the download and
+The constants below are duplicated from ``scripts/data/download_librispeech.py`` and
+``scripts/data/precompute_whisper.py`` on purpose: training must not drag the download and
 precompute entry points (and their argparse setup) into every import. They are a fixed
 property of the corpus, so they do not drift — but if one of those scripts changes,
 change it here too.

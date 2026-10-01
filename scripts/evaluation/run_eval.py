@@ -4,7 +4,7 @@ Two sources, selected with ``--source``:
 
 * **audio** (default) — runs the full encoder-decoder on the audio, the way the leaderboard
   does. This is the path for every dataset, and the only one that yields a comparable RTFx.
-* **latents** — decodes cached Whisper encoder latents from ``scripts.precompute_whisper``
+* **latents** — decodes cached Whisper encoder latents from ``scripts.data.precompute_whisper``
   via ``generate(encoder_outputs=...)``, skipping the encoder. This reproduced the published
   LibriSpeech numbers and is kept as the regression control: if it drifts, the decode
   changed. It requires **untrimmed** latents; Whisper's decoder cross-attends over all 1500
@@ -12,7 +12,7 @@ Two sources, selected with ``--source``:
   rather than silently scored.
 
 Predictions and references are written **raw**; the leaderboard's scorer normalizes at
-scoring time. Score with ``python -m scripts.score_eval``.
+scoring time. Score with ``python -m scripts.evaluation.score_eval``.
 """
 
 import argparse
@@ -23,7 +23,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
-from scripts.download_librispeech import LOCAL_DATA_ROOT, SNELLIUS_DATA_ROOT
+from scripts.data.download_librispeech import LOCAL_DATA_ROOT, SNELLIUS_DATA_ROOT
 
 if TYPE_CHECKING:
     import torch
@@ -230,7 +230,7 @@ def decode_from_audio(
 
     # load_data handles both the plain configs and the chunked earnings22, whose chunks it
     # joins to their parent call transcripts. Safe as a cache hit because
-    # scripts.download_eval_sets has already fetched the whole config.
+    # scripts.data.download_eval_sets has already fetched the whole config.
     dataset = data_utils.load_data(
         SimpleNamespace(
             dataset_path=dataset_path, dataset=dataset_name, split=split, streaming=False
@@ -379,7 +379,7 @@ def decode_from_latents(
     indexes = sorted(src.glob("*.json"))
     if not indexes:
         raise FileNotFoundError(
-            f"no cached features under {src} — run scripts.precompute_whisper "
+            f"no cached features under {src} — run scripts.data.precompute_whisper "
             f"--configs {config} --splits {split} --no-trim"
         )
 
@@ -527,7 +527,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    print(f"\nOK: {len(pending)} unit(s). Score with: python -m scripts.score_eval")
+    print(f"\nOK: {len(pending)} unit(s). Score with: python -m scripts.evaluation.score_eval")
     return 0
 
 
