@@ -10,7 +10,6 @@ the layer that decides what reaches wandb and in what shape, which is also why i
 reach for a `SamplingProbe` or the `TauScheduler` while the metrics package may not.
 """
 
-import math
 from collections.abc import Callable
 
 import numpy as np
@@ -149,32 +148,16 @@ class MetricReporting:
             commit=False,
         )
 
-    def log_mu_accuracy(self) -> float | None:
-        """Log how well mu reads the audio, and return the accuracy a refresh would use.
+    def log_mu_accuracy(self) -> None:
+        """Report the schedule's running mu accuracy, when it is tracking one.
 
-        The per-split numbers go out whichever curve drives the refresh — the train/val
-        gap is how mu over-fitting shows up. The smoothed value is simulated-only: that
-        curve places the dead zone by replaying the corruption with mu at this accuracy,
-        while the measured curve reads the denoiser's own P_e and never asks.
+        Reads only: the average is the schedule's state, updated by
+        `TauScheduler.observe_mu`, which has to run first to include the epoch that just
+        finished. Mu's raw error is already a metric, so only the average is reported
+        here — `mu_perr/{split}_overall` is the same reading before smoothing.
         """
-        mu_perr = {
-            split: float(self.metrics[f"{split}_mu_perr"].overall())
-            for split in ("train", "val")
-            if f"{split}_mu_perr" in self.metrics
-        }
-        for split, perr in mu_perr.items():
-            self.log(f"tau/mu_accuracy_{split}", 1.0 - perr)
-        if len(mu_perr) == 2:
-            self.log("tau/mu_generalisation_gap", mu_perr["val"] - mu_perr["train"])
-
-        if self.tau.curve != "simulated":
-            return None
-        perr = mu_perr.get(self.tau.refresh_split)
-        if perr is None or math.isnan(perr):
-            return None
-        accuracy = self.tau.smooth_mu_accuracy(1.0 - perr)
-        self.log("tau/mu_accuracy_ema", accuracy)
-        return accuracy
+        if self.tau.mu_accuracy is not None:
+            self.log("tau/mu_accuracy_ema", self.tau.mu_accuracy)
 
     def log_sampled(self) -> None:
         """Log the WER a full integration from noise reaches on the fixed val slice.

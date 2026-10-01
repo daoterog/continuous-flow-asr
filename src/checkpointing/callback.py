@@ -67,8 +67,13 @@ class ComponentCheckpoint(pl.Callback):
         # value assumed before training. A refreshing run ends somewhere else entirely
         # (0.43 -> 0.20 on the full vocabulary), so without this the model is sampled on a
         # different grid than it trained on, silently.
-        settled = getattr(getattr(module, "tau", None), "last_mu_accuracy", None)
-        if settled is not None:
+        #
+        # Only for a run that actually refreshed. One that did not trained on the prior all
+        # the way through, and recording where mu happened to settle would send sample_eval
+        # off to rebuild a schedule the model never saw.
+        tau = getattr(module, "tau", None)
+        settled = getattr(tau, "mu_accuracy", None)
+        if settled is not None and int(tau.cfg.get("refresh_every_n_epochs", 0)) > 0:
             self.manifest = OmegaConf.merge(
                 self.manifest, OmegaConf.create({"mu_accuracy_final": float(settled)})
             )

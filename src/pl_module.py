@@ -117,33 +117,34 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         self._define_bin_metrics()
 
     def on_train_epoch_start(self) -> None:
-        """Clear the train accumulators, then apply a pending schedule refresh.
+        """Re-derive the schedule if it is due, then clear the train accumulators.
 
-        Reset here and log at epoch end, so each pass reads as what it is and a metric's
-        contents always describe the epoch in progress — which is what `bin_centers` and a
-        tau refresh both rely on when they read a live metric.
+        In that order: a refresh reads the metrics of the epoch that just finished, which
+        are still standing here, and it re-cuts the bins — so the reset has to come after
+        it, or the new edges would be applied to counts gathered under the old ones.
         """
         super().on_train_epoch_start()
+        if self.tau.is_due(self):
+            new_tau, skipped = self.tau.refresh(
+                self, getattr(self.trainer, "datamodule", None)
+            )
+            if skipped is not None:
+                self.print(skipped)
+            if new_tau is not None:
+                self.sample_t_fn = new_tau
+                for metric in self.metrics.values():
+                    if is_binned(metric):
+                        metric.set_edges(schedule_bin_edges(new_tau, metric.num_bins))
+                lo = float(new_tau(0.0))
+                self.log("tau/t0", lo)
+                self.log_tau_shape(new_tau)
+                self.print(
+                    f"tau refreshed for epoch {self.current_epoch}"
+                    f"t in [{lo:.3f}, 1.000] now carries the draw"
+                )
+                if self.tau.curve == "simulated":
+                    self.print(f"mu accuracy EMA {self.tau.mu_accuracy:.4f}")
         self.reset_metrics("train")
-        pending = self.tau.take_pending()
-        if pending is None:
-            return
-        new_tau, mu_accuracy = pending
-        self.sample_t_fn = new_tau
-        for metric in self.metrics.values():
-            if is_binned(metric):
-                metric.set_edges(schedule_bin_edges(new_tau, metric.num_bins))
-        lo = float(new_tau(0.0))
-        self.log("tau/t0", lo)
-        if mu_accuracy is not None:
-            self.log("tau/mu_accuracy", mu_accuracy)
-        self.log_tau_shape(new_tau)
-        # The measured curve carries no mu accuracy, and a linear run has no mu to report.
-        mu_note = "no mu" if mu_accuracy is None else f"mu accuracy {mu_accuracy:.4f}"
-        self.print(
-            f"tau refreshed for epoch {self.current_epoch}: {mu_note}, "
-            f"t in [{lo:.3f}, 1.000] now carries the draw"
-        )
 
     def training_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
         """One optimizer step."""
@@ -250,9 +251,16 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         return i_t
 
     def on_train_epoch_end(self) -> None:
-        """Flush the train metrics."""
+        """Flush the train metrics, then take mu's reading for the schedule.
+
+        Observe before logging, so the average reported covers the epoch that just ran;
+        the refresh that consumes it is a whole epoch away, at the next epoch's start.
+        """
         super().on_train_epoch_end()
         self.log_metrics("train")
+        if self.tau.curve == "simulated":
+            self.tau.observe_mu(self.metrics)
+            self.log_mu_accuracy()
 
     def on_validation_epoch_start(self) -> None:
         """Clear the val accumulators before the pass fills them."""
@@ -264,23 +272,10 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         return self._step(batch, "val")
 
     def on_validation_epoch_end(self) -> None:
-        """Log the metrics, sample from noise, then re-derive tau if it is due.
-
-        Order matters. A refresh reads this epoch's numbers, so it has to come after they
-        are logged; the re-binning it leads to happens later still, at the next train
-        epoch's start, since counts collected under the old edges do not describe the new
-        ones. So: log, read, then queue the swap.
-        """
+        """Flush the val metrics, then sample from noise."""
         super().on_validation_epoch_end()
         self.log_metrics("val")
         self.log_sampled()
-        mu_accuracy = self.log_mu_accuracy()
-        if self.tau.is_due(self):
-            skipped = self.tau.refresh(
-                self, getattr(self.trainer, "datamodule", None), mu_accuracy
-            )
-            if skipped is not None:
-                self.print(skipped)
 
     def on_test_start(self) -> None:
         """Same, for a `trainer.test()` that did not go through `fit`."""
