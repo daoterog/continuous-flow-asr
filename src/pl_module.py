@@ -12,47 +12,16 @@ import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
 from transformers import WhisperTokenizerFast
 
-from src.dataset import VocabMap
+from src.data import VocabMap
+from src.flow.coefficients import make_schedule
+from src.flow.sampler import sample_tokens
+from src.flow.sampling_probe import SamplingProbe
+from src.flow.schedule import generation_grid
+from src.flow.tau_scheduler import TauScheduler
 from src.metrics import schedule_bin_edges
 from src.metrics.utils import is_binned
 from src.models import build_audio_decoder, build_denoiser
 from src.reporting import MetricReporting
-from src.sampler import sample_tokens
-from src.sampling_probe import SamplingProbe
-from src.schedule import generation_grid
-from src.tau_scheduler import TauScheduler
-
-
-def make_schedule(spec: DictConfig | dict | str | None) -> Callable | None:
-    """Turn a named coefficient schedule into alpha_fn / beta_fn / gamma_fn.
-
-    The three variants are:
-      * `linear_up`   -> t          (beta, the weight on the one-hot target)
-      * `linear_down` -> 1 - t      (alpha on the noise; gamma in the audio-conditioned run)
-      * `parabola`    -> 4c t (1-t) (gamma in the three-term run, peaking at c)
-
-    None means the term is absent, which is how the linear variant drops mu entirely.
-    """
-    if spec is None:
-        return None
-    if isinstance(spec, str):
-        spec = {"type": spec}
-    spec = OmegaConf.to_container(spec) if isinstance(spec, DictConfig) else dict(spec)
-    kind = spec.pop("type")
-
-    # `scale` matters most on gamma. At scale 1 the audio_cond schedule has gamma == alpha
-    scale = spec.pop("scale", 1.0)
-
-    if kind == "linear_up":
-        return lambda t: scale * t
-    if kind == "linear_down":
-        return lambda t: scale * (1 - t)
-    if kind == "parabola":
-        c = spec.pop("c", 0.5)
-        return lambda t: scale * 4 * c * t * (1 - t)
-    raise ValueError(
-        f"unknown schedule {kind!r}; expected linear_up, linear_down or parabola"
-    )
 
 
 class FlowMatching(MetricReporting, pl.LightningModule):
@@ -141,6 +110,11 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             wer_bins=OmegaConf.to_container(cfg.metrics.get("wer_bins", {})) or None,
             input_perr_bins=cfg.metrics.get("input_perr_bins", 0),
         )
+
+    def on_fit_start(self) -> None:
+        """Declare the histogram panels' step metric before anything is logged."""
+        super().on_fit_start()
+        self._define_bin_metrics()
 
     def on_train_epoch_start(self) -> None:
         """Clear the train accumulators, then apply a pending schedule refresh.
@@ -289,6 +263,11 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             i_t = i_t + self.gamma_fn(t)[:, None, None] * mu
         return i_t
 
+    def on_train_epoch_end(self) -> None:
+        """Flush the train metrics."""
+        super().on_train_epoch_end()
+        self.log_metrics("train")
+
     def on_validation_epoch_start(self) -> None:
         """Clear the val accumulators before the pass fills them."""
         super().on_validation_epoch_start()
@@ -306,6 +285,8 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         and reset, since counts collected under the old edges do not describe the new
         ones. So: read, flush, then swap.
         """
+        super().on_validation_epoch_end()
+        self.log_metrics("val")
         source = str(self.cfg.schedule.get("refresh_split", "train"))
         raw = {
             split: self.metrics[f"{split}_mu_perr"].overall()
@@ -333,6 +314,11 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             if skipped is not None:
                 self.print(skipped)
 
+    def on_test_start(self) -> None:
+        """Same, for a `trainer.test()` that did not go through `fit`."""
+        super().on_test_start()
+        self._define_bin_metrics()
+
     def on_test_epoch_start(self) -> None:
         """Clear the test accumulators before the pass fills them."""
         super().on_test_epoch_start()
@@ -341,6 +327,11 @@ class FlowMatching(MetricReporting, pl.LightningModule):
     def test_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
         """One test batch. Only reached through an explicit `trainer.test()`."""
         return self._step(batch, "test")
+
+    def on_test_epoch_end(self) -> None:
+        """Flush the test metrics."""
+        super().on_test_epoch_end()
+        self.log_metrics("test")
 
     def _check_finite(self, loss: torch.Tensor, out: dict, split: str) -> None:
         """Stop the run the first time the objective is not finite."""

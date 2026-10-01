@@ -37,8 +37,8 @@ from scripts.sample_eval import (  # noqa: E402
     _config_from_components,
     _model_from_components,
 )
-from src.checkpoint import load_state_into  # noqa: E402
-from src.dataset import VocabMap  # noqa: E402
+from src.checkpointing import load_state_into  # noqa: E402
+from src.data import VocabMap  # noqa: E402
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

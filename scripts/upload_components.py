@@ -23,7 +23,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import wandb  # noqa: E402
 
-from src.checkpoint import (  # noqa: E402
+from src.checkpointing import (  # noqa: E402
     COMPONENTS,
     MANIFEST,
     TRAINING_STATE,

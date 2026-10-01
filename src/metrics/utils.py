@@ -15,7 +15,7 @@ from .wer import BinnedWER
 if TYPE_CHECKING:
     from transformers import WhisperTokenizerFast
 
-    from src.dataset import VocabMap
+    from src.data import VocabMap
 
 SPLITS = ("train", "val", "test")
 

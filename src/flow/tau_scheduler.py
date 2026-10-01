@@ -7,17 +7,17 @@ import numpy as np
 from omegaconf import DictConfig
 from torchmetrics import Metric
 
-from src.schedule import make_tau_inverse, sweep_corruption
+from src.flow.schedule import make_tau_inverse, sweep_corruption
 
 if TYPE_CHECKING:
-    from src.dataset import AudioFeatureDataModule
+    from src.data import AudioFeatureDataModule
     from src.pl_module import FlowMatching
 
 
 class TauScheduler:
     """Decides when tau is re-derived, builds it, and holds it until the swap is safe.
 
-    `src.schedule` turns a P_e curve into tau; this is the stateful half that chooses the
+    `src.flow.schedule` turns a P_e curve into tau; this is the stateful half that chooses the
     curve, keeps mu's running accuracy and defers the swap. Separate from the model for
     the same reason `SamplingProbe` is: the model should call it, not contain it.
 

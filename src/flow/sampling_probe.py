@@ -8,7 +8,7 @@ from omegaconf import DictConfig
 from src.metrics import score_samples
 
 if TYPE_CHECKING:
-    from src.dataset import AudioFeatureDataModule
+    from src.data import AudioFeatureDataModule
     from src.pl_module import FlowMatching
 
 

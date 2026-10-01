@@ -28,12 +28,12 @@ if str(REPO_ROOT) not in sys.path:
 from omegaconf import DictConfig, OmegaConf  # noqa: E402
 
 import train as T  # noqa: E402
-from src.checkpoint import (  # noqa: E402
+from src.checkpointing import (  # noqa: E402
     load_components,
     load_manifest,
     load_state_into,
 )
-from src.dataset import AudioFeatureDataModule  # noqa: E402
+from src.data import AudioFeatureDataModule  # noqa: E402
 from src.metrics import ids_to_text, score_samples  # noqa: E402
 from src.pl_module import FlowMatching  # noqa: E402
 

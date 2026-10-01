@@ -9,7 +9,7 @@ sampler the same u -> t map. Two curves can feed it:
   * the model's own P_e, via TauScheduler._measured_tau — which moves left as the denoiser
     learns to read the audio and recovers tokens the corrupted field alone could not.
 
-`src.tau_scheduler` is the stateful driver over these: when to re-derive tau, from which
+`src.flow.tau_scheduler` is the stateful driver over these: when to re-derive tau, from which
 curve, and when it is safe to swap.
 """
 

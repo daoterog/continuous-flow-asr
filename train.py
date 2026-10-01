@@ -36,10 +36,11 @@ from lightning.pytorch.loggers import Logger, WandbLogger
 from omegaconf import DictConfig, OmegaConf
 from transformers import WhisperTokenizerFast
 
-from src.checkpoint import ComponentCheckpoint, manifest_for
-from src.dataset import ROLES, AudioFeatureDataModule
-from src.pl_module import FlowMatching, make_schedule
-from src.schedule import make_tau_inverse, sweep_corruption
+from src.checkpointing import ComponentCheckpoint, manifest_for
+from src.data import ROLES, AudioFeatureDataModule
+from src.flow.coefficients import make_schedule
+from src.flow.schedule import make_tau_inverse, sweep_corruption
+from src.pl_module import FlowMatching
 
 # Used to parse OmegaConf dotlist assignments like
 # `train.num_epochs=10`, `data.subset_n.train=64`

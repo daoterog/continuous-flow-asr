@@ -19,7 +19,8 @@ from lightning.pytorch.loggers import WandbLogger
 from torch import nn
 from transformers import WhisperTokenizerFast
 
-from src.dataset import VocabMap
+from src.data import VocabMap
+from src.flow.sampling_probe import SamplingProbe
 from src.metrics.base import TimeBinnedMetric
 from src.metrics.utils import (
     check_metrics,
@@ -29,7 +30,6 @@ from src.metrics.utils import (
     section_for,
     split_key,
 )
-from src.sampling_probe import SamplingProbe
 
 
 class MetricReporting:
@@ -206,28 +206,3 @@ class MetricReporting:
             self.logger.experiment.define_metric(
                 f"{section_for(key)}/{split}_bins", step_metric="epoch"
             )
-
-    def on_fit_start(self) -> None:
-        """Declare the histogram panels' step metric before anything is logged."""
-        super().on_fit_start()
-        self._define_bin_metrics()
-
-    def on_test_start(self) -> None:
-        """Same, for a `trainer.test()` that did not go through `fit`."""
-        super().on_test_start()
-        self._define_bin_metrics()
-
-    def on_train_epoch_end(self) -> None:
-        """Flush the train metrics."""
-        super().on_train_epoch_end()
-        self.log_metrics("train")
-
-    def on_validation_epoch_end(self) -> None:
-        """Flush the val metrics."""
-        super().on_validation_epoch_end()
-        self.log_metrics("val")
-
-    def on_test_epoch_end(self) -> None:
-        """Flush the test metrics."""
-        super().on_test_epoch_end()
-        self.log_metrics("test")

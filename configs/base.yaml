@@ -233,7 +233,7 @@ train:
 
   # Write runs/<run_id>/components/: per-model state_dicts, the manifest needed to rebuild
   # them, the vocabulary map, and the optimizer state for resuming a cut-short run. Small
-  # enough to keep for every run; see src/checkpoint.py.
+  # enough to keep for every run; see src/checkpointing/.
   save_components: true
 
   # Stop as soon as a metric reaches its target — e.g. `sampled/wer` at 0 for an overfit

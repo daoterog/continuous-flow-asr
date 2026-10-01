@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING
 import torch
 from normalizer import data_utils
 
-from .base import Edges, TimeBinnedMetric, edit_counts, ids_to_text
+from .base import Edges, TimeBinnedMetric
+from .scoring import edit_counts, ids_to_text
 
 # EnglishTextNormalizer is the bulk of this metric's cost, and the references are the
 # same strings on every epoch. Only references go through the cache: predictions change
@@ -16,7 +17,7 @@ normalize_reference = lru_cache(maxsize=100_000)(data_utils.normalizer)
 if TYPE_CHECKING:
     from transformers import WhisperTokenizerFast
 
-    from src.dataset import VocabMap
+    from src.data import VocabMap
 
 
 class BinnedWER(TimeBinnedMetric):

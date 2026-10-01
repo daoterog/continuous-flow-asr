@@ -16,7 +16,7 @@ That gives three independent things to check, none of which a broken integrator 
      model's best per-token guess. When the audio is ambiguous the two pull apart — the
      sampler produces *a* valid sequence rather than *the* conditioning one.
 
-It runs the real stack: the DRAX denoiser, the real interpolant, and src.sampler.
+It runs the real stack: the DRAX denoiser, the real interpolant, and src.flow.sampler.
 
     python -m scripts.validate_sampler
     python -m scripts.validate_sampler --variant three_term --epochs 60
@@ -34,9 +34,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from src.flow.coefficients import make_schedule  # noqa: E402
+from src.flow.sampler import sample_tokens  # noqa: E402
 from src.models import build_audio_decoder, build_denoiser  # noqa: E402
-from src.pl_module import make_schedule  # noqa: E402
-from src.sampler import sample_tokens  # noqa: E402
 
 
 def make_transition_matrix(vocab_size: int, k: int, generator: torch.Generator) -> torch.Tensor:
