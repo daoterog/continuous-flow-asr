@@ -99,8 +99,6 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             if self.mu_nn is not None:
                 self.mu_nn = torch.compile(self.mu_nn, mode=mode)
 
-        # Make sure to get the correct number of perr bins depending on the startegy
-        perr_bins = self.tau.metric_bins or int(cfg.metrics.get("perr_bins", 10))
         self.init_metrics(
             ("denoiser", "mu") if self.mu_nn is not None else ("denoiser",),
             tokenizer,
@@ -108,7 +106,8 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             vocab_map,
             sample_t_fn=sample_t_fn,
             loss_bins=cfg.metrics.get("loss_bins", 10),
-            perr_bins=perr_bins,
+            perr_bins=cfg.metrics.get("perr_bins", 10),
+            tau_bins=self.tau.metric_bins,
             wer_bins=OmegaConf.to_container(cfg.metrics.get("wer_bins", {})) or None,
             input_perr_bins=cfg.metrics.get("input_perr_bins", 10),
         )
@@ -135,7 +134,7 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             if new_tau is not None:
                 self.sample_t_fn = new_tau
                 for metric in self.metrics.values():
-                    if is_binned(metric):
+                    if is_binned(metric) and not metric.fixed_edges:
                         metric.set_edges(schedule_bin_edges(new_tau, metric.num_bins))
                 lo = float(new_tau(0.0))
                 self.log("tau/t0", lo)

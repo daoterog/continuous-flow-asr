@@ -30,11 +30,23 @@ def schedule_bin_edges(
     if sample_t_fn is None:
         return torch.linspace(0, 1, num_bins + 1)
     edges = np.asarray(sample_t_fn(np.linspace(0.0, 1.0, num_bins + 1)), dtype=np.float64)
-    if not np.all(np.diff(edges) > 0):
+    if np.all(np.diff(edges) > 0):
+        return torch.as_tensor(edges, dtype=torch.float32)
+
+    # A measured tau saturates: once the denoiser recovers everything above some t, tau is
+    # 1 there and tau^-1 is flat, so the top quantiles land on the same t. Those bins would
+    # hold almost nothing anyway, so nudge them apart rather than refusing to bin at all —
+    # raising here would kill a run for a schedule that is perfectly usable.
+    span = float(edges[-1] - edges[0])
+    if span <= 0:
         raise ValueError(
-            f"sample_t_fn is flat somewhere on [0, 1], so {num_bins} schedule bins collapse "
-            f"onto duplicate edges:\n  {np.round(edges, 4)}\nAsk for fewer bins."
+            f"sample_t_fn is constant on [0, 1] at {edges[0]:.4f}, so there is no schedule "
+            f"to bin along. The model recovers nothing anywhere; train further first."
         )
+    eps = span * 1e-6
+    for i in range(1, edges.size):
+        if edges[i] <= edges[i - 1]:
+            edges[i] = edges[i - 1] + eps
     return torch.as_tensor(edges, dtype=torch.float32)
 
 
@@ -52,9 +64,21 @@ class TimeBinnedMetric(Metric):
     low_t/high_t pair downstream.
     """
 
-    def __init__(self, num_bins: int = 10, edges: Edges = None, **kwargs: object) -> None:
-        """Build the bin geometry; `edges` overrides `num_bins` when given."""
+    def __init__(
+        self,
+        num_bins: int = 10,
+        edges: Edges = None,
+        fixed_edges: bool = False,
+        **kwargs: object,
+    ) -> None:
+        """Build the bin geometry; `edges` overrides `num_bins` when given.
+
+        `fixed_edges` marks a metric whose grid must never follow the schedule — the
+        uniform curve tau is rebuilt from. Re-cutting that one onto tau's own quantiles is
+        what made the refresh read only where tau already drew.
+        """
         super().__init__(**kwargs)
+        self.fixed_edges = fixed_edges
         if edges is None:
             edges = torch.linspace(0, 1, num_bins + 1)
             self.schedule_bins = False
@@ -94,7 +118,12 @@ class TimeBinnedMetric(Metric):
         have to move with them or they no longer hold ~1/n of the samples each. The bin
         count is fixed because the accumulator states are sized by it — call reset()
         first, since counts collected under the old edges do not describe the new ones.
+
+        Refused on a `fixed_edges` metric, whose whole purpose is to keep a grid the
+        schedule does not choose.
         """
+        if self.fixed_edges:
+            raise RuntimeError("this metric's edges are fixed and must not follow tau")
         edges = torch.as_tensor(edges, dtype=torch.float32)
         if edges.numel() - 1 != self.num_bins:
             raise ValueError(

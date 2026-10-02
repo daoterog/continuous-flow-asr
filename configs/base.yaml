@@ -185,6 +185,14 @@ schedule:
   # underlying t-distribution genuinely changed.
   refresh_every_n_epochs: 0
 
+  # `measured` only: recovery the best bin must reach before its curve is worth inverting.
+  # Below this the model is too weak to anchor tau — normalising by the curve's own worst
+  # error would put t0 near 1 and starve every t beneath it — so the refresh is skipped
+  # and the schedule it already has is kept. A weak model is the normal state at the first
+  # refresh, not an error, which is why this skips rather than failing the run. Raising it
+  # delays the first refresh until the denoiser can actually recover something.
+  measured_min_recovery: 0.05
+
 sampling:
   # Integrate from noise on a fixed slice of val and score the result. This is the only
   # metric that reflects inference — the binned ones score one denoising step from an x_t

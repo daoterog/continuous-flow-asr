@@ -47,9 +47,9 @@ class TauScheduler:
         return str(self.cfg.get("refresh_split", "train"))
 
     @property
-    def metric_bins(self) -> int | None:
-        """Bins the denoiser's error metric needs, or None to leave `metrics.perr_bins`."""
-        return None
+    def metric_bins(self) -> int:
+        """Bins for the uniform curve this strategy rebuilds tau from; 0 if it needs none."""
+        return 0
 
     def observe_mu(self, metrics: Mapping[str, Metric]) -> None:
         """Take mu's reading for the epoch just finished.

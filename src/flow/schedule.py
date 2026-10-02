@@ -128,6 +128,7 @@ def make_tau_inverse(
     vocab_size: int,
     flat_eps: float = 1e-3,
     p_e0: float | None = None,
+    anchor_zero: bool = False,
 ) -> Callable:
     """Build t = tau^-1(u), the map from a uniform draw to a flow time.
 
@@ -141,6 +142,15 @@ def make_tau_inverse(
       * below flat_eps tau is indistinguishable from 0 — part sampling noise, part real
         but negligible recovery — and the monotone fix above has already frozen those in
         as genuine-looking steps. Clamping to exactly 0 is what stops them becoming knots.
+
+    `anchor_zero` inverts the first of those rules: the leading flat run is represented by
+    t=0 instead of its right edge, so tau^-1(0) == 0 and the draw spans the whole axis.
+    The measured curve needs it. Its P_e is normalised by the error at t=0, so a schedule
+    that never draws t=0 leaves that anchor unmeasured, and each refresh then re-reads a
+    narrower window and pushes t0 further right — a ratchet, observed as t0 climbing
+    0.250 -> 0.500 -> 0.625 -> 0.750 over four refreshes. The simulated curve does not want
+    it: there the dead zone is real, and spreading the draw across it is what row 15 of
+    EXPERIMENTS.md rejected.
 
     See scripts/schedule/explain_tau.py, which rebuilds this with np.interp and plots each stage.
 
@@ -156,6 +166,12 @@ def make_tau_inverse(
     tau[tau < flat_eps] = 0.0
 
     keep = np.concatenate([np.diff(tau) > 0, [True]])  # last index of every flat run
+    if anchor_zero and tau[0] == 0.0:
+        # Represent the leading flat run by t=0 rather than by its right edge, so
+        # tau^-1(0) == 0 and the schedule spans the whole axis. Only the zeros collapse;
+        # the rest of the curve keeps the last-of-each-run rule, so x stays increasing.
+        keep[tau == 0.0] = False
+        keep[0] = True
     tau_k, t_k = tau[keep], ts[keep]
     knots: dict[tuple, tuple[torch.Tensor, torch.Tensor]] = {}  # uploaded once per device
 
