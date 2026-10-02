@@ -76,10 +76,10 @@ class MeasuredTau(TauScheduler):
                 f"tau refresh skipped: the model recovers at most {best:.3f} of tokens "
                 f"across a uniform sweep, under the {self.min_recovery} needed to anchor tau"
             )
-        # Both ends are measured rather than assumed, so anchor_zero anchors to a real
-        # reading and the top needs no carrying up to t=1.
+        # Both ends come out on their own: p_e0 is the lowest bin's own error, so tau
+        # starts at 0 there, and the highest bin sits just under 1. Nothing to anchor.
         return make_tau_inverse(
-            ts, rec, model.vocab_size, p_e0=float(1.0 - rec[0]), anchor_zero=True
+            ts, rec, model.vocab_size, p_e0=float(1.0 - rec[0])
         ), None
 
     def curve(

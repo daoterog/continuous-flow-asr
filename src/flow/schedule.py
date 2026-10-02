@@ -128,7 +128,6 @@ def make_tau_inverse(
     vocab_size: int,
     flat_eps: float = 1e-3,
     p_e0: float | None = None,
-    anchor_zero: bool = False,
 ) -> Callable:
     """Build t = tau^-1(u), the map from a uniform draw to a flow time.
 
@@ -143,14 +142,12 @@ def make_tau_inverse(
         but negligible recovery — and the monotone fix above has already frozen those in
         as genuine-looking steps. Clamping to exactly 0 is what stops them becoming knots.
 
-    `anchor_zero` inverts the first of those rules: the leading flat run is represented by
-    t=0 instead of its right edge, so tau^-1(0) == 0 and the draw spans the whole axis.
-    The measured curve needs it. Its P_e is normalised by the error at t=0, so a schedule
-    that never draws t=0 leaves that anchor unmeasured, and each refresh then re-reads a
-    narrower window and pushes t0 further right — a ratchet, observed as t0 climbing
-    0.250 -> 0.500 -> 0.625 -> 0.750 over four refreshes. The simulated curve does not want
-    it: there the dead zone is real, and spreading the draw across it is what row 15 of
-    EXPERIMENTS.md rejected.
+    Neither end needs anchoring when the curve is swept at t the schedule did not choose:
+    tau is normalised by the lowest bin's error so tau(lowest) == 0 by construction, and
+    the highest bin sits at ~1. Measured on a trained checkpoint with a 150-bin sweep,
+    tau^-1(0) lands at 0.030 and tau^-1(1) at 0.997 on their own, and tau clears flat_eps
+    within 5 bins. A wide flat run then means the model really is making no progress there,
+    and skipping it is the point.
 
     See scripts/schedule/explain_tau.py, which rebuilds this with np.interp and plots each stage.
 
@@ -166,12 +163,6 @@ def make_tau_inverse(
     tau[tau < flat_eps] = 0.0
 
     keep = np.concatenate([np.diff(tau) > 0, [True]])  # last index of every flat run
-    if anchor_zero and tau[0] == 0.0:
-        # Represent the leading flat run by t=0 rather than by its right edge, so
-        # tau^-1(0) == 0 and the schedule spans the whole axis. Only the zeros collapse;
-        # the rest of the curve keeps the last-of-each-run rule, so x stays increasing.
-        keep[tau == 0.0] = False
-        keep[0] = True
     tau_k, t_k = tau[keep], ts[keep]
     knots: dict[tuple, tuple[torch.Tensor, torch.Tensor]] = {}  # uploaded once per device
 
@@ -216,7 +207,17 @@ def generation_grid(tau_inverse: Callable, num_steps: int) -> np.ndarray:
     reparameterization it has seen almost nothing below the dead zone, so integrating on
     a uniform-in-t grid afterwards would run it far out of distribution.
 
-    Note this is schedule_bin_edges(tau_inverse, num_steps): the sampler's grid and the
-    metrics' bin edges are the same construction, which is why one bin is one step.
+    Repeated t are dropped, so `num_steps` is a budget rather than a promise. Wherever tau
+    is flat, several u map to the same t, and the integrator would re-run the denoiser on a
+    state it has already seen — measured on a trained checkpoint, five of sixteen steps all
+    landed on t=1.000 and integrated nothing. Collapsing them skips the dead interval and
+    spends the steps that remain on t that actually differ.
+
+    This is `schedule_bin_edges(tau_inverse, num_steps)` up to that collapse: the two share
+    a construction, but a bin may legitimately be empty while a step may not be a no-op.
     """
-    return tau_inverse(np.linspace(0.0, 1.0, num_steps + 1))
+    grid = np.asarray(tau_inverse(np.linspace(0.0, 1.0, num_steps + 1)), dtype=np.float64)
+    grid = grid[np.concatenate([[True], np.diff(grid) > 0])]
+    if grid.size < 2:  # a constant tau leaves nothing to integrate along
+        return np.array([float(grid[0]) if grid.size else 0.0, 1.0])
+    return grid
