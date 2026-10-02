@@ -106,28 +106,30 @@ schedule:
   enabled: true
   sweep_n: 1024                 # utterances in the model-free corruption sweep
   # Resolution of the P_e curve tau is built from. One number for both strategies, since
-  # both are asking the same thing — how finely the curve is resolved — and letting them
-  # disagree would only be a way to get one of them wrong.
+  # both are asking the same thing — how finely the curve is resolved.
   #
-  #   simulated — the sweep is evaluated at num_bins + 1 values of t.
-  #   measured  — the denoiser's error metric is given this many bins, overriding
-  #               metrics.perr_bins, because there the metric IS the curve. Ten bins of
-  #               reporting gives a ten-point tau whatever grid it is interpolated onto.
+  #   simulated — the corruption sweep is evaluated at num_bins + 1 values of t.
+  #   measured  — the denoiser sweep's readings are pooled into this many uniform bins.
   #
-  # 150 is the measured path's optimum and comfortably past the simulated path's.
-  #
-  # simulated (scripts/schedule/ablate_tau_bins.py): discretisation falls to the sweep's own
-  # seed-to-seed noise by 80-160 bins depending on mu's accuracy, and is flat to 400.
+  # simulated (scripts/schedule/ablate_tau_bins.py): discretisation falls to the sweep's
+  # own seed-to-seed noise by 80-160 bins depending on mu's accuracy, and is flat to 400.
   # Below that it climbs fast — 25 bins is 4x the floor, and 10 shifts the 90th percentile
   # of drawn t by +0.097, a tenth of the whole time axis.
   #
-  # measured (scripts/schedule/ablate_measured_bins.py): more is NOT simply better, because each
-  # bin averages its share of the epoch's tokens. On clean/train.100 (28,539 utts x 75.2
-  # tokens = 2.15M real tokens) the p95 shift in drawn t runs 0.065 at 10 bins, 0.0239 at
-  # 60, 0.0211 at 100, 0.0207 at 150, then back up to 0.0256 at 200 and 0.0287 at 300.
-  # The floor is ~14k tokens per bin, so lower this when training on a subset: at 300k
-  # tokens an epoch the optimum falls to ~30.
+  # measured: not ablated under the current design. Its precision is set by probe_n_utts
+  # together with this, not by the epoch — see the note there. At probe_n_utts 2048 and
+  # 150 bins each bin pools ~1,000 real tokens, for a per-bin recovery std of ~0.016.
   num_bins: 150
+
+  # Utterances the `measured` sweep draws per refresh, redrawn each time. With num_bins
+  # they fix the curve's precision: a bin pools mean_tokens * probe_n_utts / num_bins real
+  # tokens, and the recovery it reports has std ~ sqrt(0.25 / that). At 2048 and 150 bins
+  # that is ~1,000 tokens and std ~0.016; halving it to 1024 gives ~500 and ~0.022.
+  #
+  # The cost is ceil(probe_n_utts / 32) forward passes per refresh — 64 here, against a
+  # refresh every refresh_every_n_epochs epochs, so it is noise next to training. Raise it
+  # before lowering num_bins if the curve looks ragged.
+  probe_n_utts: 2048
   # How accurate mu is assumed to be while tau is measured. Only used when flow.gamma is
   # set; a refresh under `simulated` replaces the assumption with mu's measured accuracy.
   #

@@ -46,11 +46,6 @@ class TauScheduler:
         """Which split's error the refresh reads."""
         return str(self.cfg.get("refresh_split", "train"))
 
-    @property
-    def metric_bins(self) -> int:
-        """Bins for the uniform curve this strategy rebuilds tau from; 0 if it needs none."""
-        return 0
-
     def observe_mu(self, metrics: Mapping[str, Metric]) -> None:
         """Take mu's reading for the epoch just finished.
 

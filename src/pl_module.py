@@ -107,7 +107,6 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             sample_t_fn=sample_t_fn,
             loss_bins=cfg.metrics.get("loss_bins", 10),
             perr_bins=cfg.metrics.get("perr_bins", 10),
-            tau_bins=self.tau.metric_bins,
             wer_bins=OmegaConf.to_container(cfg.metrics.get("wer_bins", {})) or None,
             input_perr_bins=cfg.metrics.get("input_perr_bins", 10),
         )
@@ -134,7 +133,7 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             if new_tau is not None:
                 self.sample_t_fn = new_tau
                 for metric in self.metrics.values():
-                    if is_binned(metric) and not metric.fixed_edges:
+                    if is_binned(metric):
                         metric.set_edges(schedule_bin_edges(new_tau, metric.num_bins))
                 lo = float(new_tau(0.0))
                 self.log("tau/t0", lo)

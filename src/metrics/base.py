@@ -64,21 +64,9 @@ class TimeBinnedMetric(Metric):
     low_t/high_t pair downstream.
     """
 
-    def __init__(
-        self,
-        num_bins: int = 10,
-        edges: Edges = None,
-        fixed_edges: bool = False,
-        **kwargs: object,
-    ) -> None:
-        """Build the bin geometry; `edges` overrides `num_bins` when given.
-
-        `fixed_edges` marks a metric whose grid must never follow the schedule — the
-        uniform curve tau is rebuilt from. Re-cutting that one onto tau's own quantiles is
-        what made the refresh read only where tau already drew.
-        """
+    def __init__(self, num_bins: int = 10, edges: Edges = None, **kwargs: object) -> None:
+        """Build the bin geometry; `edges` overrides `num_bins` when given."""
         super().__init__(**kwargs)
-        self.fixed_edges = fixed_edges
         if edges is None:
             edges = torch.linspace(0, 1, num_bins + 1)
             self.schedule_bins = False
@@ -118,12 +106,7 @@ class TimeBinnedMetric(Metric):
         have to move with them or they no longer hold ~1/n of the samples each. The bin
         count is fixed because the accumulator states are sized by it — call reset()
         first, since counts collected under the old edges do not describe the new ones.
-
-        Refused on a `fixed_edges` metric, whose whole purpose is to keep a grid the
-        schedule does not choose.
         """
-        if self.fixed_edges:
-            raise RuntimeError("this metric's edges are fixed and must not follow tau")
         edges = torch.as_tensor(edges, dtype=torch.float32)
         if edges.numel() - 1 != self.num_bins:
             raise ValueError(

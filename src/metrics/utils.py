@@ -54,7 +54,6 @@ def make_metrics(
     perr_bins: int = 10,
     wer_bins: dict | None = None,
     input_perr_bins: int = 0,
-    tau_bins: int = 0,
     sample_t_fn: Callable | None = None,
 ) -> nn.ModuleDict:
     """Build the `{split}_{model}_{metric}` ModuleDict the reporting mixin drives.
@@ -88,13 +87,6 @@ def make_metrics(
             if n := bins_for(name, loss_bins):
                 metrics[f"{split}_{name}_loss"] = BinnedLoss(
                     n, edges=edges_for(n) if binned else None
-                )
-            # The curve a measured tau refresh reads. Uniform and never re-cut, so it
-            # reports where the schedule is NOT drawing as well as where it is — the
-            # schedule-binned perr below can only ever describe tau's own quantiles.
-            if tau_bins and binned:
-                metrics[f"{split}_{name}_tau_perr"] = BinnedTokenError(
-                    tau_bins, edges=None, pad_id=pad_id, fixed_edges=True
                 )
             if n := bins_for(name, perr_bins):
                 metrics[f"{split}_{name}_perr"] = BinnedTokenError(
