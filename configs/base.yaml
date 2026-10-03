@@ -130,6 +130,7 @@ schedule:
   # refresh every refresh_every_n_epochs epochs, so it is noise next to training. Raise it
   # before lowering num_bins if the curve looks ragged.
   probe_n_utts: 2048
+
   # How accurate mu is assumed to be while tau is measured. Only used when flow.gamma is
   # set; a refresh under `simulated` replaces the assumption with mu's measured accuracy.
   #

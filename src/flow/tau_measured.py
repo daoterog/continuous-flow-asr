@@ -106,18 +106,19 @@ class MeasuredTau(TauScheduler):
         self, model: "FlowMatching", batch: dict, chunk: int = 32
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """(t, tokens recovered, real tokens) per utterance, at t drawn uniformly."""
-        audio_all = batch["audio"].to(model.device).float()
-        tokens_all = batch["tokens"].to(model.device)
+        audio_all = batch["audio"]
+        tokens_all = batch["tokens"]
         gen = torch.Generator(device="cpu").manual_seed(self.seed + self._refreshes)
-        t_all = torch.rand(tokens_all.size(0), generator=gen).to(model.device)
+        t_all = torch.rand(tokens_all.size(0), generator=gen)
 
         was_training = model.training
         model.eval()
         ts, hits, reals = [], [], []
         try:
             for i in range(0, tokens_all.size(0), chunk):
-                audio, tokens = audio_all[i : i + chunk], tokens_all[i : i + chunk]
-                t = t_all[i : i + chunk]
+                audio = audio_all[i : i + chunk].to(model.device).float()
+                tokens = tokens_all[i : i + chunk].to(model.device)
+                t = t_all[i : i + chunk].to(model.device)
                 x1 = F.one_hot(tokens, model.vocab_size).float()
                 mu = (
                     F.softmax(model.mu_nn(audio), dim=-1)
