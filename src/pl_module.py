@@ -14,14 +14,17 @@ from transformers import WhisperTokenizerFast
 
 from src.data import VocabMap
 from src.flow import build_tau_scheduler
-from src.flow.coefficients import make_schedule
-from src.flow.sampler import sample_tokens
+from src.flow.coefficients import make_schedule, waypoint_strength
+from src.flow.sampler import sample_tokens, sample_tokens_euler
 from src.flow.sampling_probe import SamplingProbe
 from src.flow.schedule import generation_grid
 from src.metrics import schedule_bin_edges
 from src.metrics.utils import is_binned
 from src.models import build_audio_decoder, build_denoiser
 from src.reporting import MetricReporting
+
+# `sampling.method` selects one of these.
+SAMPLERS = {"interpolant": sample_tokens, "euler": sample_tokens_euler}
 
 
 class FlowMatching(MetricReporting, pl.LightningModule):
@@ -79,6 +82,8 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         self.alpha_fn = make_schedule(flow.get("alpha", "linear_down"))
         self.beta_fn = make_schedule(flow.get("beta", "linear_up"))
         self.gamma_fn = make_schedule(flow.get("gamma"))
+        # The 4c of the drift's waypoint term, 0 for the variants without one.
+        self.waypoint = waypoint_strength(flow.get("gamma"))
         self.stop_grad_mu = bool(flow.get("stop_grad_mu", True))
         self.mu_loss_weight = float(flow.get("mu_loss_weight", 1.0))
         self.pad_loss_weight = float(flow.get("pad_loss_weight", 1.0))
@@ -335,7 +340,14 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         else:
             gen_grid = [float(t) for t in generation_grid(self.sample_t_fn, num_steps)]
 
-        return sample_tokens(
+        # Algorithm 6 of the paper, or the equivalent-for-affine-gamma rebuild. They agree
+        # exactly on linear and audio_cond and differ at O(h^2) on three_term.
+        method = str(self.cfg.get("sampling", {}).get("method", "interpolant"))
+        if method not in SAMPLERS:
+            raise ValueError(
+                f"sampling.method must be one of {sorted(SAMPLERS)}, got {method!r}"
+            )
+        return SAMPLERS[method](
             self.denoiser,
             audio,
             gen_grid,
@@ -347,6 +359,7 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             mu,
             hard=hard,
             x1_init=mu if init_from_mu else None,
+            waypoint=self.waypoint,
         )
 
     def configure_optimizers(self) -> dict:

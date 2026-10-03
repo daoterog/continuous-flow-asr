@@ -20,11 +20,19 @@ so the three variants read:
     audio_cond  g = 1 - t        ->  (D - x)/(1 - t)          the mu term cancels
     three_term  g = 4c t (1-t)   ->  (D - x)/(1 - t) + 4c(1-t) mu
 
-`sample_tokens` integrates by rebuilding the interpolant at the next time with x0 held
-fixed, which for affine g is algebraically identical to one Euler step of that drift, and
-for the quadratic g of three_term is better than Euler: it uses the exact g(t+h) rather
-than the first-order g(t) + h g'(t). It also has no 1/(1-t) to blow up at the end.
-`drift` is provided so the equivalence can be checked directly.
+Two integrators, chosen by `sampling.method`:
+
+`sample_tokens` ("interpolant") rebuilds the interpolant at the next time with x0 held
+fixed. For affine g that is algebraically identical to one Euler step of the drift, and for
+the quadratic g of three_term it is better than Euler: it uses the exact g(t+h) rather than
+the first-order g(t) + h g'(t). It has no 1/(1-t) to blow up at the end, and it reads the
+transcript off the denoiser's last prediction.
+
+`sample_tokens_euler` ("euler") is Algorithm 6 of the paper, verbatim: step the state along
+the drift, x_{n+1} = x_n + (t_{n+1} - t_n) b_n, and decode the final *state* rather than the
+last prediction. It is the reference formulation, so it is the one to reproduce the paper's
+numbers with; the two agree exactly on linear and audio_cond and differ at O(h^2) on
+three_term.
 """
 
 from collections.abc import Callable
@@ -39,21 +47,23 @@ def drift(
     x_t: torch.Tensor,
     denoised: torch.Tensor,
     t: float,
-    gamma_fn: Callable | None = None,
     mu: torch.Tensor | None = None,
+    waypoint: float = 0.0,
     eps: float = 1e-5,
 ) -> torch.Tensor:
-    """b_t(x) for the linear path, including the waypoint term when gamma is present.
+    """b_t(x | a), as the paper writes it per variant.
 
-    Kept for cross-checking the sampler and for anyone who prefers the ODE view; the
-    sampler itself does not call it. g'(t) is taken numerically so any gamma_fn works.
+        linear      (D - x) / (1 - t)
+        audio_cond  (D - x) / (1 - t)                    the mu term cancels
+        three_term  (D - x) / (1 - t) + 4c(1 - t) mu
+
+    `waypoint` is that 4c — `waypoint_strength` of the gamma spec — and is 0 for the two
+    variants without the term, so the whole drift is these three lines with no gamma and
+    no derivative of it anywhere.
     """
-    one_minus_t = max(1.0 - t, eps)
-    velocity = (denoised - x_t) / one_minus_t
-    if gamma_fn is not None and mu is not None:
-        g = gamma_fn(t)
-        g_prime = (gamma_fn(min(t + eps, 1.0)) - gamma_fn(max(t - eps, 0.0))) / (2 * eps)
-        velocity = velocity + (g_prime + g / one_minus_t) * mu
+    velocity = (denoised - x_t) / max(1.0 - t, eps)
+    if waypoint and mu is not None:
+        velocity = velocity + waypoint * (1.0 - t) * mu
     return velocity
 
 
@@ -71,8 +81,14 @@ def sample_tokens(
     hard: bool = False,
     x1_init: torch.Tensor | None = None,
     generator: torch.Generator | None = None,
+    waypoint: float = 0.0,
 ) -> torch.Tensor:
-    """Integrate from noise to (B, canvas_len) token ids."""
+    """Integrate from noise to (B, canvas_len) token ids.
+
+    `waypoint` is unused — this integrator never forms the drift, it rebuilds the
+    interpolant from gamma_fn directly — and is accepted only so the two samplers share one
+    signature behind `pl_module.SAMPLERS`.
+    """
     batch = audio.size(0)
     x0 = torch.randn(
         batch, canvas_len, vocab_size, device=audio.device, generator=generator
@@ -103,3 +119,53 @@ def sample_tokens(
 
     return logits.argmax(dim=-1)
 
+
+
+@torch.no_grad()
+def sample_tokens_euler(
+    denoiser: torch.nn.Module,
+    audio: torch.Tensor,
+    grid: np.ndarray | list[float],
+    vocab_size: int,
+    canvas_len: int,
+    alpha_fn: Callable,
+    beta_fn: Callable,
+    gamma_fn: Callable | None = None,
+    mu: torch.Tensor | None = None,
+    hard: bool = False,
+    x1_init: torch.Tensor | None = None,
+    generator: torch.Generator | None = None,
+    waypoint: float = 0.0,
+    eps: float = 1e-5,
+) -> torch.Tensor:
+    """Algorithm 6: Euler-step the drift, then decode the final state.
+
+    Differs from `sample_tokens` in both halves of the loop. The state is advanced by
+    `x + (t_next - t) b` instead of being rebuilt from x0 at the new time, and the
+    transcript comes from `argmax(x_{t_N})` — the integrated state — rather than from the
+    denoiser's last prediction. The two coincide only if the grid ends at t=1, where the
+    state is the endpoint term alone.
+    """
+    batch = audio.size(0)
+    x0 = torch.randn(
+        batch, canvas_len, vocab_size, device=audio.device, generator=generator
+    )
+    times = [float(t) for t in grid]
+
+    x_t = alpha_fn(times[0]) * x0
+    if x1_init is not None:
+        x_t = x_t + beta_fn(times[0]) * x1_init
+    if gamma_fn is not None and mu is not None:
+        x_t = x_t + gamma_fn(times[0]) * mu
+
+    for t, t_next in pairwise(times):
+        time = torch.full((batch,), t, device=audio.device, dtype=torch.float32)
+        logits = denoiser(x_t=x_t, time=time, audio_embeddings=audio)
+        x1_hat = (
+            F.one_hot(logits.argmax(dim=-1), vocab_size).to(logits.dtype)
+            if hard
+            else F.softmax(logits, dim=-1)
+        )
+        x_t = x_t + (t_next - t) * drift(x_t, x1_hat, t, mu, waypoint, eps)
+
+    return x_t.argmax(dim=-1)

@@ -201,6 +201,19 @@ sampling:
   # metric that reflects inference — the binned ones score one denoising step from an x_t
   # built out of the target, which at high t largely measures the input.
   enabled: true
+  # How the ODE is integrated from noise.
+  #
+  #   interpolant — rebuild x_t = alpha(t) x0 + beta(t) x1_hat + gamma(t) mu at each step
+  #                 with x0 held fixed, and read the transcript off the denoiser's last
+  #                 prediction. No 1/(1-t) anywhere, and for three_term it uses the exact
+  #                 gamma(t+h) rather than a first-order expansion of it.
+  #   euler       — Algorithm 6 of the paper: x_{n+1} = x_n + (t_{n+1} - t_n) b_n with
+  #                 b = (D - x)/(1-t) [+ 4c(1-t) mu for three_term], decoding the final
+  #                 state. The reference formulation, so use it to reproduce the paper.
+  #
+  # The two are algebraically identical on linear and audio_cond — the mu term cancels in
+  # the drift — and differ at O(h^2) on three_term.
+  method: interpolant
   num_steps: 16
   every_n_epochs: 5
   # null means the whole validation split. A subset makes sampled WER depend on which
