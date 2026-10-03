@@ -16,6 +16,7 @@ dependencies = [
     "omegaconf>=2.3.1",
     "peft>=0.20.0",
     "ruff>=0.16.4",
+    "scipy>=1.18.1",
     "soundfile>=0.14.0",
     "submitit>=1.5.4",
     "torch>=2.11.0,<2.13.0",
@@ -47,9 +48,10 @@ requires-dist = ["torch", "einops"]
 line-length = 100
 target-version = "py312"
 # Vendored upstream code; not ours to lint or reformat. open_asr_leaderboard is a git
-# submodule; src/models/drax is DRAX's flow decoder (CC-BY-NC, Meta / aiOla), copied in
-# verbatim so the licence headers and the upstream diff stay readable.
-extend-exclude = ["open_asr_leaderboard", "src/models/drax"]
+# submodule; src/models/drax is DRAX's flow decoder (CC-BY-NC, Meta / aiOla) and
+# src/models/fmlm is the FMLM/DUO reference implementation, both copied in verbatim so
+# the licence headers and the upstream diff stay readable.
+extend-exclude = ["open_asr_leaderboard", "src/models/drax", "src/models/fmlm"]
 
 [tool.ruff.lint]
 select = [
