@@ -221,7 +221,7 @@ __marimo__/
 .streamlit/secrets.toml
 
 # Downloaded datasets (LibriSpeech cache is ~64 GB)
-data/
+/data/
 
 # Project-local conda prefix holding the pinned FFmpeg (see README)
 .ffmpeg/
