@@ -176,9 +176,8 @@ def time_one(config: str, overrides: list[str], args: argparse.Namespace) -> dic
         "train.accelerator=gpu",
         "train.checkpoint=false",
         "sampling.enabled=false",
-        # Validation and the tau sweep are not what we are timing.
+        # Validation is not what we are timing.
         "train.check_val_every_n_epoch=1000000",
-        "schedule.sweep_n=256",
         "metrics.wer_bins.train=0", "metrics.wer_bins.val=0",
         *overrides,
     ])

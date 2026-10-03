@@ -121,7 +121,6 @@ def base_overrides(args: argparse.Namespace, n_utts: int) -> list[str]:
         # bottleneck at these batch sizes is kernel-launch overhead, which is what it
         # removes. Warmup is a one-off ~40-70s.
         f"train.compile={str(args.compile).lower()}",
-        f"schedule.sweep_n={args.sweep_n}",
         # The number that actually matters: integrate from noise and score the result.
         "sampling.enabled=true",
         f"sampling.num_steps={args.sample_steps}",
@@ -279,7 +278,6 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, l
         help="validate this many times per run instead of every --val-every epochs; "
              "keeps scoring cost constant when epochs are derived from --max-steps",
     )
-    p.add_argument("--sweep-n", type=int, default=256, help="utterances in the tau sweep")
     p.add_argument("--sample-steps", type=int, default=16, help="integration steps when sampling")
     p.add_argument("--parallel", type=int, default=1, help="jobs at a time on the one GPU")
     p.add_argument("--timeout-min", type=int, default=120)

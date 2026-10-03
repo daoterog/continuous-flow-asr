@@ -104,21 +104,16 @@ schedule:
   # Draw t through tau^-1 rather than uniformly. Off, ~65% of every batch lands below the
   # dead zone where x_t carries nothing.
   enabled: true
-  sweep_n: 1024                 # utterances in the model-free corruption sweep
-  # Resolution of the P_e curve tau is built from. One number for both strategies, since
-  # both are asking the same thing — how finely the curve is resolved.
+  # `measured` only: how many uniform bins the denoiser sweep's readings are pooled into.
+  # Its precision is set by probe_n_utts together with this, not by the epoch — see the
+  # note there. At probe_n_utts 2048 and 150 bins each bin pools ~1,000 real tokens, for a
+  # per-bin recovery std of ~0.016.
   #
-  #   simulated — the corruption sweep is evaluated at num_bins + 1 values of t.
-  #   measured  — the denoiser sweep's readings are pooled into this many uniform bins.
-  #
-  # simulated (scripts/schedule/ablate_tau_bins.py): discretisation falls to the sweep's
-  # own seed-to-seed noise by 80-160 bins depending on mu's accuracy, and is flat to 400.
-  # Below that it climbs fast — 25 bins is 4x the floor, and 10 shifts the 90th percentile
-  # of drawn t by +0.097, a tenth of the whole time axis.
-  #
-  # measured: not ablated under the current design. Its precision is set by probe_n_utts
-  # together with this, not by the epoch — see the note there. At probe_n_utts 2048 and
-  # 150 bins each bin pools ~1,000 real tokens, for a per-bin recovery std of ~0.016.
+  # `simulated` no longer has an equivalent. Its curve is integrated rather than sampled
+  # (src/flow/recovery.py), so resolution is not a precision tradeoff and there is nothing
+  # to tune: schedule.EXACT_GRID_POINTS fixes how finely tau^-1 is interpolated between
+  # knots, at 1e-6 in t for a few tens of milliseconds. scripts/schedule/ablate_tau_bins.py
+  # measured the old sweep's discretisation error and is now only of historical interest.
   num_bins: 150
 
   # Utterances the `measured` sweep draws per refresh, redrawn each time. With num_bins
@@ -165,8 +160,11 @@ schedule:
 
   # Which P_e curve a refresh rebuilds tau from.
   #
-  #   simulated — the model-free corruption sweep with mu's measured accuracy: plain argmax
-  #               on the interpolant, no trained model in the loop. What Eq. 25 is about.
+  #   simulated — the model-free interpolant curve at mu's measured accuracy: the chance
+  #               that plain argmax on the field recovers the token, no trained model in
+  #               the loop. Integrated in closed form, so it is exact and deterministic.
+  #               What Eq. 25 is about. Without flow.gamma nothing in it can move, so the
+  #               refresh is skipped and the curve built at startup stands for the run.
   #   measured  — the denoiser's own binned P_e.
   #
   # They disagree sharply. On a converged run the interpolant is 0.964 wrong in the lowest

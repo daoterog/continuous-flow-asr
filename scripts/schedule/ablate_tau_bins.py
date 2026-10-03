@@ -1,9 +1,14 @@
 """How many grid points tau^-1 actually needs, and where more stop buying anything.
 
-`schedule.num_bins` sets the resolution of the P_e curve tau is built from: the sweep is
-evaluated at `num_bins + 1` values of t, and tau^-1 interpolates between whichever of those
-survive the flat-run cull. Too few and the map is a coarse staircase; too many and the
-sweep costs more for a curve that is already smooth.
+Historical: the question this answers no longer arises on the path it was written for.
+`SimulatedTau` integrates its curve (src/flow/recovery.py) instead of sweeping it, so
+there is no sampling noise to trade resolution against and `schedule.num_bins` now applies
+only to the measured curve. Kept because the measurement stands on its own, and because it
+is what the EXPERIMENTS.md rows on bin count refer to.
+
+The sweep it ablates: the P_e curve is evaluated at `num_bins + 1` values of t, and tau^-1
+interpolates between whichever of those survive the flat-run cull. Too few and the map is a
+coarse staircase; too many and the sweep costs more for a curve that is already smooth.
 
 The comparison has to separate two error sources that move in opposite directions:
 

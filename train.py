@@ -25,7 +25,6 @@ import src.constants  # noqa: F401  # sets HF_HOME; must precede transformers
 from src.constants import CONFIGS, SPLITS, data_root_for
 
 import lightning.pytorch as pl
-import numpy as np
 import torch
 from lightning.pytorch.callbacks import (
     EarlyStopping,
@@ -39,7 +38,7 @@ from transformers import WhisperTokenizerFast
 from src.checkpointing import ComponentCheckpoint, manifest_for
 from src.data import ROLES, AudioFeatureDataModule
 from src.flow.coefficients import make_schedule
-from src.flow.schedule import make_tau_inverse, sweep_corruption
+from src.flow.schedule import exact_tau_inverse
 from src.pl_module import FlowMatching
 
 # Used to parse OmegaConf dotlist assignments like
@@ -152,28 +151,20 @@ def build_config(argv: Sequence[str] | None = None) -> tuple[DictConfig, argpars
 
 
 def build_sample_t_fn(dm: AudioFeatureDataModule, cfg: DictConfig) -> object | None:
-    """The prior tau^-1, measured by corrupting real targets with no model in the loop."""
+    """The prior tau^-1: what the interpolant alone leaves recoverable, with no model."""
     if not cfg.schedule.enabled:
         return None
-    torch.manual_seed(cfg.seed)
-    tokens = dm.sample_tokens("train", cfg.schedule.sweep_n, seed=cfg.seed)
-    if torch.cuda.is_available():
-        tokens = tokens.cuda()
-    ts = np.linspace(0.0, 1.0, cfg.schedule.num_bins + 1).tolist()
     gamma_fn = make_schedule(cfg.flow.get("gamma"))
-    recovery = sweep_corruption(
-        tokens,
+    tau_inverse = exact_tau_inverse(
         dm.vocab_size,
-        ts,
         alpha_fn=make_schedule(cfg.flow.get("alpha", "linear_down")),
         beta_fn=make_schedule(cfg.flow.get("beta", "linear_up")),
         gamma_fn=gamma_fn,
         mu_accuracy=float(cfg.schedule.get("mu_accuracy", 0.0)),
     )
-    tau_inverse = make_tau_inverse(ts, recovery, dm.vocab_size)
     lo, hi = float(tau_inverse(0.0)), float(tau_inverse(1.0))
     path = "with mu" if gamma_fn is not None else "linear"
-    print(f"tau: sweep over {tokens.size(0)} utts on the {path} path, "
+    print(f"tau: exact curve on the {path} path over {dm.vocab_size:,} tokens, "
         f"t in [{lo:.3f}, {hi:.3f}] carries the draw")
     return tau_inverse
 

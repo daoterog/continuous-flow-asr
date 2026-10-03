@@ -1,14 +1,13 @@
-"""Tau from the model-free corruption sweep, with mu stood in at its measured accuracy."""
+"""Tau from the interpolant alone, with mu stood in at its measured accuracy."""
 
 import math
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 
-import numpy as np
 from omegaconf import DictConfig
 from torchmetrics import Metric
 
-from src.flow.schedule import make_tau_inverse, sweep_corruption
+from src.flow.schedule import exact_tau_inverse
 from src.flow.tau_base import TauScheduler
 
 if TYPE_CHECKING:
@@ -17,12 +16,13 @@ if TYPE_CHECKING:
 
 
 class SimulatedTau(TauScheduler):
-    """Replays the interpolant on real tokens to see how much of the target survives.
+    """Integrates how much of the target survives the interpolant, with no denoiser in it.
 
-    No denoiser is involved: the curve is what corruption alone leaves recoverable, which
-    is why it is available before a single training step. What makes it move during a run
-    is mu — the sweep substitutes a stand-in that is right with probability `mu_accuracy`,
-    so as mu learns the audio the dead zone shrinks and tau follows.
+    The curve is what corruption alone leaves recoverable, which is why it is available
+    before a single training step. What makes it move during a run is mu — the stand-in is
+    right with probability `mu_accuracy`, so as mu learns the audio the dead zone shrinks
+    and tau follows. Without a gamma term nothing moves at all, and `needs_mu` keeps those
+    runs from refreshing a curve that cannot have changed.
 
     That accuracy is the strategy's one piece of state, averaged across epochs so tau
     tracks mu's trend rather than SGD wobble.
@@ -72,20 +72,19 @@ class SimulatedTau(TauScheduler):
     def refresh(
         self, model: "FlowMatching", datamodule: "AudioFeatureDataModule | None"
     ) -> tuple[Callable | None, str | None]:
-        """Sweep the corruption over a batch of real tokens and invert the P_e it gives."""
-        if datamodule is None:
-            return None, "tau refresh skipped: no datamodule to sweep tokens from"
+        """Rebuild the exact interpolant curve at mu's current accuracy and invert it.
+
+        `datamodule` goes unused — the curve depends on the vocabulary size and the
+        coefficients, not on which tokens happen to be in a batch — but it stays in the
+        signature because `MeasuredTau` needs it and the caller holds only a `TauScheduler`.
+        """
+        del datamodule
         if model.gamma_fn is not None and self.mu_accuracy is None:
             return None, "tau refresh skipped: the simulated curve needs mu's accuracy"
-        tokens = datamodule.sample_tokens("train", int(self.cfg.sweep_n), seed=self.seed)
-        ts = np.linspace(0.0, 1.0, int(self.cfg.num_bins) + 1).tolist()
-        recovery = sweep_corruption(
-            tokens.to(model.device),
+        return exact_tau_inverse(
             model.vocab_size,
-            ts,
             alpha_fn=model.alpha_fn,
             beta_fn=model.beta_fn,
             gamma_fn=model.gamma_fn,
             mu_accuracy=0.0 if self.mu_accuracy is None else self.mu_accuracy,
-        )
-        return make_tau_inverse(ts, recovery, model.vocab_size), None
+        ), None

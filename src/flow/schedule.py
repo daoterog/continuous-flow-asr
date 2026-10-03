@@ -1,16 +1,19 @@
-"""The time reparameterization: tau, its inverse, and the corruption sweep behind it.
+"""The time reparameterization: tau, its inverse, and the curves behind it.
 
-Not metrics, though it is measured with one. ``BinnedTokenError`` reports P_e(t); this
-module turns a P_e curve into tau (Eq. 25), inverts it, and hands training and the
+Not metrics, though one of them is measured with one. ``BinnedTokenError`` reports P_e(t);
+this module turns a P_e curve into tau (Eq. 25), inverts it, and hands training and the
 sampler the same u -> t map. Two curves can feed it:
 
-  * the model-free corruption sweep below — what the interpolant alone does to a target,
-    available before a single step of training;
-  * the model's own P_e, via MeasuredTau — which moves left as the denoiser
-    learns to read the audio and recovers tokens the corrupted field alone could not.
+  * what the interpolant alone does to a target, available before a single step of
+    training. ``src.flow.recovery`` integrates this exactly and ``exact_tau_inverse``
+    below is the whole construction; ``sweep_corruption`` is the Monte Carlo form it
+    replaced, kept because the scripts that validate the exact curve need something
+    independent to contest it with.
+  * the model's own P_e, via MeasuredTau — which moves left as the denoiser learns to read
+    the audio and recovers tokens the corrupted field alone could not.
 
-One `tau_*` strategy drives each: `SimulatedTau` for the sweep, `MeasuredTau` for the
-model's own curve. They decide when tau is re-derived and hand the model the new one.
+One `tau_*` strategy drives each: `SimulatedTau` for the first, `MeasuredTau` for the
+second. They decide when tau is re-derived and hand the model the new one.
 """
 
 from collections.abc import Callable
@@ -18,6 +21,14 @@ from collections.abc import Callable
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+from src.flow.recovery import recovery_curve
+
+# Values of t the exact curve is evaluated at before inverting. Not a precision tradeoff
+# the way `schedule.num_bins` is for the measured curve: the curve is exact at every point,
+# so this only sets how finely tau^-1 is interpolated between knots. Against a 40,001-point
+# build it is within 1e-6 in t, for 12-36 ms.
+EXACT_GRID_POINTS = 4001
 
 
 def simulate_mu(
@@ -198,6 +209,43 @@ def make_tau_inverse(
     tau_inverse.ts = ts
     tau_inverse.knots = (tau_k, t_k)
     return tau_inverse
+
+
+def exact_tau_inverse(
+    vocab_size: int,
+    alpha_fn: Callable,
+    beta_fn: Callable,
+    gamma_fn: Callable | None = None,
+    mu_accuracy: float = 0.0,
+    points: int = EXACT_GRID_POINTS,
+) -> Callable:
+    """Build t = tau^-1(u) for the interpolant path, with no model and no sampling in it.
+
+    The prior tau, and the only thing `SimulatedTau` ever rebuilds. It needs no tokens and
+    no datamodule: recovery under the interpolant depends on the vocabulary size and the
+    coefficients alone, which is why `sweep_corruption` was drawing real targets only to
+    average the vocabulary out of them again.
+
+    Two arguments `make_tau_inverse` defaults differently for the measured curve:
+
+      * `p_e0` is the path's own error at t=0, not the chance rate `1 - 1/V`. They agree
+        when gamma(0) == 0, but `audio_cond` has gamma(0) == 1, so mu is already in the
+        field at t=0 and recovery starts above chance — under the chance normaliser tau(0)
+        comes out at 0.012 rather than 0 at mu accuracy 0.9, and drifts further up as mu
+        learns. This is what `MeasuredTau` already passes.
+      * `flat_eps` is 0. It exists to stop sampling noise near tau=0 being frozen in as
+        knots, and the exact curve has none: it is strictly increasing from t=0 up to the
+        point where recovery saturates, so tau^-1(0) can be read at face value.
+
+    The saturation at the top is real and is left alone — recovery reaches 1.0 to machine
+    precision around t=0.93 at V=1193, so tau is flat above it and many u map to the same
+    t. `generation_grid` collapses those, which is still the right handling.
+    """
+    ts = np.linspace(0.0, 1.0, points)
+    recovery = recovery_curve(ts, vocab_size, alpha_fn, beta_fn, gamma_fn, mu_accuracy)
+    return make_tau_inverse(
+        ts, recovery, vocab_size, flat_eps=0.0, p_e0=float(1.0 - recovery[0])
+    )
 
 
 def generation_grid(tau_inverse: Callable, num_steps: int) -> np.ndarray:
