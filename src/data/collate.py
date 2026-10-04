@@ -1,7 +1,6 @@
 """Batching: padding a canvas of token ids, and the DataLoader around it."""
 
 from collections.abc import Callable
-from functools import partial
 
 import torch
 from torch.utils.data import DataLoader, Dataset, RandomSampler

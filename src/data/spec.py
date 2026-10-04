@@ -1,13 +1,9 @@
 """Resolving a role's `configs` x `splits` pairs to feature directories on disk."""
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from pathlib import Path
 
-from torch.utils.data import ConcatDataset
-
 from src.constants import CONFIGS, SPLITS, feature_dir
-
-from .features import AudioFeatureDataset
 
 
 def expand_spec(configs: Iterable[str], splits: Iterable[str]) -> list[tuple[str, str]]:

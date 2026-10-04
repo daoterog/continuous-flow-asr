@@ -1,6 +1,6 @@
 """The LightningDataModule: one tokenization pass, the shared vocabulary, the loaders."""
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from functools import partial
 from pathlib import Path
 
@@ -12,7 +12,7 @@ from transformers import WhisperTokenizerFast
 
 from .collate import collate, make_loader
 from .features import AudioFeatureDataset
-from .spec import expand_spec, resolve_role
+from .spec import resolve_role
 from .vocab import VocabMap
 
 ROLES = ("train", "val", "test")

@@ -17,9 +17,9 @@ import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from src.constants import REPO_ROOT
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from huggingface_hub import HfApi
