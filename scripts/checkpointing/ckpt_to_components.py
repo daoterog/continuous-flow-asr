@@ -241,7 +241,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit("no component weights were written")
     print(
         f"\nupload with:\n"
-        f"  python -m scripts.upload_components --run-id {out_dir.parent.name} "
+        f"  python -m scripts.upload_components {out_dir.parent.name} "
         f"--variant {args.variant}"
     )
     return 0

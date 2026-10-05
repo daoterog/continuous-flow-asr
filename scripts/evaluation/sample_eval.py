@@ -32,6 +32,9 @@ from src.data import AudioFeatureDataModule
 from src.metrics import ids_to_text, score_samples
 from src.pl_module import FlowMatching
 
+# The config this machine is configured for, to override a checkpoint's own data.env.
+BASE_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "base.yaml"
+
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Checkpoint, which split to score, and how many steps to try.
@@ -97,6 +100,25 @@ def _config_from_components(args: argparse.Namespace) -> "DictConfig":
             f"YAML this run was trained from (variant={manifest.get('variant')}, "
             f"size={manifest.get('size')}, mu={manifest.get('mu_size')})"
         )
+    # `data.env` says which machine's filesystem to read, which is a fact about where this
+    # is running and not about the checkpoint. A run trained on the cluster carries
+    # env=snellius, so scoring it on a laptop looks for /scratch-shared and fails with a
+    # message telling you to precompute features you already have. Reset unless the caller
+    # asked for one explicitly.
+    if not any(o.startswith("data.env=") for o in args.overrides) and args.config is None:
+        here = T.load_config(BASE_CONFIG).data.env
+        if cfg.data.env != here:
+            print(f"data.env {cfg.data.env} -> {here} (this machine, not the checkpoint's)")
+            cfg.data.env = here
+
+    # `train.compile` is the same kind of inherited run-time choice, and here it is not
+    # merely unhelpful but fatal: a compiled module's state_dict keys all carry an
+    # `_orig_mod.` prefix, so loading plain component weights into one fails on every key.
+    # It also buys nothing for a single scoring pass, where the ~40 s warmup is pure cost.
+    if not any(o.startswith("train.compile=") for o in args.overrides) and cfg.train.compile:
+        print("train.compile true -> false (component weights are saved unwrapped)")
+        cfg.train.compile = False
+
     # The manifest knows which vocabulary the weights were trained over, so take it from
     # there rather than from --config. Getting it wrong changes vocab_size by 43x and the
     # weights simply will not fit; making the caller remember it is a trap.
