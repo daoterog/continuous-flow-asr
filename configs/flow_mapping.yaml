@@ -1,0 +1,38 @@
+# Flow-map distillation: train a two-time denoiser D(x_s, s, t) from a trained one-time one.
+#
+# The student's architecture is not set here. It is the teacher's `model.denoiser` node, read
+# off the manifest, because `load_teacher_weights` only fits a student of the same geometry —
+# the two-time model is the teacher plus one extra time embedder. `flow` comes from the
+# manifest for the same reason: the teacher denoises a particular probability path, and a
+# student distilled against a different one would be learning the wrong map.
+_base_: base.yaml
+
+distill:
+  # A components directory, as `scripts/checkpointing/fetch_components.py` writes. Both the
+  # weights and the geometry are taken from here.
+  teacher: runs/q5bsvywz/components
+  variant: best
+
+  # Fraction of each batch trained on the diagonal (s == t), where the target is the
+  # teacher's own one-step prediction and the student is held to being a plain denoiser.
+  # The rest learns to jump. Read now, acted on in stage 2 — today every row gets both terms.
+  diagonal_fraction: 0.25
+
+  # Feed the midpoint prediction forward as a one-hot rather than a softmax.
+  hard: false
+
+sampling:
+  # Stage 3. `sample()` for a two-time model is a different integrator — uniform in tau,
+  # calling the model with both times — and is not written yet. Off so `log_sampled` returns
+  # before reaching it.
+  enabled: false
+
+train:
+  # The student's own rate. `denoiser_lr` and `audio_decoder_lr` belong to the frozen teacher
+  # and are inert here. Lower than training from scratch used, because the student starts
+  # *as* the teacher rather than at init — it is correcting a map, not learning one.
+  two_time_denoiser_lr: 0.0005
+  num_epochs: 50
+  # Compiling is per-model here and only the student is compiled; left off while the step is
+  # still being shaped, since the warmup dwarfs a short run.
+  compile: false

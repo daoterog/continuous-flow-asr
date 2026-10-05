@@ -1,18 +1,45 @@
+"""Flow-map distillation: a two-time denoiser D(x_s, s, t) learned from a one-time teacher.
+
+The one-time model answers "given the state at t, what is the endpoint" and has to be
+integrated over many steps. A two-time model answers "given the state at s, what is the
+endpoint if I jump straight to t", so in principle one evaluation replaces the whole
+integration. On the teacher measured in stage 0 that is a 51.75 -> 18.16 WER gap between one
+step and sixteen, and closing it is the entire point of this module.
+
+Follows FMLM's PSD formulation (`src/models/fmlm/algo.py`, the `FMLM` class). The student is
+the teacher plus one extra time embedder, zero-initialised, so it *starts* as the teacher and
+learns only the dependence on where it is jumping to.
+"""
 
 from collections.abc import Callable
 
 import lightning.pytorch as pl
 import torch
-from torch.nn import functional as F
 from omegaconf import DictConfig, OmegaConf
+from torch.nn import functional as F
 from transformers import WhisperTokenizerFast
 
-from src.reporting import MetricReporting
+from src.checkpointing import load_components
 from src.data import VocabMap
 from src.flow.coefficients import make_schedule, waypoint_strength
+from src.flow.sampling_probe import SamplingProbe
+from src.models import build_two_time_denoiser, load_teacher_weights
+from src.reporting import MetricReporting
+
+# Floor on the interval denominators. The drawn step size can be exactly 0, which collapses
+# the midpoint onto the start and makes both (t - s) and (u - s) vanish
+EPS = 1e-8
 
 
 class FlowMapping(MetricReporting, pl.LightningModule):
+    """Distils a frozen one-time denoiser into a two-time one.
+
+    Holds three models: the teacher's denoiser and mu, both frozen, and the student. The
+    teacher is not a copy of the student's weights kept in step — it is a fixed checkpoint
+    loaded from disk, which is what makes the target stationary.
+
+    MetricReporting comes first in the bases so its Lightning hooks win the MRO.
+    """
 
     def __init__(
         self,
@@ -23,7 +50,13 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         tokenizer: WhisperTokenizerFast,
         vocab_map: VocabMap | None = None,
         sample_t_fn: Callable | None = None,
-    ):
+    ) -> None:
+        """Load the teacher, build the student from it, and take the path it was trained on.
+
+        `cfg.flow` and `cfg.model.denoiser` are overwritten from the teacher's manifest: the
+        student has to match the teacher's geometry for the weights to transfer, and has to
+        denoise the same probability path or it is learning a different map.
+        """
         super().__init__()
         # tokenizer/vocab_map/sample_t_fn are objects, not hyperparameters: they would
         # not survive a checkpoint round-trip and are rebuilt from the data instead.
@@ -38,71 +71,124 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         self.tokenizer = tokenizer
         self.vocab_map = vocab_map
 
-        # Here we need to load a denoiser checkpoint and mu
-        self.denoiser = None
-        self.mu_nn = None
-        self.two_time_denoiser = None
+        distill = cfg.distill
+        manifest, teacher = load_components(
+            distill.teacher, variant=distill.get("variant", "best")
+        )
+        for key, want, got in (
+            ("vocab_size", int(manifest.vocab_size), int(vocab_size)),
+            ("canvas_len", int(manifest.canvas_len), int(canvas_len)),
+        ):
+            if want != got:
+                raise ValueError(
+                    f"the teacher at {distill.teacher} was trained with {key}={want} but "
+                    f"this run builds {key}={got}. Every token id would be read against a "
+                    f"different vocabulary."
+                )
+        if "denoiser" not in teacher:
+            raise ValueError(f"no denoiser weights under {distill.teacher}")
 
-        # Diagonal fraction
-        self.diagonal_fraction = None
+        self.denoiser = teacher["denoiser"]
+        self.mu_nn = teacher.get("mu_nn")
+        for model in (self.denoiser, self.mu_nn):
+            if model is not None:
+                model.requires_grad_(False)
 
-        flow = cfg.flow
+        # Built from the teacher's own config node, so `load_teacher_weights` fits: the
+        # student is the teacher plus a zero-initialised second time embedder, which makes
+        # it *identical* to the teacher at init and lets distillation start from parity
+        # rather than from noise.
+        self.two_time_denoiser = build_two_time_denoiser(
+            manifest.model.denoiser, vocab_size
+        )
+        load_teacher_weights(self.two_time_denoiser, self.denoiser.state_dict())
+
+        # The path is the teacher's, not this config's.
+        flow = OmegaConf.merge(cfg.flow, OmegaConf.create(manifest.flow))
         self.alpha_fn = make_schedule(flow.get("alpha", "linear_down"))
         self.beta_fn = make_schedule(flow.get("beta", "linear_up"))
         self.gamma_fn = make_schedule(flow.get("gamma"))
         # The 4c of the drift's waypoint term, 0 for the variants without one.
         self.waypoint = waypoint_strength(flow.get("gamma"))
+        self.pad_loss_weight = float(flow.get("pad_loss_weight", 1.0))
+        self.hard = bool(distill.get("hard", False))
+        self.diagonal_fraction = float(distill.get("diagonal_fraction", 0.25))
 
+        # Sampling a two-time model needs its own integrator; until stage 3 writes one,
+        # `sampling.enabled: false` makes `is_due` False so `sample()` is never reached.
+        self.sampling_probe = SamplingProbe(cfg.get("sampling"), cfg.data.batch_size)
+
+        # Only the student trains, so only the student is worth compiling.
         if cfg.train.get("compile"):
-            mode = cfg.train.get("compile_mode", "default")
-            self.denoiser = torch.compile(self.denoiser, mode=mode)
-            self.two_time_denoiser = torch.compile(self.two_time_denoiser, mode=mode)
-            if self.mu_nn is not None:
-                self.mu_nn = torch.compile(self.mu_nn, mode=mode)
+            self.two_time_denoiser = torch.compile(
+                self.two_time_denoiser, mode=cfg.train.get("compile_mode", "default")
+            )
 
-        # TODO: Figure out new metrics
-        self.init_metrics(
-            ("denoiser", "mu") if self.mu_nn is not None else ("denoiser",),
-            tokenizer,
-            pad_id,
-            vocab_map,
-            sample_t_fn=sample_t_fn,
-            loss_bins=cfg.metrics.get("loss_bins", 10),
-            perr_bins=cfg.metrics.get("perr_bins", 10),
-            wer_bins=OmegaConf.to_container(cfg.metrics.get("wer_bins", {})) or None,
-            input_perr_bins=cfg.metrics.get("input_perr_bins", 10),
-        )
+        # TODO(stage 3): how to evaluate a flow map is still open — the binned metrics take
+        # one t and this step has three (start, mid, end), and the two loss terms are not
+        # comparable to each other. Until that is settled there is no metric bank, so every
+        # call that iterates `self.metrics` is commented out rather than fed an empty one.
+        # self.init_metrics(...)
 
+    def train(self, mode: bool = True) -> "FlowMapping":
+        """Keep the teacher in eval whatever Lightning does to the module.
+
+        `load_components` returns the teacher already in eval, but Lightning calls `.train()`
+        at the start of fitting and that recurses into every child — which would switch the
+        teacher's dropout back on. This teacher carries dropout 0.1, so its predictions would
+        stop being a fixed function of the input, and a distillation target that changes under
+        you is the one thing the frozen teacher exists to prevent.
+        """
+        super().train(mode)
+        self.denoiser.eval()
+        if self.mu_nn is not None:
+            self.mu_nn.eval()
+        return self
 
     def on_fit_start(self) -> None:
-        """Declare the histogram panels' step metric before anything is logged."""
+        """Nothing to declare yet — the histogram panels arrive with the metric bank."""
         super().on_fit_start()
-        self._define_bin_metrics()
+        # TODO(stage 3): self._define_bin_metrics()
 
     def on_train_epoch_start(self) -> None:
-        """Re-derive the schedule if it is due, then clear the train accumulators.
+        """Clear the train accumulators.
 
-        In that order: a refresh reads the metrics of the epoch that just finished, which
-        are still standing here, and it re-cuts the bins — so the reset has to come after
-        it, or the new edges would be applied to counts gathered under the old ones.
+        No schedule refresh: tau is the teacher's and does not move, so there is nothing
+        here to re-derive.
         """
         super().on_train_epoch_start()
-        # Maybe refresh schedule but doubt it
-        self.reset_metrics("train")
+        # TODO(stage 3): self.reset_metrics("train")
 
     def training_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
         """One optimizer step."""
         return self._step(batch, "train")
 
     def _step(self, batch: dict, split: str) -> torch.Tensor:
-        loss, out, startpoint, midpoint, endpoint = self.map_step(batch)
+        """One forward pass, logged as scalars until there is a metric bank to fill."""
+        loss, out, _startpoint, _midpoint, _endpoint, _weighting = self.map_step(batch)
         self._check_finite(loss, out, split)
-        self.log_losses(loss, out, split, batch_size=batch["tokens"].size(0))
-        # TODO: see what to do abaut update metrics here
-        # self.update_metrics(out, batch["tokens"], t, split)
+        # TODO: move loss logging into log_losses once it is implemented.
+        batch_size = batch["tokens"].size(0)
+        self.log(f"total_loss/{split}", loss, on_step=False, on_epoch=True,
+                 batch_size=batch_size)
+        for name, record in out.items():
+            self.log(f"{name}/{split}", record["loss"], on_step=False, on_epoch=True,
+                     batch_size=batch_size)
+        # TODO(stage 3): self.log_losses(...) and self.update_metrics(...) once the metric
+        # bank exists. `update_metrics` takes a single t and this step has three, so the two
+        # terms need separate calls against their own times.
         return loss
 
-    def map_step(self, batch: dict):
+    def map_step(self, batch: dict) -> tuple:
+        """One distillation step: the diagonal term, the off-diagonal term, and the times.
+
+        TODO(stage 2): the objective here is not yet FMLM's. Two things are wrong by design
+        until then — every row gets *both* terms rather than the batch being split into
+        diagonal / boundary / off-diagonal (`diagonal_fraction` is read and ignored), and the
+        diagonal target is the student's own detached softmax from the same forward pass,
+        which is entropy minimisation rather than distillation. The target has to come from
+        the frozen teacher (`algo.py:1299-1303`).
+        """
         audio = batch["audio"].float()
         tokens = batch["tokens"]
         x1 = F.one_hot(tokens, self.vocab_size).float()
@@ -114,14 +200,18 @@ class FlowMapping(MetricReporting, pl.LightningModule):
                 mu_logits = self.mu_nn(audio)
                 mu = F.softmax(mu_logits, dim=-1)
 
-        startpoint, midpoint, endpoint, weighting = self.sample_interval(batch_size=tokens.size(0))
+        startpoint, midpoint, endpoint, state, pred, weighting = self.sample_interval(
+            batch_size=tokens.size(0)
+        )
         i_start_point = self.make_interpolant(x1=x1, t=startpoint, mu=mu)
 
         diagonal_logits = self.denoiser(
             x_t=i_start_point, time=startpoint, audio_embeddings=audio
         )
         diagonal_probs = F.softmax(diagonal_logits, dim=-1)
-        diagonal_loss = - torch.sum(diagonal_probs.detach() * F.log_softmax(diagonal_logits, dim=-1), dim=-1)
+        diagonal_loss = -torch.sum(
+            diagonal_probs.detach() * F.log_softmax(diagonal_logits, dim=-1), dim=-1
+        )
         out["diagonal_loss"] = {
             "loss": diagonal_loss.mean(),
             "loss_per_seq": diagonal_loss,
@@ -138,10 +228,7 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         midpreds = midprobs
         if self.hard:
             midpreds = F.one_hot(middle_logits.argmax(dim=-1), self.vocab_size).float()
-        mapped_interpolant = (
-            (1.0 - midpoint) / (1.0 - startpoint) * i_start_point +
-            (midpoint - startpoint) / (1.0 - startpoint) * midpreds
-        )
+        mapped_interpolant = state * i_start_point + pred * midpreds
         with torch.no_grad():
             end_logits = self.two_time_denoiser(
                 x_t=mapped_interpolant,
@@ -158,7 +245,9 @@ class FlowMapping(MetricReporting, pl.LightningModule):
             endpoint=endpoint,
             audio_embeddings=audio
         )
-        off_diagonal_loss = - torch.sum(distillation_logits * F.log_softmax(start_to_end_logits, dim=-1), dim=-1)
+        off_diagonal_loss = -torch.sum(
+            distillation_logits * F.log_softmax(start_to_end_logits, dim=-1), dim=-1
+        )
         out["off_diagonal_loss"] = {
             "loss": off_diagonal_loss.mean(),
             "loss_per_seq": off_diagonal_loss,
@@ -212,20 +301,37 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         decayed = floor + (1.0 - floor) * torch.exp(-(distance - 1.0) / decay)
         return torch.where(is_pad, decayed, torch.ones_like(decayed))
 
-    def sample_interval(self, batch_size: int) -> torch.Tensor:
-        """Sample a time in [t_min, t_max] for each batch element."""
+    def sample_interval(self, batch_size: int) -> tuple[torch.Tensor, ...]:
+        """Draw (s, u, t) with s <= u <= t <= 1, plus the coefficients the algebra needs.
+
+        The three times come back as (B,) because that is what the models take. Everything
+        derived from them comes back as (B, 1, 1), because it multiplies (B, L, V) fields —
+        a (B,) factor would broadcast against the *vocabulary* axis instead of the batch,
+        which is silent whenever B happens not to equal V.
+
+        Three such coefficients, all pure functions of the times, so they are built here
+        rather than inline:
+
+          state, pred   the Euler map from s to u, x_u = state * x_s + pred * D(x_s, s, u)
+          weighting     lambda_sut, how much of the distillation target comes from the first
+                        sub-step rather than the second (algo.py:1330)
+
+        Every denominator is clamped: `step_size` can be 0, which puts u on top of s and
+        makes both (t - s) and (u - s) vanish.
+        """
         start_point = torch.rand(batch_size, device=self.device)
         step_size = (1.0 - start_point) * torch.rand(batch_size, device=self.device)
         end_point = start_point + step_size
-        # Here we might need to first transform start and endpoint to compute
-        # accurate estimate of midpoint.
+        # TODO(stage 2): FMLM takes the midpoint in tau and only then maps to real time, so
+        # the three are not equally spaced in t. Here they are, which is a different split.
         mid_point = (start_point + end_point) / 2.0
-        # Compute the weighting for the interpolant.
-        weighting = (
-            (1 - end_point) * (mid_point - start_point)) / \
-            ((1 - mid_point) * (end_point - start_point)
-        )
-        return start_point, mid_point, end_point, weighting
+
+        s, u, t = (x[:, None, None] for x in (start_point, mid_point, end_point))
+        remaining = (1.0 - s).clamp_min(EPS)
+        state = (1.0 - u) / remaining
+        pred = (u - s) / remaining
+        weighting = ((1.0 - t) * (u - s)) / ((1.0 - u) * (t - s)).clamp_min(EPS)
+        return start_point, mid_point, end_point, state, pred, weighting
 
     def make_interpolant(
         self, x1: torch.Tensor, t: torch.Tensor, mu: torch.Tensor | None = None
@@ -234,44 +340,42 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         x0 = torch.randn_like(x1)
         i_t = self.alpha_fn(t)[:, None, None] * x0 + self.beta_fn(t)[:, None, None] * x1
         if self.gamma_fn is not None and mu is not None:
-            if self.stop_grad_mu:
-                mu = mu.detach()
             i_t = i_t + self.gamma_fn(t)[:, None, None] * mu
         return i_t
 
     def on_train_epoch_end(self) -> None:
-        """Flush the train metrics, then take mu's reading for the schedule.
-
-        Observe before logging, so the average reported covers the epoch that just ran;
-        the refresh that consumes it is a whole epoch away, at the next epoch's start.
-        """
+        """Nothing to flush yet; the losses are logged per step."""
         super().on_train_epoch_end()
-        self.log_metrics("train")
+        # TODO(stage 3): self.log_metrics("train")
 
     def on_validation_epoch_start(self) -> None:
         """Clear the val accumulators before the pass fills them."""
         super().on_validation_epoch_start()
-        self.reset_metrics("val")
+        # TODO(stage 3): self.reset_metrics("val")
 
     def validation_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
         """One validation batch."""
         return self._step(batch, "val")
 
     def on_validation_epoch_end(self) -> None:
-        """Flush the val metrics, then sample from noise."""
+        """Sample from noise, when there is a sampler to do it with.
+
+        `sampling.enabled: false` makes this return before touching `sample()`, which a
+        two-time model does not have yet.
+        """
         super().on_validation_epoch_end()
-        self.log_metrics("val")
+        # TODO(stage 3): self.log_metrics("val")
         self.log_sampled()
 
     def on_test_start(self) -> None:
         """Same, for a `trainer.test()` that did not go through `fit`."""
         super().on_test_start()
-        self._define_bin_metrics()
+        # TODO(stage 3): self._define_bin_metrics()
 
     def on_test_epoch_start(self) -> None:
         """Clear the test accumulators before the pass fills them."""
         super().on_test_epoch_start()
-        self.reset_metrics("test")
+        # TODO(stage 3): self.reset_metrics("test")
 
     def test_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
         """One test batch. Only reached through an explicit `trainer.test()`."""
@@ -280,7 +384,7 @@ class FlowMapping(MetricReporting, pl.LightningModule):
     def on_test_epoch_end(self) -> None:
         """Flush the test metrics."""
         super().on_test_epoch_end()
-        self.log_metrics("test")
+        # TODO(stage 3): self.log_metrics("test")
 
     def _check_finite(self, loss: torch.Tensor, out: dict, split: str) -> None:
         """Stop the run the first time the objective is not finite."""
@@ -305,45 +409,20 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         hard: bool = False,
         init_from_mu: bool | None = None,
     ) -> torch.Tensor:
-        """Integrate from noise to (B, canvas_len) token ids for this batch of audio.
+        """Integrate from noise to (B, canvas_len) token ids. Not written yet.
 
-        init_from_mu seeds the first state's endpoint term with mu. The tau grid starts
-        at the edge of the dead zone rather than at 0, so training's state there already
-        carries beta(t0) * x1 and the sampler otherwise supplies nothing for it.
+        TODO(stage 3): a two-time model needs its own integrator and cannot reuse
+        `src/flow/sampler.py`. Those samplers call a model with a single time and rebuild the
+        state from the interpolant; this one steps on a grid uniform in tau, calls the model
+        with *both* ends of each step, and advances by the same Euler map `map_step` already
+        uses — `state * x + pred * D`. The last step returns the prediction instead of
+        stepping into t=1 (`algo.py:1516`).
         """
-        mu = None
-        if self.mu_nn is not None:
-            mu = F.softmax(self.mu_nn(audio), dim=-1)
-        if init_from_mu is None:
-            init_from_mu = bool(self.cfg.get("sampling", {}).get("init_from_mu", False))
-
-        # TODO: rethink
-        # if self.sample_t_fn is None:
-        #     gen_grid = torch.linspace(0, 1, num_steps + 1).tolist()
-        # else:
-        #     gen_grid = [float(t) for t in generation_grid(self.sample_t_fn, num_steps)]
-
-        # # Algorithm 6 of the paper, or the equivalent-for-affine-gamma rebuild. They agree
-        # # exactly on linear and audio_cond and differ at O(h^2) on three_term.
-        # method = str(self.cfg.get("sampling", {}).get("method", "interpolant"))
-        # if method not in SAMPLERS:
-        #     raise ValueError(
-        #         f"sampling.method must be one of {sorted(SAMPLERS)}, got {method!r}"
-        #     )
-        # return SAMPLERS[method](
-        #     self.denoiser,
-        #     audio,
-        #     gen_grid,
-        #     self.vocab_size,
-        #     self.canvas_len,
-        #     self.alpha_fn,
-        #     self.beta_fn,
-        #     self.gamma_fn,
-        #     mu,
-        #     hard=hard,
-        #     x1_init=mu if init_from_mu else None,
-        #     waypoint=self.waypoint,
-        # )
+        del audio, num_steps, hard, init_from_mu
+        raise NotImplementedError(
+            "FlowMapping.sample is stage 3. Set sampling.enabled=false, or score the "
+            "teacher instead with scripts.evaluation.sample_eval."
+        )
 
     def configure_optimizers(self) -> dict:
         """AdamW with a per-model LR group, plus OneCycleLR stepped every batch.
@@ -352,13 +431,13 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         drop_last on the training loader, so the schedule cannot run past the run.
         """
         train = self.cfg.train
-        groups = [{"params": self.denoiser.parameters(), "lr": train.denoiser_lr}]
-        max_lr = [train.denoiser_lr]
-        if self.mu_nn is not None:
-            groups.append(
-                {"params": self.mu_nn.parameters(), "lr": train.audio_decoder_lr}
-            )
-            max_lr.append(train.audio_decoder_lr)
+        # The student alone. `denoiser` and `mu_nn` are the frozen teacher: handing their
+        # parameters to AdamW would let weight decay move them even with requires_grad off.
+        # Its own learning rate, because `denoiser_lr` is the teacher's and distilling from
+        # a converged model starts somewhere quite different from training one.
+        lr = train.two_time_denoiser_lr
+        groups = [{"params": self.two_time_denoiser.parameters(), "lr": lr}]
+        max_lr = [lr]
 
         fused = bool(train.get("fused_optimizer", False)) and self.device.type == "cuda"
         if fused and train.get("grad_clip"):

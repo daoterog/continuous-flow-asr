@@ -52,12 +52,7 @@ class TwoTimeEmbedder(nn.Module):
 
 
 class TwoTimeTransformer(Transformer):
-    """DRAX's Transformer conditioned on a start and an end time.
-
-    `forward` keeps the base signature and adds `time_end`. Left off, it repeats `time`, so
-    the model behaves as the ordinary denoiser and every existing call site — the sampler,
-    the metrics, `flow_step` — works unchanged.
-    """
+    """DRAX's Transformer conditioned on a start and an end time."""
 
     def __init__(self, vocab_size: int, masked: bool, config: DictConfig) -> None:
         """Build the base model, then replace its time embedding with the two-time one."""
@@ -65,12 +60,21 @@ class TwoTimeTransformer(Transformer):
         self.time_embedding = TwoTimeEmbedder(hidden_size=config.cond_dim)
 
     def forward(
-        self, x_t: Tensor, time: Tensor, time_end: Tensor | None = None, **kwargs: object
+        self,
+        x_t: Tensor,
+        startpoint: Tensor,
+        endpoint: Tensor | None = None,
+        **kwargs: object,
     ) -> Tensor:
-        """Predict the endpoint at `time_end` from the state at `time`."""
-        if time_end is None:
-            time_end = time
-        packed = torch.stack([time, time_end], dim=-1)
+        """Predict the endpoint of the path at `endpoint`, from the state at `startpoint`.
+
+        The pair is packed into one (B, 2) tensor because the vendored `Transformer` passes
+        `time` straight to `self.time_embedding` — so a second time reaches the embedder
+        without the vendored file knowing there is one.
+        """
+        if endpoint is None:
+            endpoint = startpoint
+        packed = torch.stack([startpoint, endpoint], dim=-1)
         return super().forward(x_t=x_t, time=packed, **kwargs)
 
 
