@@ -34,6 +34,7 @@ class AudioFeatureDataModule(pl.LightningDataModule):
         tokenizer: WhisperTokenizerFast,
         canvas_len: int,
         batch_size: int,
+        eval_batch_size: int | None = None,
         audio_stride: int = 1,
         compact_vocab: bool = True,
         subset_n: dict | None = None,
@@ -58,6 +59,7 @@ class AudioFeatureDataModule(pl.LightningDataModule):
         self.tokenizer = tokenizer
         self.canvas_len = canvas_len
         self.batch_size = batch_size
+        self.eval_batch_size = int(eval_batch_size or batch_size)
         self.audio_stride = audio_stride
         self.compact_vocab = compact_vocab
         self.subset_n = subset_n or {}
@@ -175,7 +177,7 @@ class AudioFeatureDataModule(pl.LightningDataModule):
             self.setup()
         return make_loader(
             self.datasets[role],
-            batch_size=self.batch_size,
+            batch_size=self.batch_size if role == "train" else self.eval_batch_size,
             shuffle=shuffle,
             collate_fn=self.collate_fn,
             num_workers=self.num_workers,

@@ -38,6 +38,21 @@ data:
   # cross-attention keys 4x.
   audio_stride: 4
   batch_size: 32
+  # Batch for val, test and the measured tau probe. All three run under no_grad, so none
+  # of the activations that size the training batch are allocated and a much larger batch
+  # fits — but fitting is not the same as being faster. Measured on a 3060 (6 GiB), one
+  # 2048-utterance probe at the 512x8 denoiser:
+  #
+  #     chunk    32     64    128    256    512
+  #     time    5.12   5.08   5.16   6.14   177      seconds
+  #     peak    0.66   1.00   1.67   3.02   5.73     GiB
+  #
+  # Flat to 128 — the (B, canvas_len, vocab_size) field is large enough that the card is
+  # already saturated at 32 — then slower, and off a cliff at 512 where the card starts
+  # spilling. So this buys headroom, not throughput, and the probe's cost really is
+  # proportional to the utterances it forwards. Unmeasured on an A100, which has far more
+  # to saturate; null follows batch_size until that is measured.
+  eval_batch_size: null
   # null means one epoch is one pass over the training subset. Set it to make an epoch a
   # fixed number of steps instead, sampling with replacement — worth it on small subsets,
   # where the per-epoch fixed cost otherwise dominates.
@@ -57,7 +72,7 @@ data:
 
   # Cap per role, applied after the canvas-length filter. null means all of it.
   subset_n:
-    train: 2000
+    train: null
     val: null
     test: null
 
@@ -245,7 +260,7 @@ metrics:
   loss_bins: 10
   perr_bins: 10
   # WER needs a decode per batch, so it is off on train by default.
-  wer_bins: {train: 0, val: 10, test: 10}
+  wer_bins: {train: 10, val: 10, test: 10}
   # Token error of argmax(x_t) — the interpolant with no model in the loop. Against
   # denoiser_perr it shows what the denoiser adds over its own input, and across variants
   # it shows how much mu actually contributes to the field. One argmax, so it is cheap.

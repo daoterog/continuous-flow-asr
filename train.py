@@ -190,6 +190,7 @@ def build_datamodule(cfg: DictConfig) -> AudioFeatureDataModule:
         tokenizer=tokenizer,
         canvas_len=cfg.data.canvas_len,
         batch_size=cfg.data.batch_size,
+        eval_batch_size=cfg.data.get("eval_batch_size"),
         audio_stride=cfg.data.audio_stride,
         compact_vocab=cfg.data.compact_vocab,
         subset_n=subset_n,

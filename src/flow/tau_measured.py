@@ -67,7 +67,11 @@ class MeasuredTau(TauScheduler):
         """Sweep, bin, invert."""
         if datamodule is None:
             return None, "tau refresh skipped: no datamodule to sweep"
-        t, hits, input_hits, reals = self._sweep(model, self._draw_batch(datamodule))
+        t, hits, input_hits, reals = self._sweep(
+            model,
+            self._draw_batch(datamodule),
+            chunk=getattr(datamodule, "eval_batch_size", 32),
+        )
         self._refreshes += 1
 
         ts, rec = self.monotone_curve(t, hits, reals)
@@ -101,7 +105,16 @@ class MeasuredTau(TauScheduler):
     def _sweep(
         self, model: "FlowMatching", batch: dict, chunk: int = 32
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """(t, denoiser hits, interpolant hits, real tokens) per utterance, at t ~ U[0, 1]."""
+        """(t, denoiser hits, interpolant hits, real tokens) per utterance, at t ~ U[0, 1].
+
+        `chunk` is how many utterances cross to the device and through the model at once.
+        Nothing here holds a backward graph, so it is not bounded by what training fits —
+        `refresh` passes the datamodule's `eval_batch_size` and the default is only the
+        floor for a caller that has no datamodule to ask.
+
+        It is a transfer size as much as a batch size: moving the whole probe to the device
+        at once cost 3.66 GiB against 0.32 GiB streamed, which is what the chunking is for.
+        """
         audio_all = batch["audio"]
         tokens_all = batch["tokens"]
         gen = torch.Generator(device="cpu").manual_seed(self.seed + self._refreshes)
