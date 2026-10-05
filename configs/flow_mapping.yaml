@@ -13,10 +13,25 @@ distill:
   teacher: runs/q5bsvywz/components
   variant: best
 
-  # Fraction of each batch trained on the diagonal (s == t), where the target is the
-  # teacher's own one-step prediction and the student is held to being a plain denoiser.
-  # The rest learns to jump. Read now, acted on in stage 2 — today every row gets both terms.
-  diagonal_fraction: 0.25
+  # How each batch is divided. Every row trains exactly one of the three, so these fractions
+  # are also the relative weight of the three objectives.
+  #
+  #   diagonal   s == t. Target is the teacher's own one-step output, holding the student to
+  #              being at least as good a plain denoiser as the model it came from.
+  #   boundary   s = 0, t = 1. The whole jump in one evaluation — the case the 51.75 WER at
+  #              one step comes from.
+  #   offdiag    s < t. Target is the two-step rollout through the midpoint, which is what
+  #              teaches the map to compose.
+  #
+  # FMLM's own values (`src/models/fmlm/fmlm.yaml`: diagonal_fraction 0.5, boundary_prob 32,
+  # which their `_get_split_indices` cumulates into 0.5 / 0.0156 / 0.484). Neither is what
+  # you would guess: half the batch goes on *not regressing*, and the boundary — the case we
+  # most want — gets 1.6%, two rows in a batch of 128. Taken as given rather than tuned,
+  # since they are evidence and anything else here would be invention.
+  split:
+    diagonal: 0.5
+    boundary: 0.016
+    offdiag: 0.484
 
   # Feed the midpoint prediction forward as a one-hot rather than a softmax.
   hard: false
@@ -29,9 +44,19 @@ sampling:
 
 train:
   # The student's own rate. `denoiser_lr` and `audio_decoder_lr` belong to the frozen teacher
-  # and are inert here. Lower than training from scratch used, because the student starts
-  # *as* the teacher rather than at init — it is correcting a map, not learning one.
-  two_time_denoiser_lr: 0.0005
+  # and are inert here. Far below what training from scratch used (2e-3), because the student
+  # starts *as* the teacher rather than at init — it is correcting a map, not learning one.
+  #
+  # Swept over 160 steps on 64 utterances, reading the final values rather than the change
+  # (2e-3 damages the model in its first steps, so its large "improvement" is recovery):
+  #
+  #     lr      1e-5     5e-5     2e-4     5e-4     2e-3
+  #     offdiag 0.3114   0.2960   0.3021   0.3241   0.4384
+  #     diag    0.1835   0.1906   0.2193   0.2569   0.3461
+  #
+  # Both terms are worse above ~2e-4, so this is not a fidelity/quality dial — higher is just
+  # worse. One seed on a tiny subset, so it is a sane starting point, not a tuned value.
+  two_time_denoiser_lr: 0.00005
   num_epochs: 50
   # Compiling is per-model here and only the student is compiled; left off while the step is
   # still being shaped, since the warmup dwarfs a short run.

@@ -39,6 +39,7 @@ from src.checkpointing import ComponentCheckpoint, manifest_for
 from src.data import ROLES, AudioFeatureDataModule
 from src.flow.coefficients import make_schedule
 from src.flow.schedule import exact_tau_inverse
+from src.flow_mapping import DISTILL_GROUPS
 from src.pl_module import FlowMatching
 
 # Used to parse OmegaConf dotlist assignments like
@@ -147,7 +148,31 @@ def build_config(argv: Sequence[str] | None = None) -> tuple[DictConfig, argpars
     # Variant is referenced as stem in the config, here we just override it
     if cfg.get("variant") is None:
         cfg.variant = args.config.stem
+
+    validate_distill_split(cfg)
     return cfg, args
+
+
+def validate_distill_split(cfg: DictConfig) -> None:
+    """`distill.split` must be a partition: every row trains exactly one of the three terms.
+
+    Checked here rather than in the module because it is a statement about the config, and
+    because a bad split should fail before anything loads a checkpoint or touches a GPU. The
+    fractions are also the relative weight of the three objectives, so one that does not sum
+    to 1 is silently reweighting them rather than erroring.
+    """
+    split = cfg.get("distill", {}).get("split")
+    if split is None:
+        return
+    missing = [k for k in DISTILL_GROUPS if k not in split]
+    if missing:
+        raise ValueError(f"distill.split is missing {missing}; it needs {list(DISTILL_GROUPS)}")
+    parts = {k: float(split[k]) for k in DISTILL_GROUPS}
+    total = sum(parts.values())
+    if any(v < 0.0 for v in parts.values()) or abs(total - 1.0) > 1e-6:
+        raise ValueError(
+            f"distill.split must be non-negative and sum to 1, got {parts} (sum {total:.6f})"
+        )
 
 
 def build_sample_t_fn(dm: AudioFeatureDataModule, cfg: DictConfig) -> object | None:

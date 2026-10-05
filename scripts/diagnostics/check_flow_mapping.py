@@ -15,6 +15,7 @@ from collections.abc import Sequence
 
 import lightning.pytorch as pl
 import torch
+import torch.nn.functional as F
 
 import train as T
 from src.flow_mapping import FlowMapping
@@ -91,6 +92,33 @@ def main(argv: Sequence[str] | None = None) -> int:
     if model.mu_nn is not None:
         assert not model.mu_nn.training
 
+    # 3b. The split: every row trains exactly one term, in the configured proportions.
+    big = 256
+    groups = model.assign_groups(big)
+    counts = [int((groups == i).sum()) for i in range(3)]
+    want = [float(cfg.distill.split[k]) for k in ("diagonal", "boundary", "offdiag")]
+    print("\n3b. split over a batch of 256")
+    for nm, got, frac in zip(("diagonal", "boundary", "offdiag"), counts, want, strict=True):
+        print(f"    {nm:<10} {got:>4}   {got / big:.3f} vs configured {frac:.3f}")
+    assert sum(counts) == big, "rows went missing from the split"
+    assert all(abs(c / big - f) < 0.01 for c, f in zip(counts, want, strict=True))
+
+    # 3c. The Euler map is only valid because gamma == alpha on this path. Fed the true
+    #     endpoint, the mapped state has to BE the interpolant at the midpoint. Same seed
+    #     before each build so both draw the same noise.
+    torch.manual_seed(0)
+    s_, _u, _t, state, pred, _w, _g = model.sample_interval(batch_size=2)
+    x1 = F.one_hot(batch["tokens"], dm.vocab_size).float()
+    with torch.no_grad():
+        mu = F.softmax(model.mu_nn(audio), dim=-1) if model.mu_nn is not None else None
+        torch.manual_seed(1)
+        x_s = model.make_interpolant(x1=x1, t=s_, mu=mu)
+        torch.manual_seed(1)
+        x_u = model.make_interpolant(x1=x1, t=_u, mu=mu)
+    err = float((state * x_s + pred * x1 - x_u).abs().max())
+    print(f"\n3c. Euler map vs true interpolant at u   max|diff| = {err:.3e}")
+    assert err < 1e-4, "the Euler map does not reproduce the interpolant on this path"
+
     # 4. One step, forward and backward.
     loss = model.training_step(batch, 0)
     print(f"\n4. training_step loss                 {float(loss.detach()):.4f}  "
@@ -105,6 +133,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"   teacher params with grad           {teacher_grads}")
     assert student_grads > 0, "nothing reached the student"
     assert teacher_grads == 0, "gradient leaked into the frozen teacher"
+
+    # 4b. Both terms have to be live. Before stage 2 the diagonal called the frozen teacher
+    #     on both sides of its own entropy, so it was a constant: requires_grad False and no
+    #     gradient at all. This is the check that would have caught it.
+    torch.manual_seed(0)
+    _l, out, *_ = model.map_step(batch)
+    for name, rec in out.items():
+        print(f"   {name:<10} loss {float(rec['loss'].detach()):.4f}  "
+              f"n={rec['n']:<3} requires_grad={rec['loss'].requires_grad}")
+    live = [n for n, r in out.items() if r["n"] and not r["loss"].requires_grad]
+    assert not live, f"non-empty term(s) with no gradient: {live}"
 
     model.eval()
     with torch.no_grad():
@@ -131,7 +170,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     assert owned == student_ids and not (owned & teacher_ids)
     assert not model.denoiser.training
 
-    print("\nall checks passed (the loss VALUE is not checked — the objective is stage 2)")
+    print("\nall checks passed")
     return 0
 
 

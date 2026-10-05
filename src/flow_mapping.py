@@ -30,6 +30,11 @@ from src.reporting import MetricReporting
 # the midpoint onto the start and makes both (t - s) and (u - s) vanish
 EPS = 1e-8
 
+# The three regimes a batch is divided into, in the order `distill.split` names them. Each
+# row trains exactly one, so these are also the relative weights of the three objectives.
+# `train.validate_distill_split` checks the config against this before a module is built.
+DISTILL_GROUPS = ("diagonal", "boundary", "offdiag")
+
 
 class FlowMapping(MetricReporting, pl.LightningModule):
     """Distils a frozen one-time denoiser into a two-time one.
@@ -112,7 +117,25 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         self.waypoint = waypoint_strength(flow.get("gamma"))
         self.pad_loss_weight = float(flow.get("pad_loss_weight", 1.0))
         self.hard = bool(distill.get("hard", False))
-        self.diagonal_fraction = float(distill.get("diagonal_fraction", 0.25))
+
+        # The rollout's Euler map eliminates the noise from the interpolant to step from s to
+        # u. With a mu term that only works when gamma == alpha, because then
+        # x_t = alpha (z + mu) + beta x1 and mu rides along inside the noise. For a gamma
+        # that is not proportional to alpha the map silently computes the wrong intermediate
+        # state — measured at 0.14 absolute on the parabola against 2e-7 here — so it is
+        # refused rather than commented.
+        gamma_spec = flow.get("gamma")
+        if gamma_spec is not None and str(gamma_spec) != str(flow.get("alpha", "linear_down")):
+            raise ValueError(
+                f"flow.gamma is {gamma_spec!r} and flow.alpha is "
+                f"{flow.get('alpha', 'linear_down')!r}. The distillation rollout's Euler map "
+                f"is only valid when they match (or gamma is absent), because mu has to fold "
+                f"into the noise for the interpolant to be invertible."
+            )
+
+        # Validated in `train.validate_distill_split`, so it is a partition by the time it
+        # gets here; these fractions are therefore also the weight of each objective.
+        self.split = tuple(float(distill.split[k]) for k in DISTILL_GROUPS)
 
         # Sampling a two-time model needs its own integrator; until stage 3 writes one,
         # `sampling.enabled: false` makes `is_due` False so `sample()` is never reached.
@@ -180,14 +203,21 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         return loss
 
     def map_step(self, batch: dict) -> tuple:
-        """One distillation step: the diagonal term, the off-diagonal term, and the times.
+        """One PSD distillation step (FMLM's `FMLM.loss`, algo.py:1246-1349).
 
-        TODO(stage 2): the objective here is not yet FMLM's. Two things are wrong by design
-        until then — every row gets *both* terms rather than the batch being split into
-        diagonal / boundary / off-diagonal (`diagonal_fraction` is read and ignored), and the
-        diagonal target is the student's own detached softmax from the same forward pass,
-        which is entropy minimisation rather than distillation. The target has to come from
-        the frozen teacher (`algo.py:1299-1303`).
+        Every row trains exactly one term, chosen by `distill.split`:
+
+          diagonal (s == t)   against the frozen teacher's own one-step output at s, so the
+                              student cannot drift away from being a good denoiser
+          otherwise           against the two-step rollout s -> u -> t, which is what makes
+                              one evaluation of D(x_s, s, t) agree with two. The boundary
+                              rows (s = 0, t = 1) are folded in here, exactly as the
+                              reference does at algo.py:1285 — the full jump is just the
+                              widest off-diagonal case
+
+        One student forward covers the whole batch; the two losses are slices of it. The
+        rollout that builds the off-diagonal target runs entirely under `no_grad`: it is a
+        target, and the gradient goes only into the single `student_logits` call.
         """
         audio = batch["audio"].float()
         tokens = batch["tokens"]
@@ -200,74 +230,96 @@ class FlowMapping(MetricReporting, pl.LightningModule):
                 mu_logits = self.mu_nn(audio)
                 mu = F.softmax(mu_logits, dim=-1)
 
-        startpoint, midpoint, endpoint, state, pred, weighting = self.sample_interval(
-            batch_size=tokens.size(0)
+        startpoint, midpoint, endpoint, state, pred, weighting, groups = (
+            self.sample_interval(batch_size=tokens.size(0))
         )
         i_start_point = self.make_interpolant(x1=x1, t=startpoint, mu=mu)
 
-        diagonal_logits = self.denoiser(
-            x_t=i_start_point, time=startpoint, audio_embeddings=audio
-        )
-        diagonal_probs = F.softmax(diagonal_logits, dim=-1)
-        diagonal_loss = -torch.sum(
-            diagonal_probs.detach() * F.log_softmax(diagonal_logits, dim=-1), dim=-1
-        )
-        out["diagonal_loss"] = {
-            "loss": diagonal_loss.mean(),
-            "loss_per_seq": diagonal_loss,
-            "pred_ids": diagonal_logits.argmax(dim=-1),
-        }
-
-        middle_logits = self.two_time_denoiser(
-            x_t=i_start_point,
-            startpoint=startpoint,
-            endpoint=midpoint,
-            audio_embeddings=audio
-        )
-        midprobs = F.softmax(middle_logits, dim=-1)
-        midpreds = midprobs
-        if self.hard:
-            midpreds = F.one_hot(middle_logits.argmax(dim=-1), self.vocab_size).float()
-        mapped_interpolant = state * i_start_point + pred * midpreds
-        with torch.no_grad():
-            end_logits = self.two_time_denoiser(
-                x_t=mapped_interpolant,
-                startpoint=midpoint,
-                endpoint=endpoint,
-                audio_embeddings=audio
-            )
-            endpreds = F.softmax(end_logits, dim=-1)
-            distillation_logits = weighting * midpreds + (1.0 - weighting) * endpreds
-            distillation_logits = distillation_logits.detach()
-        start_to_end_logits = self.two_time_denoiser(
+        # One forward for the whole batch, at each row's own (s, t). On diagonal rows s == t,
+        # so the same call is the one-step prediction there (algo.py:1306).
+        student_logits = self.two_time_denoiser(
             x_t=i_start_point,
             startpoint=startpoint,
             endpoint=endpoint,
-            audio_embeddings=audio
+            audio_embeddings=audio,
         )
-        off_diagonal_loss = -torch.sum(
-            distillation_logits * F.log_softmax(start_to_end_logits, dim=-1), dim=-1
+        student_logprobs = F.log_softmax(student_logits, dim=-1)
+
+        is_diagonal = groups == 0
+        idx_diag = is_diagonal.nonzero(as_tuple=True)[0]
+        idx_offdiag = (~is_diagonal).nonzero(as_tuple=True)[0]
+
+        # Each row contributes exactly one term, so the split is also the weighting.
+        per_token = torch.zeros_like(tokens, dtype=student_logits.dtype)
+
+        with torch.no_grad():
+            teacher_target = F.softmax(
+                self.denoiser(
+                    x_t=i_start_point[idx_diag],
+                    time=startpoint[idx_diag],
+                    audio_embeddings=audio[idx_diag],
+                ),
+                dim=-1,
+            )
+        per_token[idx_diag] = -torch.sum(
+            teacher_target * student_logprobs[idx_diag], dim=-1
         )
-        out["off_diagonal_loss"] = {
-            "loss": off_diagonal_loss.mean(),
-            "loss_per_seq": off_diagonal_loss,
-            "pred_ids": start_to_end_logits.argmax(dim=-1),
-        }
 
-        loss = out["diagonal_loss"]["loss"] + out["off_diagonal_loss"]["loss"]
+        with torch.no_grad():
+            x_s = i_start_point[idx_offdiag]
+            audio_od = audio[idx_offdiag]
+            mid_logits = self.two_time_denoiser(
+                x_t=x_s,
+                startpoint=startpoint[idx_offdiag],
+                endpoint=midpoint[idx_offdiag],
+                audio_embeddings=audio_od,
+            )
 
-        return loss, out, startpoint, midpoint, endpoint, weighting
+            if self.hard:
+                d_su = F.one_hot(
+                    mid_logits.argmax(dim=-1), self.vocab_size
+                ).to(mid_logits.dtype)
+            else:
+                d_su = F.softmax(mid_logits, dim=-1)
 
-    def sequence_ce(self, logits: torch.Tensor, tokens: torch.Tensor) -> torch.Tensor:
-        """(B,) cross-entropy, one value per row instead of a batch scalar."""
-        b, _, vocab_size = logits.shape
-        per_token = F.cross_entropy(
-            logits.reshape(-1, vocab_size), tokens.reshape(-1), reduction="none"
-        ).view(b, -1)
+            x_su = state[idx_offdiag] * x_s + pred[idx_offdiag] * d_su
+            d_ut = F.softmax(
+                self.two_time_denoiser(
+                    x_t=x_su,
+                    startpoint=midpoint[idx_offdiag],
+                    endpoint=endpoint[idx_offdiag],
+                    audio_embeddings=audio_od,
+                ),
+                dim=-1,
+            )
+            w = weighting[idx_offdiag]
+            rollout_target = w * d_su + (1.0 - w) * d_ut
+
+        per_token[idx_offdiag] = -torch.sum(
+            rollout_target * student_logprobs[idx_offdiag], dim=-1
+        )
+
         weights = self.token_weights(tokens)
         if weights is None:
-            return per_token.mean(dim=1)
-        return (per_token * weights).sum(dim=1) / weights.sum(dim=1).clamp(min=1e-8)
+            per_seq = per_token.mean(dim=1)
+        else:
+            per_seq = (per_token * weights).sum(dim=1) / weights.sum(dim=1).clamp(min=1e-8)
+
+        out["diagonal"] = {
+            "loss": per_seq[idx_diag].mean() if idx_diag.numel() else per_seq.new_zeros(()),
+            "n": idx_diag.numel(),
+        }
+        out["offdiag"] = {
+            "loss": (
+                per_seq[idx_offdiag].mean()
+                if idx_offdiag.numel()
+                else per_seq.new_zeros(())
+            ),
+            "n": idx_offdiag.numel(),
+        }
+        loss = per_seq.mean()
+
+        return loss, out, startpoint, midpoint, endpoint, weighting
 
     def token_weights(self, tokens: torch.Tensor) -> torch.Tensor | None:
         """(B, L) loss weights, or None when every position counts the same.
@@ -318,12 +370,26 @@ class FlowMapping(MetricReporting, pl.LightningModule):
 
         Every denominator is clamped: `step_size` can be 0, which puts u on top of s and
         makes both (t - s) and (u - s) vanish.
+
+        Rows are assigned to one of three regimes by `distill.split`, and the times are
+        overwritten accordingly — `s = t` on the diagonal, `s = 0, t = 1` on the boundary.
+        The assignment is a fresh permutation each step, so a given utterance is not pinned
+        to one regime for the whole run.
         """
-        start_point = torch.rand(batch_size, device=self.device)
-        step_size = (1.0 - start_point) * torch.rand(batch_size, device=self.device)
-        end_point = start_point + step_size
-        # TODO(stage 2): FMLM takes the midpoint in tau and only then maps to real time, so
-        # the three are not equally spaced in t. Here they are, which is a different split.
+        groups = self.assign_groups(batch_size)
+
+        gap = torch.rand(batch_size, device=self.device)
+        start_point = torch.rand(batch_size, device=self.device) * (1.0 - gap)
+        end_point = start_point + gap
+
+        diagonal = torch.rand(batch_size, device=self.device)
+        start_point = torch.where(groups == 0, diagonal, start_point)
+        end_point = torch.where(groups == 0, diagonal, end_point)
+        start_point = torch.where(groups == 1, torch.zeros_like(start_point), start_point)
+        end_point = torch.where(groups == 1, torch.ones_like(end_point), end_point)
+
+        # TODO(stage 3): FMLM takes the midpoint in tau and only then maps to real time, so
+        # their three are not equally spaced in t. Ours are, which is a different split.
         mid_point = (start_point + end_point) / 2.0
 
         s, u, t = (x[:, None, None] for x in (start_point, mid_point, end_point))
@@ -331,7 +397,33 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         state = (1.0 - u) / remaining
         pred = (u - s) / remaining
         weighting = ((1.0 - t) * (u - s)) / ((1.0 - u) * (t - s)).clamp_min(EPS)
-        return start_point, mid_point, end_point, state, pred, weighting
+        return start_point, mid_point, end_point, state, pred, weighting, groups
+
+    def assign_groups(self, batch_size: int) -> torch.Tensor:
+        """(B,) group id per row — 0 diagonal, 1 boundary, 2 off-diagonal.
+
+        Built by laying out the counts and permuting, as FMLM does (algo.py:1231-1241),
+        rather than by sampling each row independently: that way the realised proportions
+        match `distill.split` exactly at every batch size instead of only in expectation,
+        which matters when the boundary share is 1.6% and the batch is 128.
+
+        The counts are floors of the cumulative fractions, so rounding never accumulates and
+        the last group absorbs the remainder. A group can still come out empty on a small
+        batch, which `map_step` has to tolerate.
+        """
+        counts, prev, cumulative = [], 0, 0.0
+        for frac in self.split[:-1]:
+            cumulative += frac
+            upto = min(round(batch_size * cumulative), batch_size)
+            counts.append(max(0, upto - prev))
+            prev += counts[-1]
+        counts.append(batch_size - prev)
+
+        groups = torch.repeat_interleave(
+            torch.arange(len(counts), device=self.device),
+            torch.tensor(counts, device=self.device),
+        )
+        return groups[torch.randperm(batch_size, device=self.device)]
 
     def make_interpolant(
         self, x1: torch.Tensor, t: torch.Tensor, mu: torch.Tensor | None = None
