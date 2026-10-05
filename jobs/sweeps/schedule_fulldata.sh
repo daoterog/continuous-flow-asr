@@ -58,10 +58,26 @@ EVAL_BATCH="${EVAL_BATCH:-512}"
 # refresh is that successive curves are independent samples. 16384 is 58% of it.
 PROBE_N="${PROBE_N:-8192}"
 
-# skilled-lake-22: 66,600 steps in 3.6 h is 5.1 steps/s at batch 128. Sized a little under
-# that, because fiery-resonance-37 took 20.5 h for the same work at batch 64 when GPFS was
-# contended, and ten jobs queued together is exactly when that happens.
-export STEPS_PER_SEC="${STEPS_PER_SEC:-4}"
+# Pinned rather than left to submit/train.sh's estimator, which would also rebuild the
+# dataset on the login node once per job to count steps.
+#
+# One job is 300 epochs x 222 steps at batch 128 = 28,416 utts/epoch. batch/train.sh puts
+# GPFS at 219 utts/s cold and 657 warm, i.e. 130 s/epoch against 43 — and 43.3 s is exactly
+# what skilled-lake-22 averaged over 300 epochs, so the warm figure is the steady state and
+# the 81 s/epoch the probe_chunk runs showed was six epochs of a cache still filling.
+#
+#   ~10 cold epochs + 290 warm                     3.84 h
+#   + train WER bins, 9.2 ms/batch                 0.17 h
+#   + probe 8192 at chunk 512: 5.29 s a refresh    0.44 h at e1, 0.04 h at e10, 0 otherwise
+#   -------------------------------------------------------
+#   4.0 h for uniform and sim-e5, 4.5 h for meas-e1
+#
+# 8 h is ~1.8x that, which covers a job running at half speed. Generous on purpose: the
+# two directions are not symmetric. Over-request and the only cost is queue priority.
+# Under-request and SLURM signals at the limit, Lightning's handler exits cleanly, and the
+# run appears FINISHED in wandb at epoch 180 — a truncated run that reads as a result.
+# fiery-resonance-37 is the precedent for the slow case: 20.5 h for work estimated at 5.
+export WALLTIME="${WALLTIME:-06:00:00}"
 
 # Held fixed at skilled-lake-22's values so the control is a real reproduction.
 COMMON=(
