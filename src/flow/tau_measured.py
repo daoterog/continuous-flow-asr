@@ -8,6 +8,8 @@ import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig
 
+from src.flow.monotone import centered_isotonic
+from src.flow.recovery import recovery_curve
 from src.flow.schedule import make_tau_inverse
 from src.flow.tau_base import TauScheduler
 
@@ -65,33 +67,27 @@ class MeasuredTau(TauScheduler):
         """Sweep, bin, invert."""
         if datamodule is None:
             return None, "tau refresh skipped: no datamodule to sweep"
-        ts, rec = self.curve(model, datamodule)
+        t, hits, input_hits, reals = self._sweep(model, self._draw_batch(datamodule))
         self._refreshes += 1
 
-        if ts.size == 0:
-            return None, "tau refresh skipped: the sweep filled no bins"
+        ts, rec = self.monotone_curve(t, hits, reals)
         best = float(rec.max())
         if best < self.min_recovery:
             return None, (
                 f"tau refresh skipped: the model recovers at most {best:.3f} of tokens "
                 f"across a uniform sweep, under the {self.min_recovery} needed to anchor tau"
             )
-        # Both ends come out on their own: p_e0 is the lowest bin's own error, so tau
-        # starts at 0 there, and the highest bin sits just under 1. Nothing to anchor.
-        return make_tau_inverse(
-            ts, rec, model.vocab_size, p_e0=float(1.0 - rec[0])
-        ), None
-
-    def curve(
-        self, model: "FlowMatching", datamodule: "AudioFeatureDataModule"
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """(mean t, recovery) per populated bin, from one fresh uniform sweep.
-
-        Public because it is the honest P_e curve, useful on its own for inspecting a
-        checkpoint — see scripts/schedule/measure_tau_bias.py.
-        """
-        t, hits, reals = self._sweep(model, self._draw_batch(datamodule))
-        return self._bin(t, hits, reals)
+        tau_inverse = make_tau_inverse(
+            ts, rec, model.vocab_size, flat_eps=0.0, p_e0=float(1.0 - rec[0])
+        )
+        span = float(tau_inverse(1.0)) - float(tau_inverse(0.0))
+        if span <= 0.0:
+            return None, (
+                f"tau refresh skipped: the model recovers {rec.min():.3f}-{rec.max():.3f} "
+                f"of tokens with no trend across t, so tau^-1 is constant at "
+                f"{float(tau_inverse(0.0)):.4f} and carries no schedule"
+            )
+        return tau_inverse, None
 
     def _draw_batch(self, datamodule: "AudioFeatureDataModule") -> dict:
         """A fresh random subset, different on every refresh."""
@@ -104,8 +100,8 @@ class MeasuredTau(TauScheduler):
     @torch.no_grad()
     def _sweep(
         self, model: "FlowMatching", batch: dict, chunk: int = 32
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """(t, tokens recovered, real tokens) per utterance, at t drawn uniformly."""
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """(t, denoiser hits, interpolant hits, real tokens) per utterance, at t ~ U[0, 1]."""
         audio_all = batch["audio"]
         tokens_all = batch["tokens"]
         gen = torch.Generator(device="cpu").manual_seed(self.seed + self._refreshes)
@@ -113,7 +109,7 @@ class MeasuredTau(TauScheduler):
 
         was_training = model.training
         model.eval()
-        ts, hits, reals = [], [], []
+        ts, hits, input_hits, reals = [], [], [], []
         try:
             for i in range(0, tokens_all.size(0), chunk):
                 audio = audio_all[i : i + chunk].to(model.device).float()
@@ -132,26 +128,36 @@ class MeasuredTau(TauScheduler):
                 real = tokens != model.pad_id
                 ts.append(t.cpu().numpy())
                 hits.append(((pred == tokens) & real).sum(dim=1).cpu().numpy())
+                input_hits.append(
+                    ((i_t.argmax(dim=-1) == tokens) & real).sum(dim=1).cpu().numpy()
+                )
                 reals.append(real.sum(dim=1).cpu().numpy())
         finally:
             model.train(was_training)
-        return np.concatenate(ts), np.concatenate(hits), np.concatenate(reals)
+        return (
+            np.concatenate(ts),
+            np.concatenate(hits),
+            np.concatenate(input_hits),
+            np.concatenate(reals),
+        )
 
-    def _bin(
+    def monotone_curve(
         self, t: np.ndarray, hits: np.ndarray, reals: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Uniform bins over [0, 1] -> (mean t, recovery) for the populated ones.
+        """(t, recovery) knots for tau, fitted to the raw sweep with no binning at all.
 
-        Recovery is pooled over tokens, not averaged over utterances, so a long utterance
-        counts for more than a short one — the same weighting `BinnedTokenError` uses.
+        One observation per utterance — its own recovery, weighted by how many real tokens
+        it carries, which makes the centered isotonic fit the binomial MLE. Binning first
+        would pool neighbours into a fixed width chosen in advance; this lets the fit pool
+        exactly as far as the data supports and no further, so `num_bins` stops being a
+        precision knob for the schedule and stays only for the metrics' histograms.
         """
-        n = int(self.cfg.num_bins)
-        edges = np.linspace(0.0, 1.0, n + 1)
-        idx = np.clip(np.searchsorted(edges[1:-1], t, side="right"), 0, n - 1)
-        centres, recovery = [], []
-        for b in range(n):
-            m = idx == b
-            if m.any() and reals[m].sum() > 0:
-                centres.append(float(t[m].mean()))
-                recovery.append(float(hits[m].sum() / reals[m].sum()))
-        return np.asarray(centres), np.asarray(recovery)
+        order = np.argsort(t)
+        t_sorted = t[order].astype(np.float64)
+        weights = reals[order].astype(np.float64)
+        # Utterances that are all padding carry no reading; give them zero weight rather
+        # than dividing by zero to get one.
+        recovery = np.divide(
+            hits[order], weights, out=np.zeros_like(weights), where=weights > 0
+        )
+        return centered_isotonic(t_sorted, recovery, weights)
