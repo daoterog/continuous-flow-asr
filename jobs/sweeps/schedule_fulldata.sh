@@ -39,13 +39,24 @@ SEEDS="${SEEDS:-0 1}"
 EPOCHS="${EPOCHS:-300}"
 BATCH="${BATCH:-128}"
 
-# Val, test and the measured probe run under no_grad, so a larger batch fits than training
-# takes. It does not go faster for it: measured on a 3060, one probe is flat from chunk 32
-# to 128 and slower above, because the (B, canvas_len, vocab_size) field already saturates
-# the card. Unmeasured on an A100 — until it is, follow BATCH rather than guess, so the
-# cadence arms are not separated by an untested throughput change.
-# Worth its own cheap job: ABLATE_EVAL_BATCH=1 below.
-EVAL_BATCH="${EVAL_BATCH:-${BATCH}}"
+# Val, test and the measured probe run under no_grad, so a larger batch both fits and pays.
+# Measured on the A100 (jobs/batch/bench_probe.sh): 0.836 ms/utt at chunk 32 against
+# 0.645 at 512, 24% off, flat above. 512 takes all but 1% of that for 5.7 GiB, which sits
+# alongside training; 2048 wants 22 GiB of the card's 40 to save another 1%.
+EVAL_BATCH="${EVAL_BATCH:-512}"
+
+# 2048 was chosen for a binned estimator that needed 150 bins kept populated. Centered
+# isotonic pools adaptively, so the constraint is gone and precision is 1/sqrt(n) with no
+# plateau: against the closed-form curve, 8192 halves the error of 2048 at t0
+# (0.0015 against 0.0077) and is 1.46x better overall.
+#
+# Affordable because the probe costs exactly what it forwards — 5.29 s at chunk 512, 6.5%
+# of an 81 s epoch, so 26 min added to a 300-epoch run at e1 and 2.6 min at e10. Held the
+# same across every arm, so it improves all of them rather than separating any.
+#
+# Not higher: 8192 is 29% of the ~28,416-utterance split, and the point of redrawing each
+# refresh is that successive curves are independent samples. 16384 is 58% of it.
+PROBE_N="${PROBE_N:-8192}"
 
 # skilled-lake-22: 66,600 steps in 3.6 h is 5.1 steps/s at batch 128. Sized a little under
 # that, because fiery-resonance-37 took 20.5 h for the same work at batch 64 when GPFS was
@@ -57,6 +68,7 @@ COMMON=(
     "data.subset_n.train=null"
     "data.batch_size=${BATCH}"
     "data.eval_batch_size=${EVAL_BATCH}"
+    "schedule.probe_n_utts=${PROBE_N}"
     "train.num_epochs=${EPOCHS}"
     "train.denoiser_lr=0.002"
     "train.audio_decoder_lr=0.001"

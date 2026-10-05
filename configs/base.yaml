@@ -40,18 +40,23 @@ data:
   batch_size: 32
   # Batch for val, test and the measured tau probe. All three run under no_grad, so none
   # of the activations that size the training batch are allocated and a much larger batch
-  # fits — but fitting is not the same as being faster. Measured on a 3060 (6 GiB), one
-  # 2048-utterance probe at the 512x8 denoiser:
+  # both fits and pays. On an A100-40GB, one probe at the 512x8 denoiser
+  # (scripts/diagnostics/bench_probe.py):
   #
-  #     chunk    32     64    128    256    512
-  #     time    5.12   5.08   5.16   6.14   177      seconds
-  #     peak    0.66   1.00   1.67   3.02   5.73     GiB
+  #     chunk      32    128    256    512   1024   2048
+  #     ms/utt  0.836  0.688  0.660  0.645  0.638  0.636
+  #     peak     0.67   1.68   3.03   5.74  11.15  21.96    GiB
   #
-  # Flat to 128 — the (B, canvas_len, vocab_size) field is large enough that the card is
-  # already saturated at 32 — then slower, and off a cliff at 512 where the card starts
-  # spilling. So this buys headroom, not throughput, and the probe's cost really is
-  # proportional to the utterances it forwards. Unmeasured on an A100, which has far more
-  # to saturate; null follows batch_size until that is measured.
+  # 24% off between 32 and 512, then flat — the card has more to saturate than a 32-wide
+  # (B, canvas_len, vocab_size) field keeps busy. 512 takes all but 1% of that for 5.7 GiB,
+  # which sits alongside training; 2048 wants 22 GiB to save a further 1%.
+  #
+  # ms/utt is identical at every probe_n from 2,048 to 32,768 — 1,024 loop iterations cost
+  # no more per utterance than 2 — so the probe costs exactly what it forwards and
+  # `schedule.probe_n_utts` can be chosen on precision alone.
+  #
+  # null follows batch_size, which is the portable default: 5.7 GiB does not coexist with
+  # training on a 6 GiB laptop card. Set it explicitly on the cluster.
   eval_batch_size: null
   # null means one epoch is one pass over the training subset. Set it to make an epoch a
   # fixed number of steps instead, sampling with replacement — worth it on small subsets,
