@@ -71,7 +71,12 @@ echo "config    : ${CONFIG}"
 echo "overrides : ${OVERRIDES:-(none)}"
 echo "walltime  : ${WALLTIME}"
 
+# Through the environment rather than as `--export=ALL,KEY=value`: sbatch splits that list
+# on commas, so an override such as `sampling.log_methods=[interpolant,euler]` would reach
+# the job cut off at `[interpolant`.
+export TRAIN_CONFIG="${CONFIG}"
+export TRAIN_OVERRIDES="${OVERRIDES}"
 sbatch \
     --time="${WALLTIME}" \
-    --export=ALL,TRAIN_CONFIG="${CONFIG}",TRAIN_OVERRIDES="${OVERRIDES}" \
+    --export=ALL \
     "${BATCH_DIR}/train.sh"
