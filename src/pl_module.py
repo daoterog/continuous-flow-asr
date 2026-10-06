@@ -25,6 +25,31 @@ from src.reporting import MetricReporting
 
 # `sampling.method` selects one of these.
 SAMPLERS = {"interpolant": sample_tokens, "euler": sample_tokens_euler}
+# `flow.time_input` selects what the denoiser's time embedding is fed: the flow time t the
+# interpolant is built at, or the uniform draw u that t = tau^-1(u) came from.
+TIME_INPUTS = ("reparametrized", "uniform")
+# `flow.loss_reduction` selects how per-token cross-entropy becomes the batch objective.
+LOSS_REDUCTIONS = ("sequence", "token")
+
+
+def token_weights(
+    tokens: torch.Tensor, pad_id: int, floor: float, decay: float
+) -> torch.Tensor | None:
+    """(B, L) loss weights for `FlowMatching.token_weights`, which documents the formula.
+
+    A free function so the diagnostics can draw the exact weights training uses.
+    """
+    if floor == 1.0:
+        return None
+    is_pad = tokens == pad_id
+    if decay <= 0.0:
+        return torch.where(is_pad, tokens.new_tensor(floor, dtype=torch.float),
+                        tokens.new_tensor(1.0, dtype=torch.float))
+    n_real = (~is_pad).sum(dim=1, keepdim=True)
+    pos = torch.arange(tokens.size(1), device=tokens.device).expand_as(tokens)
+    distance = (pos - n_real + 1).clamp(min=1).float()
+    decayed = floor + (1.0 - floor) * torch.exp(-(distance - 1.0) / decay)
+    return torch.where(is_pad, decayed, torch.ones_like(decayed))
 
 
 class FlowMatching(MetricReporting, pl.LightningModule):
@@ -90,6 +115,19 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         if not 0.0 <= self.pad_loss_weight <= 1.0:
             raise ValueError(
                 f"flow.pad_loss_weight must be in [0, 1], got {self.pad_loss_weight}"
+            )
+
+        self.stratified_t = bool(flow.get("stratified_t", False))
+        self.loss_reduction = str(flow.get("loss_reduction", "sequence"))
+        if self.loss_reduction not in LOSS_REDUCTIONS:
+            raise ValueError(
+                f"flow.loss_reduction must be one of {LOSS_REDUCTIONS}, "
+                f"got {self.loss_reduction!r}"
+            )
+        self.time_input = str(flow.get("time_input", "reparametrized"))
+        if self.time_input not in TIME_INPUTS:
+            raise ValueError(
+                f"flow.time_input must be one of {TIME_INPUTS}, got {self.time_input!r}"
             )
 
         if self.gamma_fn is not None and self.mu_nn is None:
@@ -176,21 +214,24 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         if self.mu_nn is not None:
             mu_logits = self.mu_nn(audio)
             mu = F.softmax(mu_logits, dim=-1)
-            mu_loss_per_seq = self.sequence_ce(mu_logits, tokens)
+            mu_loss, mu_loss_per_seq = self.sequence_ce(mu_logits, tokens)
             out["mu"] = {
-                "loss": mu_loss_per_seq.mean(),
+                "loss": mu_loss,
                 "loss_per_seq": mu_loss_per_seq,
                 "pred_ids": mu_logits.argmax(dim=-1),
             }
 
-        u = torch.rand(tokens.size(0), device=self.device)
+        u = self.draw_u(tokens.size(0))
         t = u if self.sample_t_fn is None else self.sample_t_fn(u)
         i_t = self.make_interpolant(x1=x1, t=t, mu=mu)
 
-        logits = self.denoiser(x_t=i_t, time=t, audio_embeddings=audio)
-        d_loss_per_seq = self.sequence_ce(logits, tokens)
+        # `uniform` hands the denoiser the draw itself, as FLM does: at large V the t that
+        # matters sits in a narrow band near 1, where a sinusoidal embedding barely moves.
+        time = u if self.time_input == "uniform" else t
+        logits = self.denoiser(x_t=i_t, time=time, audio_embeddings=audio)
+        d_loss, d_loss_per_seq = self.sequence_ce(logits, tokens)
         out["denoiser"] = {
-            "loss": d_loss_per_seq.mean(),
+            "loss": d_loss,
             "loss_per_seq": d_loss_per_seq,
             "pred_ids": logits.argmax(dim=-1),
         }
@@ -203,16 +244,30 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             loss = loss + self.mu_loss_weight * out["mu"]["loss"]
         return loss, out, t
 
-    def sequence_ce(self, logits: torch.Tensor, tokens: torch.Tensor) -> torch.Tensor:
-        """(B,) cross-entropy, one value per row instead of a batch scalar."""
+    def sequence_ce(
+        self, logits: torch.Tensor, tokens: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """The batch objective, and the (B,) per-row cross-entropy the metrics bin.
+
+        `flow.loss_reduction` decides the objective:
+          * `sequence` — mean of the per-row weighted means. Every utterance weighs the
+            same, so with pads down-weighted a short one's real tokens each count more.
+          * `token` — one weighted mean over every token in the batch, as FLM takes it.
+        The two are identical while every position weighs 1: every row is canvas_len long.
+        """
         b, _, vocab_size = logits.shape
         per_token = F.cross_entropy(
             logits.reshape(-1, vocab_size), tokens.reshape(-1), reduction="none"
         ).view(b, -1)
         weights = self.token_weights(tokens)
         if weights is None:
-            return per_token.mean(dim=1)
-        return (per_token * weights).sum(dim=1) / weights.sum(dim=1).clamp(min=1e-8)
+            per_seq = per_token.mean(dim=1)
+            return per_seq.mean(), per_seq
+        weighted = per_token * weights
+        per_seq = weighted.sum(dim=1) / weights.sum(dim=1).clamp(min=1e-8)
+        if self.loss_reduction == "token":
+            return weighted.sum() / weights.sum().clamp(min=1e-8), per_seq
+        return per_seq.mean(), per_seq
 
     def token_weights(self, tokens: torch.Tensor) -> torch.Tensor | None:
         """(B, L) loss weights, or None when every position counts the same.
@@ -225,26 +280,27 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         (`pad_decay` 0 or null gives that floor flat). The first pad is the whole length
         decision — a model that never stops scores over 100% WER on insertions — while a
         pad 150 positions out is free.
-
-        Lowering the floor also shrinks the weighted mean's denominator, scaling each real
-        token by up to canvas_len / n_real ~ 3.3, so part of any gain is an effective
-        learning-rate rise and a sweep over this has to vary the learning rate too.
-
-        Padding is assumed to be a contiguous suffix, which is what `collate` produces.
         """
-        floor = float(self.pad_loss_weight)
-        decay = float(self.cfg.flow.get("pad_decay", 0.0) or 0.0)
-        if floor == 1.0:
-            return None
-        is_pad = tokens == self.pad_id
-        if decay <= 0.0:
-            return torch.where(is_pad, tokens.new_tensor(floor, dtype=torch.float),
-                            tokens.new_tensor(1.0, dtype=torch.float))
-        n_real = (~is_pad).sum(dim=1, keepdim=True)
-        pos = torch.arange(tokens.size(1), device=tokens.device).expand_as(tokens)
-        distance = (pos - n_real + 1).clamp(min=1).float()
-        decayed = floor + (1.0 - floor) * torch.exp(-(distance - 1.0) / decay)
-        return torch.where(is_pad, decayed, torch.ones_like(decayed))
+        return token_weights(
+            tokens,
+            self.pad_id,
+            float(self.pad_loss_weight),
+            float(self.cfg.flow.get("pad_decay", 0.0) or 0.0),
+        )
+
+    def draw_u(self, n: int) -> torch.Tensor:
+        """(n,) uniform draws, one per row, before tau^-1 turns them into flow times.
+
+        `flow.stratified_t` puts exactly one draw in each slice [i/n, (i+1)/n), shuffled
+        across rows. FLM calls this antithetic sampling. It isn't: antithetic sampling pairs
+        u with 1-u. Either way, it stops a batch from piling up on one side of a steep tau.
+        """
+        u = torch.rand(n, device=self.device)
+        if not self.stratified_t:
+            return u
+        u = (u + torch.arange(n, device=self.device)) / n
+        return u[torch.randperm(n, device=self.device)]
+
 
     def make_interpolant(
         self, x1: torch.Tensor, t: torch.Tensor, mu: torch.Tensor | None = None
@@ -325,12 +381,17 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         num_steps: int,
         hard: bool = False,
         init_from_mu: bool | None = None,
+        method: str | None = None,
+        generator: torch.Generator | None = None,
     ) -> torch.Tensor:
         """Integrate from noise to (B, canvas_len) token ids for this batch of audio.
 
         init_from_mu seeds the first state's endpoint term with mu. The tau grid starts
         at the edge of the dead zone rather than at 0, so training's state there already
         carries beta(t0) * x1 and the sampler otherwise supplies nothing for it.
+
+        `method` overrides `sampling.method`. `generator` draws x0, so two methods given
+        generators seeded alike start from the same noise.
         """
         mu = None
         if self.mu_nn is not None:
@@ -340,12 +401,14 @@ class FlowMatching(MetricReporting, pl.LightningModule):
 
         if self.sample_t_fn is None:
             gen_grid = torch.linspace(0, 1, num_steps + 1).tolist()
+            u_grid = gen_grid
         else:
-            gen_grid = [float(t) for t in generation_grid(self.sample_t_fn, num_steps)]
+            gen_grid, u_grid = generation_grid(self.sample_t_fn, num_steps)
 
         # Algorithm 6 of the paper, or the equivalent-for-affine-gamma rebuild. They agree
         # exactly on linear and audio_cond and differ at O(h^2) on three_term.
-        method = str(self.cfg.get("sampling", {}).get("method", "interpolant"))
+        if method is None:
+            method = str(self.cfg.get("sampling", {}).get("method", "interpolant"))
         if method not in SAMPLERS:
             raise ValueError(
                 f"sampling.method must be one of {sorted(SAMPLERS)}, got {method!r}"
@@ -362,7 +425,9 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             mu,
             hard=hard,
             x1_init=mu if init_from_mu else None,
+            generator=generator,
             waypoint=self.waypoint,
+            time_grid=u_grid if self.time_input == "uniform" else None,
         )
 
     def configure_optimizers(self) -> dict:

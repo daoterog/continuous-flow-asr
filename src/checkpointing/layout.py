@@ -8,6 +8,8 @@ COMPONENTS = ("denoiser", "mu_nn")
 MANIFEST = "manifest.yaml"
 VOCAB_MAP = "vocab_map.pt"
 TRAINING_STATE = "training_state.pt"
+# tau^-1 as live when a variant was written, `tau_<variant>.npz`.
+TAU = "tau"
 
 def run_dir(run_id: str, save_dir: str | Path = "runs") -> Path:
     """`<save_dir>/<run_id>/components` — where a run of that wandb id wrote its parts."""

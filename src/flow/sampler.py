@@ -67,6 +67,24 @@ def drift(
     return velocity
 
 
+def denoiser_times(
+    times: list[float], time_grid: np.ndarray | list[float] | None
+) -> list[float]:
+    """The denoiser's time input at each grid point: `time_grid` when given, else t.
+
+    Under `flow.time_input: uniform` the denoiser was trained on the uniform draw u, not on
+    t = tau^-1(u), so the sampler hands it the u each grid point was built from.
+    """
+    if time_grid is None:
+        return times
+    inputs = [float(v) for v in time_grid]
+    if len(inputs) != len(times):
+        raise ValueError(
+            f"time_grid has {len(inputs)} points but the grid has {len(times)}"
+        )
+    return inputs
+
+
 @torch.no_grad()
 def sample_tokens(
     denoiser: torch.nn.Module,
@@ -82,8 +100,12 @@ def sample_tokens(
     x1_init: torch.Tensor | None = None,
     generator: torch.Generator | None = None,
     waypoint: float = 0.0,
+    time_grid: np.ndarray | list[float] | None = None,
 ) -> torch.Tensor:
     """Integrate from noise to (B, canvas_len) token ids.
+
+    `time_grid` is what the denoiser's time input reads at each point of `grid`; None
+    feeds it `grid` itself. See `denoiser_times`.
 
     `waypoint` is unused — this integrator never forms the drift, it rebuilds the
     interpolant from gamma_fn directly — and is accepted only so the two samplers share one
@@ -103,10 +125,11 @@ def sample_tokens(
         return out
 
     times = [float(t) for t in grid]
+    inputs = denoiser_times(times, time_grid)
     x_t = state(times[0], x1_init)
     logits = None
     for step, (t, t_next) in enumerate(pairwise(times)):
-        time = torch.full((batch,), t, device=audio.device, dtype=torch.float32)
+        time = torch.full((batch,), inputs[step], device=audio.device, dtype=torch.float32)
         logits = denoiser(x_t=x_t, time=time, audio_embeddings=audio)
         x1_hat = (
             F.one_hot(logits.argmax(dim=-1), vocab_size).to(logits.dtype)
@@ -137,8 +160,11 @@ def sample_tokens_euler(
     generator: torch.Generator | None = None,
     waypoint: float = 0.0,
     eps: float = 1e-5,
+    time_grid: np.ndarray | list[float] | None = None,
 ) -> torch.Tensor:
     """Algorithm 6: Euler-step the drift, then decode the final state.
+
+    `time_grid` as in `sample_tokens`.
 
     Differs from `sample_tokens` in both halves of the loop. The state is advanced by
     `x + (t_next - t) b` instead of being rebuilt from x0 at the new time, and the
@@ -158,8 +184,9 @@ def sample_tokens_euler(
     if gamma_fn is not None and mu is not None:
         x_t = x_t + gamma_fn(times[0]) * mu
 
-    for t, t_next in pairwise(times):
-        time = torch.full((batch,), t, device=audio.device, dtype=torch.float32)
+    inputs = denoiser_times(times, time_grid)
+    for step, (t, t_next) in enumerate(pairwise(times)):
+        time = torch.full((batch,), inputs[step], device=audio.device, dtype=torch.float32)
         logits = denoiser(x_t=x_t, time=time, audio_embeddings=audio)
         x1_hat = (
             F.one_hot(logits.argmax(dim=-1), vocab_size).to(logits.dtype)

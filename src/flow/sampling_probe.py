@@ -64,8 +64,19 @@ class SamplingProbe:
             self._batch = datamodule.collate_fn([subset[i] for i in range(n)])
         return self._batch
 
+    @property
+    def methods(self) -> list[str]:
+        """The integrators scored each sampling epoch: `log_methods`, or just `method`."""
+        listed = self.cfg.get("log_methods")
+        if listed:
+            return [str(m) for m in listed]
+        return [str(self.cfg.get("method", "interpolant"))]
+
     def score(
-        self, model: "FlowMatching", datamodule: "AudioFeatureDataModule"
+        self,
+        model: "FlowMatching",
+        datamodule: "AudioFeatureDataModule",
+        method: str | None = None,
     ) -> tuple[float, float, int]:
         """(WER %, token error, utterances scored) for a full integration from noise.
 
@@ -73,6 +84,9 @@ class SamplingProbe:
         alive at once, so the batch that trains is not always one that can be sampled.
         Eval mode is set and restored around the pass: dropout during sampling would make
         the number noisier than the model.
+
+        x0 comes from a generator seeded the same on every call, so two methods scored in
+        the same epoch integrate the same noise and differ only by the integrator.
         """
         batch = self.batch(datamodule)
         was_training = model.training
@@ -82,12 +96,16 @@ class SamplingProbe:
             num_steps = int(self.cfg.get("num_steps", 16))
             hard = bool(self.cfg.get("hard", False))
             tokens = batch["tokens"].to(model.device)
+            generator = torch.Generator(device=model.device)
+            generator.manual_seed(int(self.cfg.get("seed", 0)))
             pred = torch.cat(
                 [
                     model.sample(
                         batch["audio"][i : i + chunk].to(model.device).float(),
                         num_steps,
                         hard=hard,
+                        method=method,
+                        generator=generator,
                     )
                     for i in range(0, batch["audio"].size(0), chunk)
                 ]

@@ -175,6 +175,21 @@ def make_tau_inverse(
 
     keep = np.concatenate([np.diff(tau) > 0, [True]])  # last index of every flat run
     tau_k, t_k = tau[keep], ts[keep]
+    tau_inverse = tau_inverse_from_knots(tau_k, t_k)
+    tau_inverse.tau = tau
+    tau_inverse.ts = ts
+    return tau_inverse
+
+
+def tau_inverse_from_knots(tau_k: np.ndarray, t_k: np.ndarray) -> Callable:
+    """t = tau^-1(u) from its knots alone: piecewise-linear, `tau_k` strictly increasing.
+
+    What `make_tau_inverse` builds once it has the knots, split out so a curve saved with
+    a checkpoint (`save_tau`) can be rebuilt exactly, including a measured one that no
+    config could reproduce. The returned callable carries `knots`.
+    """
+    tau_k = np.asarray(tau_k, dtype=np.float64)
+    t_k = np.asarray(t_k, dtype=np.float64)
     knots: dict[tuple, tuple[torch.Tensor, torch.Tensor]] = {}  # uploaded once per device
 
     def _knots_on(device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
@@ -205,8 +220,6 @@ def make_tau_inverse(
         w = ((x - lo) / (hi - lo).clamp_min(torch.finfo(torch.float64).tiny)).clamp(0, 1)
         return torch.lerp(yk[idx - 1], yk[idx], w).to(u.dtype)
 
-    tau_inverse.tau = tau
-    tau_inverse.ts = ts
     tau_inverse.knots = (tau_k, t_k)
     return tau_inverse
 
@@ -248,8 +261,14 @@ def exact_tau_inverse(
     )
 
 
-def generation_grid(tau_inverse: Callable, num_steps: int) -> np.ndarray:
-    """t_n = tau^-1(n/N) — the sampler's schedule, uniform in tau rather than in t.
+def generation_grid(
+    tau_inverse: Callable, num_steps: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """(t_n, u_n) with t_n = tau^-1(u_n), u_n = n/N — the sampler's schedule, uniform in tau.
+
+    Both are returned because a denoiser trained with `flow.time_input: uniform` is fed
+    u_n while the state is still stepped in t_n, and u_n is what this starts from — no need
+    to map t back.
 
     Training and generation have to share this. Once the model is trained under the
     reparameterization it has seen almost nothing below the dead zone, so integrating on
@@ -264,8 +283,11 @@ def generation_grid(tau_inverse: Callable, num_steps: int) -> np.ndarray:
     This is `schedule_bin_edges(tau_inverse, num_steps)` up to that collapse: the two share
     a construction, but a bin may legitimately be empty while a step may not be a no-op.
     """
-    grid = np.asarray(tau_inverse(np.linspace(0.0, 1.0, num_steps + 1)), dtype=np.float64)
-    grid = grid[np.concatenate([[True], np.diff(grid) > 0])]
+    u = np.linspace(0.0, 1.0, num_steps + 1)
+    grid = np.asarray(tau_inverse(u), dtype=np.float64)
+    # Of each run of repeated t, the first u is the one kept.
+    keep = np.concatenate([[True], np.diff(grid) > 0])
+    grid, u = grid[keep], u[keep]
     if grid.size < 2:  # a constant tau leaves nothing to integrate along
-        return np.array([float(grid[0]) if grid.size else 0.0, 1.0])
-    return grid
+        return np.array([float(grid[0]) if grid.size else 0.0, 1.0]), np.array([0.0, 1.0])
+    return grid, u

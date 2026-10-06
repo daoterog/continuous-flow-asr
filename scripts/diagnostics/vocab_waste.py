@@ -25,6 +25,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -78,6 +79,20 @@ def corpus_ids(dm: object, vocab_size: int) -> torch.Tensor:
     return mask
 
 
+def denoiser_time(model, t: float) -> float:
+    """The denoiser's time input at flow time t.
+
+    A `flow.time_input: uniform` model was trained on the draw u with t = tau^-1(u), so a
+    probe at a fixed t has to read u back off the curve's knots. Training never needs this
+    direction; only a diagnostic that picks t first does.
+    """
+    tau_inverse = model.sample_t_fn
+    if model.time_input != "uniform" or tau_inverse is None:
+        return float(t)
+    tau_k, t_k = tau_inverse.knots
+    return float(np.interp(t, t_k, tau_k))
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Report out-of-corpus mass and the token error masking would recover."""
     args = parse_args(argv)
@@ -121,17 +136,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         batches.append({k: v.to(device) for k, v in b.items()})
 
     for t_val in args.times:
+        time_val = denoiser_time(model, t_val)
         mass, arg_out, pe, pe_masked, n = 0.0, 0.0, 0.0, 0.0, 0
         for b in batches:
             tokens, audio = b["tokens"], b["audio"].float()
             t = torch.full((tokens.size(0),), t_val, device=device)
+            time = torch.full((tokens.size(0),), time_val, device=device)
             with torch.no_grad():
                 mu = None
                 if model.mu_nn is not None:
                     mu = F.softmax(model.mu_nn(audio), dim=-1)
                 x1 = F.one_hot(tokens, dm.vocab_size).float()
                 i_t = model.make_interpolant(x1=x1, t=t, mu=mu)
-                logits = model.denoiser(x_t=i_t, time=t, audio_embeddings=audio)
+                logits = model.denoiser(x_t=i_t, time=time, audio_embeddings=audio)
                 probs = logits.softmax(-1)
                 mass += float(probs[..., ~reachable].sum(-1).mean())
                 pred = logits.argmax(-1)

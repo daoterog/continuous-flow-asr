@@ -27,6 +27,7 @@ from src.checkpointing import (
     load_components,
     load_manifest,
     load_state_into,
+    load_tau,
 )
 from src.data import AudioFeatureDataModule
 from src.metrics import ids_to_text, score_samples
@@ -180,6 +181,16 @@ def _model_from_components(
     model = _build(cfg, dm)
     for name, sub in built.items():
         getattr(model, name).load_state_dict(sub.state_dict(), strict=True)
+    # The curve these weights were trained against, exactly, where the run saved one. The
+    # mu_accuracy_final rebuild is only the fallback for runs from before it did: it
+    # approximates a simulated curve and cannot reproduce a measured one at all.
+    saved = load_tau(args.components, variant=args.variant)
+    if saved is not None:
+        model.sample_t_fn = saved
+        print(f"tau from the run's saved tau_{args.variant}.npz")
+    elif model.time_input == "uniform" and model.sample_t_fn is not None:
+        print("warning: no saved tau for a time_input=uniform model; the u fed to the "
+              "denoiser follows the rebuilt curve, not the one it trained against")
     return model
 
 

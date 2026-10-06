@@ -92,6 +92,13 @@ class FlowMapping(MetricReporting, pl.LightningModule):
                 )
         if "denoiser" not in teacher:
             raise ValueError(f"no denoiser weights under {distill.teacher}")
+        time_input = manifest.flow.get("time_input", "reparametrized")
+        if time_input != "reparametrized":
+            raise ValueError(
+                f"the teacher at {distill.teacher} was trained with "
+                f"flow.time_input={time_input!r}, but distillation feeds both times to "
+                f"the denoisers as flow time t"
+            )
 
         self.denoiser = teacher["denoiser"]
         self.mu_nn = teacher.get("mu_nn")

@@ -56,13 +56,15 @@ def draw_records(
         t_all = sample_t_fn(u)
         t_all = t_all if torch.is_tensor(t_all) else torch.as_tensor(t_all)
         t_all = t_all.to(model.device).float()
+        # What the denoiser's time input reads, as training feeds it.
+        time_all = u if model.time_input == "uniform" else t_all
         for i in range(0, tokens_all.size(0), chunk):
             audio, tokens = audio_all[i : i + chunk], tokens_all[i : i + chunk]
-            t = t_all[i : i + chunk]
+            t, time = t_all[i : i + chunk], time_all[i : i + chunk]
             x1 = F.one_hot(tokens, model.vocab_size).float()
             mu = F.softmax(model.mu_nn(audio), dim=-1) if model.mu_nn is not None else None
             i_t = model.make_interpolant(x1=x1, t=t, mu=mu)
-            pred = model.denoiser(x_t=i_t, time=t, audio_embeddings=audio).argmax(dim=-1)
+            pred = model.denoiser(x_t=i_t, time=time, audio_embeddings=audio).argmax(dim=-1)
             real = tokens != model.pad_id
             ts.append(t.cpu().numpy())
             hits.append(((pred == tokens) & real).sum(dim=1).cpu().numpy())
@@ -157,7 +159,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print(f"\nsampler grid ({args.steps} steps), from each tau:")
     for name in ESTIMATORS:
-        g = np.asarray(generation_grid(taus[name], args.steps), dtype=float)
+        g = np.asarray(generation_grid(taus[name], args.steps)[0], dtype=float)
         ends_at_one = "yes" if abs(g[-1] - 1.0) < 1e-6 else f"NO (stops at {g[-1]:.4f})"
         print(f"  {name:<10} starts {g[0]:.4f}  ends {g[-1]:.4f}  reaches t=1: {ends_at_one}")
         print(f"             {np.round(g, 3)}")
@@ -183,7 +185,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     ax = axes[2]
     for i, name in enumerate(ESTIMATORS):
-        g = np.asarray(generation_grid(taus[name], args.steps), dtype=float)
+        g = np.asarray(generation_grid(taus[name], args.steps)[0], dtype=float)
         ax.plot(g, np.full_like(g, i), "o", ms=5, color=colours[name])
         ax.text(0.02, i + 0.15, name, fontsize=8, color=colours[name])
     ax.axvline(1.0, ls="--", color="grey", lw=1)

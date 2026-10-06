@@ -4,10 +4,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import lightning.pytorch as pl
+import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf
 
-from .layout import COMPONENTS, MANIFEST, TRAINING_STATE, VOCAB_MAP
+from .layout import COMPONENTS, MANIFEST, TAU, TRAINING_STATE, VOCAB_MAP
 from .state_dict import _unwrap
 
 if TYPE_CHECKING:
@@ -62,7 +63,27 @@ def save_components(
         path = out_dir / f"{name}_{variant}.pth"
         torch.save(_unwrap(model).state_dict(), path)
         written.append(path)
+    tau_path = save_tau(module, out_dir, variant)
+    if tau_path is not None:
+        written.append(tau_path)
     return written
+
+
+def save_tau(module: pl.LightningModule, out_dir: Path, variant: str) -> Path | None:
+    """Write the tau^-1 live at this moment as `tau_<variant>.npz`, if the run has one.
+
+    The weights were trained against that curve: under `flow.time_input: uniform` it is
+    what pairs each time input u with its flow time t, and in any case it is the grid they
+    should be sampled on. A refreshed curve, a measured one above all, cannot be rebuilt
+    from the config, so it travels with the weights it belongs to.
+    """
+    tau_inverse = getattr(module, "sample_t_fn", None)
+    knots = getattr(tau_inverse, "knots", None)
+    if knots is None:
+        return None
+    path = Path(out_dir) / f"{TAU}_{variant}.npz"
+    np.savez(path, tau_k=np.asarray(knots[0]), t_k=np.asarray(knots[1]))
+    return path
 
 
 def save_manifest(

@@ -120,6 +120,25 @@ flow:
   # dropping the tail that dilutes the objective. Inert while pad_loss_weight is 1.0.
   pad_decay: 0.0
 
+  # How the batch's per-token cross-entropy becomes one number. `sequence` averages each
+  # row, then the rows; `token` (FLM's) averages every token in the batch at once. Identical
+  # while pad_loss_weight is 1.0, since every row is canvas_len long. Below that, `sequence`
+  # gives a short utterance's real tokens more weight each than a long one's.
+  loss_reduction: sequence
+
+  # What the denoiser's time embedding is fed. `reparametrized` is the flow time t itself.
+  # `uniform` is the draw u that t = tau^-1(u) came from, as FLM does: the useful t sits in
+  # a narrow band near 1 at large V, and u spans [0, 1]. u follows the live tau, so a
+  # refresh relabels which t a given u means; whether that hurts is part of what the
+  # comparison measures. The curve is saved with each checkpoint (tau_<variant>.npz) so
+  # sampling pairs u with t the way training last did. Identical when schedule.enabled is
+  # false, since then u = t.
+  time_input: reparametrized
+
+  # One t draw in each 1/B slice of [0, 1] rather than B independent ones. FLM calls this
+  # "antithetic", but it is stratified sampling (antithetic would pair u with 1-u).
+  stratified_t: false
+
 schedule:
   # Draw t through tau^-1 rather than uniformly. Off, ~65% of every batch lands below the
   # dead zone where x_t carries nothing.
@@ -253,6 +272,11 @@ sampling:
   # The two are algebraically identical on linear and audio_cond — the mu term cancels in
   # the drift — and differ at O(h^2) on three_term.
   method: interpolant
+  # Integrators scored every sampling epoch, each logged as sampled/<method>/wer.
+  # sampled/wer stays `method`'s. null scores `method` alone. Every method in an epoch
+  # integrates the same x0 (seeded by `seed`), so the gap between them is the integrator.
+  log_methods: null
+  seed: 0
   num_steps: 16
   every_n_epochs: 5
   # null means the whole validation split. A subset makes sampled WER depend on which
