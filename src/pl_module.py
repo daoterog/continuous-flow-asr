@@ -135,6 +135,9 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             )
             if skipped is not None:
                 self.print(skipped)
+            # Outside the `new_tau is not None` branch: a refresh that was declined still
+            # says which curve is driving, and under `warmup` that is the answer.
+            self.log_tau_source()
             if new_tau is not None:
                 self.sample_t_fn = new_tau
                 for metric in self.metrics.values():

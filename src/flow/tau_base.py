@@ -35,6 +35,12 @@ class TauScheduler:
     # mixin and by the checkpoint manifest, so it is part of the base contract even where
     # it stays None.
     mu_accuracy: float | None = None
+    # Which curve the live schedule came from: "simulated" for the interpolant's own,
+    # "measured" for the denoiser's. Only `WarmupTau` moves between them, but every
+    # strategy carries it so the reporting mixin can log the series in all runs without
+    # asking which one it holds — constant under `simulated` and `measured`, a step under
+    # `warmup`. Each strategy sets it to whatever it actually returned.
+    source: str = "simulated"
 
     def __init__(self, cfg: DictConfig, seed: int = 0) -> None:
         """`cfg` is the `schedule` config node; `seed` draws whatever sampling is needed."""

@@ -186,6 +186,13 @@ schedule:
   #               What Eq. 25 is about. Without flow.gamma nothing in it can move, so the
   #               refresh is skipped and the curve built at startup stands for the run.
   #   measured  — the denoiser's own binned P_e.
+  #   warmup    — simulated until the denoiser clears measured_min_recovery, then measured,
+  #               and sticky from there. `measured` already keeps the startup prior while
+  #               the model is too weak to invert, but keeps it frozen at mu_accuracy 0.0;
+  #               this rebuilds it at mu's current accuracy each refresh instead, which on
+  #               a gamma path is a long way from where it started — tau clears 1e-3 at
+  #               t=0.199 for a mu that knows nothing and t=0.029 for one at 0.9. Watch
+  #               `tau/source_measured` for when the handover happened.
   #
   # They disagree sharply. On a converged run the interpolant is 0.964 wrong in the lowest
   # t bin where the denoiser is 0.251 wrong, because the denoiser can read the audio and
@@ -213,6 +220,20 @@ schedule:
   # refresh, not an error, which is why this skips rather than failing the run. Raising it
   # delays the first refresh until the denoiser can actually recover something.
   measured_min_recovery: 0.05
+
+  # `measured` and `warmup`: how concentrated the schedule a curve produces may be before
+  # the refresh is refused. An early measured curve recovers nothing until t is nearly 1
+  # and everything after, which inverts to a schedule drawing its whole batch from that
+  # last sliver — training where the model already wins. Measured on full data at
+  # refresh-every-epoch, the median drawn t was 0.9931-0.9998 at epoch 1 against
+  # 0.805-0.873 from epoch 2, across five runs, so the two regimes are cleanly separated
+  # and 0.9 sits between them with room on both sides.
+  #
+  # This is the gate that does the work. measured_min_recovery reads rec.max(), which is
+  # the top of the curve at t ~ 1 where the field is already almost clean — high for any
+  # model from epoch 1, so it never fires on full data. Raising it is not the fix: the
+  # degenerate curve has a high peak, that is exactly its problem.
+  measured_max_median_t: 0.9
 
 sampling:
   # Integrate from noise on a fixed slice of val and score the result. This is the only

@@ -14,13 +14,21 @@ from omegaconf import DictConfig
 from .tau_base import TauScheduler
 from .tau_measured import MeasuredTau
 from .tau_simulated import SimulatedTau
+from .tau_warmup import WarmupTau
 
-__all__ = ["MeasuredTau", "SimulatedTau", "TauScheduler", "build_tau_scheduler"]
+__all__ = [
+    "MeasuredTau",
+    "SimulatedTau",
+    "TauScheduler",
+    "WarmupTau",
+    "build_tau_scheduler",
+]
 
 # `schedule.refresh_curve_from` selects one of these.
 TAU_STRATEGIES: dict[str, type[TauScheduler]] = {
     "simulated": SimulatedTau,
     "measured": MeasuredTau,
+    "warmup": WarmupTau,
 }
 
 

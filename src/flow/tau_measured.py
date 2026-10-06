@@ -9,7 +9,6 @@ import torch.nn.functional as F
 from omegaconf import DictConfig
 
 from src.flow.monotone import centered_isotonic
-from src.flow.recovery import recovery_curve
 from src.flow.schedule import make_tau_inverse
 from src.flow.tau_base import TauScheduler
 
@@ -46,6 +45,9 @@ class MeasuredTau(TauScheduler):
     epochs is noise.
     """
 
+    # Always the denoiser's own curve; `WarmupTau` is what moves between sources.
+    source = "measured"
+
     def __init__(self, cfg: DictConfig, seed: int = 0) -> None:
         """Count refreshes, so each one draws a different subset and different t."""
         super().__init__(cfg, seed=seed)
@@ -58,8 +60,34 @@ class MeasuredTau(TauScheduler):
 
     @property
     def min_recovery(self) -> float:
-        """Recovery the best bin must reach before its curve is worth inverting."""
+        """Recovery the best bin must reach before its curve is worth inverting.
+
+        A weak gate, and deliberately kept as only the first one. It reads `rec.max()`,
+        which sits at t ~ 1 where the field is already almost clean, so it is high for any
+        model from the first epoch and says more about the top of the interval than about
+        the denoiser. `max_median_t` is what actually decides whether a curve is usable.
+        """
         return float(self.cfg.get("measured_min_recovery", 0.05))
+
+    @property
+    def max_median_t(self) -> float:
+        """How concentrated the schedule a curve produces may be before it is refused.
+
+        An early measured curve recovers nothing until t is almost 1 and everything after,
+        so tau stays at 0 across the interval and jumps at the end — which inverts to a
+        schedule that draws its whole batch from that last sliver. Measured on full data at
+        refresh-every-epoch, the median drawn t was 0.993 at epoch 1 against 0.805 by epoch
+        5, so the first curve would have trained almost entirely where the model already
+        succeeded. Neither existing guard sees it: `min_recovery` reads the peak, which is
+        high precisely because t ~ 1 is easy, and the span check only catches a curve that
+        is flat everywhere.
+
+        The bound is on the median rather than on t0, because t0 is near 0 throughout — it
+        is the spread that collapses, not the start. 0.9 is loose against the simulated
+        curve's own 0.767, so it refuses only the degenerate shape and not a schedule that
+        is merely top-heavy, which a real one legitimately is.
+        """
+        return float(self.cfg.get("measured_max_median_t", 0.9))
 
     def refresh(
         self, model: "FlowMatching", datamodule: "AudioFeatureDataModule | None"
@@ -67,7 +95,11 @@ class MeasuredTau(TauScheduler):
         """Sweep, bin, invert."""
         if datamodule is None:
             return None, "tau refresh skipped: no datamodule to sweep"
-        t, hits, input_hits, reals = self._sweep(
+        # `_sweep` also scores argmax(i_t) — the interpolant's own recovery on the same
+        # tokens and t — which nothing reads since the self-check was dropped. Kept because
+        # it is the one quantity the closed form predicts exactly, so it is what a probe
+        # self-check would hold itself against; the cost is one argmax per chunk.
+        t, hits, _input_hits, reals = self._sweep(
             model,
             self._draw_batch(datamodule),
             chunk=getattr(datamodule, "eval_batch_size", 32),
@@ -91,7 +123,23 @@ class MeasuredTau(TauScheduler):
                 f"of tokens with no trend across t, so tau^-1 is constant at "
                 f"{float(tau_inverse(0.0)):.4f} and carries no schedule"
             )
+        median_t = self.median_drawn_t(tau_inverse)
+        if median_t > self.max_median_t:
+            return None, (
+                f"tau refresh skipped: the curve puts half the draw above t={median_t:.4f}, "
+                f"over the {self.max_median_t} allowed — it recovers nothing until t is "
+                f"nearly 1, so training it would mean training where the model already wins"
+            )
         return tau_inverse, None
+
+    @staticmethod
+    def median_drawn_t(tau_inverse: Callable) -> float:
+        """The t that half a uniform batch would land at or below under this schedule.
+
+        tau^-1 is the quantile function of t by construction, so the median is simply
+        tau^-1(0.5) — no sampling needed, and no seed to make it wobble between refreshes.
+        """
+        return float(tau_inverse(np.array([0.5]))[0])
 
     def _draw_batch(self, datamodule: "AudioFeatureDataModule") -> dict:
         """A fresh random subset, different on every refresh."""

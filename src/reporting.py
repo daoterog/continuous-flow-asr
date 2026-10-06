@@ -159,6 +159,17 @@ class MetricReporting:
         if self.tau.mu_accuracy is not None:
             self.log("tau/mu_accuracy_ema", self.tau.mu_accuracy)
 
+    def log_tau_source(self) -> None:
+        """Report which curve the live schedule came from, as a series rather than a log line.
+
+        `self.log` takes scalars only, so the strategy's own `source` string is mapped to
+        `tau/source_measured`: 0 while the interpolant's curve is driving, 1 once the
+        denoiser's is. Flat in a `simulated` or `measured` run, a single step in a `warmup`
+        one — which puts the handover on the same x-axis as `tau/t0` and `sampled/wer`,
+        where it can be read against them.
+        """
+        self.log("tau/source_measured", float(self.tau.source == "measured"))
+
     def log_sampled(self) -> None:
         """Log the WER a full integration from noise reaches on the fixed val slice.
 
