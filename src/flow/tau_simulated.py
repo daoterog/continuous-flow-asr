@@ -1,13 +1,13 @@
 """Tau from the interpolant alone, with mu stood in at its measured accuracy."""
 
 import math
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from omegaconf import DictConfig
 from torchmetrics import Metric
 
-from src.flow.schedule import exact_tau_inverse
+from src.flow.schedule import TimeReparametrization
 from src.flow.tau_base import TauScheduler
 
 if TYPE_CHECKING:
@@ -71,7 +71,7 @@ class SimulatedTau(TauScheduler):
 
     def refresh(
         self, model: "FlowMatching", datamodule: "AudioFeatureDataModule | None"
-    ) -> tuple[Callable | None, str | None]:
+    ) -> tuple[TimeReparametrization | None, str | None]:
         """Rebuild the exact interpolant curve at mu's current accuracy and invert it.
 
         `datamodule` goes unused — the curve depends on the vocabulary size and the
@@ -81,7 +81,7 @@ class SimulatedTau(TauScheduler):
         del datamodule
         if model.gamma_fn is not None and self.mu_accuracy is None:
             return None, "tau refresh skipped: the simulated curve needs mu's accuracy"
-        return exact_tau_inverse(
+        return TimeReparametrization.exact(
             model.vocab_size,
             alpha_fn=model.alpha_fn,
             beta_fn=model.beta_fn,

@@ -184,7 +184,7 @@ def train_one(config: str, overrides: list[str]) -> dict:
         canvas_len=cfg.data.canvas_len,
         tokenizer=dm.tokenizer,
         vocab_map=dm.vocab_map,
-        sample_t_fn=T.build_sample_t_fn(dm, cfg),
+        time_reparam=T.build_time_reparam(dm, cfg),
     )
     logger = T.build_logger(cfg)
     trainer = T.build_trainer(cfg, logger)

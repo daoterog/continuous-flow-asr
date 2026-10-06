@@ -37,7 +37,7 @@ Two things the exactness does NOT buy, both worth knowing before trusting the cu
     1.0 to machine precision around t = 0.93 at V = 1193 and is flat from there up, so
     tau saturates and many u map to the same t. That is a true statement about the path
     rather than an artefact — P_e is ~1e-17 there, and there really is nothing left to
-    decode — so `generation_grid`'s collapse of repeated t is still needed, and still
+    decode — so `TimeReparametrization.sampling_grid`'s collapse of repeated t is still needed, and still
     right. What the exact curve does remove is the LOW end: there is no flat run below
     the dead zone, so `tau^-1(0)` lands where the curve says instead of wherever
     `flat_eps` and the keep-last-of-each-flat-run rule happened to leave it.

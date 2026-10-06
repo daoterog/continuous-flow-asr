@@ -25,7 +25,6 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -83,14 +82,12 @@ def denoiser_time(model, t: float) -> float:
     """The denoiser's time input at flow time t.
 
     A `flow.time_input: uniform` model was trained on the draw u with t = tau^-1(u), so a
-    probe at a fixed t has to read u back off the curve's knots. Training never needs this
+    probe at a fixed t has to read u back off the curve. Training never needs this
     direction; only a diagnostic that picks t first does.
     """
-    tau_inverse = model.sample_t_fn
-    if model.time_input != "uniform" or tau_inverse is None:
+    if model.time_input != "uniform":
         return float(t)
-    tau_k, t_k = tau_inverse.knots
-    return float(np.interp(t, t_k, tau_k))
+    return float(model.time_reparam.u_of(t))
 
 
 def main(argv: Sequence[str] | None = None) -> int:

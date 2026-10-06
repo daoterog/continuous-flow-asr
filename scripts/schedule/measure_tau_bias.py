@@ -14,7 +14,7 @@ candidates on the same checkpoint:
              everywhere by construction, at the cost of its own forward passes.
 
 It also checks the two endpoints against the sampler, which integrates on
-`generation_grid(tau^-1, n)`: tau^-1(0) is where sampling starts and tau^-1(1) is where it
+`TimeReparametrization.sampling_grid(n)`: tau^-1(0) is where sampling starts and tau^-1(1) is where it
 ends. If the schedule does not reach t=1 the sampler stops short of the clean endpoint.
 
     python -m scripts.schedule.measure_tau_bias --components runs/<id>/components
@@ -36,7 +36,7 @@ from omegaconf import OmegaConf
 
 import train as T
 from src.checkpointing import load_components, load_manifest
-from src.flow.schedule import generation_grid, make_tau_inverse
+from src.flow.schedule import TimeReparametrization
 from src.flow.tau_measured import MeasuredTau
 from src.pl_module import FlowMatching
 
@@ -44,7 +44,8 @@ ESTIMATORS = ("schedule", "training", "sweep")
 
 
 def draw_records(
-    model: FlowMatching, batch: dict, sample_t_fn: callable, repeats: int, chunk: int
+    model: FlowMatching, batch: dict, reparam: TimeReparametrization, repeats: int,
+    chunk: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """(t, correct, real) per utterance, with t drawn exactly as training draws it."""
     audio_all = batch["audio"].to(model.device).float()
@@ -53,7 +54,7 @@ def draw_records(
     for r in range(repeats):
         g = torch.Generator(device="cpu").manual_seed(r)
         u = torch.rand(tokens_all.size(0), generator=g).to(model.device)
-        t_all = sample_t_fn(u)
+        t_all = reparam.t_of(u)
         t_all = t_all if torch.is_tensor(t_all) else torch.as_tensor(t_all)
         t_all = t_all.to(model.device).float()
         # What the denoiser's time input reads, as training feeds it.
@@ -87,9 +88,9 @@ def bin_records(
     return np.asarray(centres), np.asarray(recovery), np.asarray(counts)
 
 
-def tau_of(ts: np.ndarray, rec: np.ndarray, vocab: int) -> callable:
-    """The tau^-1 a curve implies, under the measured strategy's own rules."""
-    return make_tau_inverse(ts, rec, vocab, p_e0=float(1.0 - rec[0]))
+def tau_of(ts: np.ndarray, rec: np.ndarray, vocab: int) -> TimeReparametrization:
+    """The reparametrization a curve implies, under the measured strategy's own rules."""
+    return TimeReparametrization.from_recovery(ts, rec, vocab, p_e0=float(1.0 - rec[0]))
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -116,10 +117,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     T.setup_reproducibility(cfg)
     dm = T.build_datamodule(cfg)
-    sample_t_fn = T.build_sample_t_fn(dm, cfg)
+    reparam = T.build_time_reparam(dm, cfg)
     model = FlowMatching(
         cfg, vocab_size=dm.vocab_size, pad_id=dm.pad_id, canvas_len=cfg.data.canvas_len,
-        tokenizer=dm.tokenizer, vocab_map=dm.vocab_map, sample_t_fn=sample_t_fn,
+        tokenizer=dm.tokenizer, vocab_map=dm.vocab_map, time_reparam=reparam,
     )
     _, built = load_components(args.components, variant=args.variant)
     for name, sub in built.items():
@@ -129,15 +130,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     cfg.schedule.probe_n_utts = args.n_utts
     probe = MeasuredTau(cfg.schedule)
     batch = probe._draw_batch(dm)
-    t0_now = float(sample_t_fn(0.0))
+    t0_now = reparam.t_start
     print(f"run trained under {cfg.schedule.refresh_curve_from}, "
-          f"its schedule draws t in [{t0_now:.3f}, {float(sample_t_fn(1.0)):.3f}]\n")
+          f"its schedule draws t in [{t0_now:.3f}, {reparam.t_end:.3f}]\n")
 
     curves = {}
     with torch.no_grad():
-        t, hits, reals = draw_records(model, batch, sample_t_fn, args.repeats, 32)
+        t, hits, reals = draw_records(model, batch, reparam, args.repeats, 32)
         sched_edges = np.asarray(
-            sample_t_fn(np.linspace(0, 1, args.num_bins + 1)), dtype=np.float64
+            reparam.t_of(np.linspace(0, 1, args.num_bins + 1)), dtype=np.float64
         )
         sched_edges = np.maximum.accumulate(sched_edges)
         curves["schedule"] = bin_records(t, hits, reals, sched_edges)
@@ -155,11 +156,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         taus[name] = tau_of(c, r, dm.vocab_size)
         empty = int((counts == 0).sum()) if name != "sweep" else 0
         print(f"{name:<10} {c.size:>5} {c[0]:9.3f} {empty:>6} "
-              f"{float(taus[name](0.0)):10.3f} {float(taus[name](1.0)):10.3f}")
+              f"{taus[name].t_start:10.3f} {taus[name].t_end:10.3f}")
 
     print(f"\nsampler grid ({args.steps} steps), from each tau:")
     for name in ESTIMATORS:
-        g = np.asarray(generation_grid(taus[name], args.steps)[0], dtype=float)
+        g = taus[name].sampling_grid(args.steps)[0]
         ends_at_one = "yes" if abs(g[-1] - 1.0) < 1e-6 else f"NO (stops at {g[-1]:.4f})"
         print(f"  {name:<10} starts {g[0]:.4f}  ends {g[-1]:.4f}  reaches t=1: {ends_at_one}")
         print(f"             {np.round(g, 3)}")
@@ -178,14 +179,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     ax = axes[1]
     for name in ESTIMATORS:
-        ax.plot(u, taus[name](u), color=colours[name], label=name)
+        ax.plot(u, taus[name].t_of(u), color=colours[name], label=name)
     ax.plot(u, u, ls=":", color="grey", lw=1)
     ax.set(xlabel="u", ylabel="t", title=r"the $\tau^{-1}$ each implies")
     ax.legend(fontsize=8)
 
     ax = axes[2]
     for i, name in enumerate(ESTIMATORS):
-        g = np.asarray(generation_grid(taus[name], args.steps)[0], dtype=float)
+        g = taus[name].sampling_grid(args.steps)[0]
         ax.plot(g, np.full_like(g, i), "o", ms=5, color=colours[name])
         ax.text(0.02, i + 0.15, name, fontsize=8, color=colours[name])
     ax.axvline(1.0, ls="--", color="grey", lw=1)

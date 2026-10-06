@@ -1,10 +1,12 @@
 """What every tau refresh shares: its cadence, and the contract the model calls through."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from omegaconf import DictConfig
 from torchmetrics import Metric
+
+from src.flow.schedule import TimeReparametrization
 
 if TYPE_CHECKING:
     from src.data import AudioFeatureDataModule
@@ -73,7 +75,7 @@ class TauScheduler:
         every = int(self.cfg.get("refresh_every_n_epochs", 0))
         return (
             every > 0
-            and model.sample_t_fn is not None
+            and not model.time_reparam.is_identity
             and (model.gamma_fn is not None or not self.needs_mu)
             and not model.trainer.sanity_checking
             and model.current_epoch > 0
@@ -82,10 +84,10 @@ class TauScheduler:
 
     def refresh(
         self, model: "FlowMatching", datamodule: "AudioFeatureDataModule | None"
-    ) -> tuple[Callable | None, str | None]:
+    ) -> tuple[TimeReparametrization | None, str | None]:
         """Re-derive tau from this strategy's curve.
 
-        Returns (new tau, None), or (None, a sentence saying why nothing was refreshed) —
+        Returns (the new curve, None), or (None, a sentence saying why nothing was refreshed) —
         the caller is what has a logger to print it with.
         """
         raise NotImplementedError

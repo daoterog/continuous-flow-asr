@@ -2,7 +2,7 @@
 
 `MeasuredTau` already declines to invert a curve whose best bin is under
 `measured_min_recovery`, and the caller keeps whatever tau it holds — which at the start of
-a run is the exact interpolant curve `train.build_sample_t_fn` builds. So a handover of
+a run is the exact interpolant curve `train.build_time_reparam` builds. So a handover of
 sorts already happens. What it does not do is keep the held curve current: that prior is
 built once, at `schedule.mu_accuracy` (0.0, because mu is at init), and it stays there for
 the whole warmup.
@@ -26,12 +26,13 @@ progress. Once measured, always measured; the guards inside `MeasuredTau` still 
 a refresh it declines leaves the last good curve in place as before.
 """
 
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from omegaconf import DictConfig
 from torchmetrics import Metric
 
+from src.flow.schedule import TimeReparametrization
 from src.flow.tau_base import TauScheduler
 from src.flow.tau_measured import MeasuredTau
 from src.flow.tau_simulated import SimulatedTau
@@ -77,7 +78,7 @@ class WarmupTau(TauScheduler):
 
     def refresh(
         self, model: "FlowMatching", datamodule: "AudioFeatureDataModule | None"
-    ) -> tuple[Callable | None, str | None]:
+    ) -> tuple[TimeReparametrization | None, str | None]:
         """Try the measured curve; fall back to a freshly built simulated one until it takes.
 
         The measured attempt runs first even during warmup, because its own recovery
@@ -87,11 +88,11 @@ class WarmupTau(TauScheduler):
         if self.switched:
             return self.measured.refresh(model, datamodule)
 
-        tau_inverse, declined = self.measured.refresh(model, datamodule)
-        if tau_inverse is not None:
+        reparam, declined = self.measured.refresh(model, datamodule)
+        if reparam is not None:
             self.switched = True
             self.source = "measured"
-            return tau_inverse, (
+            return reparam, (
                 f"tau warmup over at epoch {model.current_epoch}: the denoiser clears "
                 f"{self.measured.min_recovery} recovery, switching to the measured curve"
             )

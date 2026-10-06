@@ -1,6 +1,5 @@
 """Tau from the denoiser's own error, swept at t the current schedule did not choose."""
 
-from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -9,7 +8,7 @@ import torch.nn.functional as F
 from omegaconf import DictConfig
 
 from src.flow.monotone import centered_isotonic
-from src.flow.schedule import make_tau_inverse
+from src.flow.schedule import TimeReparametrization
 from src.flow.tau_base import TauScheduler
 
 if TYPE_CHECKING:
@@ -91,7 +90,7 @@ class MeasuredTau(TauScheduler):
 
     def refresh(
         self, model: "FlowMatching", datamodule: "AudioFeatureDataModule | None"
-    ) -> tuple[Callable | None, str | None]:
+    ) -> tuple[TimeReparametrization | None, str | None]:
         """Sweep, bin, invert."""
         if datamodule is None:
             return None, "tau refresh skipped: no datamodule to sweep"
@@ -113,33 +112,23 @@ class MeasuredTau(TauScheduler):
                 f"tau refresh skipped: the model recovers at most {best:.3f} of tokens "
                 f"across a uniform sweep, under the {self.min_recovery} needed to anchor tau"
             )
-        tau_inverse = make_tau_inverse(
+        reparam = TimeReparametrization.from_recovery(
             ts, rec, model.vocab_size, flat_eps=0.0, p_e0=float(1.0 - rec[0])
         )
-        span = float(tau_inverse(1.0)) - float(tau_inverse(0.0))
-        if span <= 0.0:
+        if reparam.t_end <= reparam.t_start:
             return None, (
                 f"tau refresh skipped: the model recovers {rec.min():.3f}-{rec.max():.3f} "
                 f"of tokens with no trend across t, so tau^-1 is constant at "
-                f"{float(tau_inverse(0.0)):.4f} and carries no schedule"
+                f"{reparam.t_start:.4f} and carries no schedule"
             )
-        median_t = self.median_drawn_t(tau_inverse)
+        median_t = reparam.median_t
         if median_t > self.max_median_t:
             return None, (
                 f"tau refresh skipped: the curve puts half the draw above t={median_t:.4f}, "
                 f"over the {self.max_median_t} allowed — it recovers nothing until t is "
                 f"nearly 1, so training it would mean training where the model already wins"
             )
-        return tau_inverse, None
-
-    @staticmethod
-    def median_drawn_t(tau_inverse: Callable) -> float:
-        """The t that half a uniform batch would land at or below under this schedule.
-
-        tau^-1 is the quantile function of t by construction, so the median is simply
-        tau^-1(0.5) — no sampling needed, and no seed to make it wobble between refreshes.
-        """
-        return float(tau_inverse(np.array([0.5]))[0])
+        return reparam, None
 
     def _draw_batch(self, datamodule: "AudioFeatureDataModule") -> dict:
         """A fresh random subset, different on every refresh."""
@@ -183,8 +172,13 @@ class MeasuredTau(TauScheduler):
                     else None
                 )
                 i_t = model.make_interpolant(x1=x1, t=t, mu=mu)
+                # The sweep picks t, not u, so a `uniform` denoiser is fed u back off the
+                # curve it is currently trained against.
+                time = (
+                    model.time_reparam.u_of(t) if model.time_input == "uniform" else t
+                )
                 pred = model.denoiser(
-                    x_t=i_t, time=t, audio_embeddings=audio
+                    x_t=i_t, time=time, audio_embeddings=audio
                 ).argmax(dim=-1)
                 real = tokens != model.pad_id
                 ts.append(t.cpu().numpy())

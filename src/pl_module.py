@@ -4,8 +4,6 @@ Everything that reports numbers to a logger lives in `src.reporting`, and the me
 it owns is built by `src.metrics.utils`.
 """
 
-from collections.abc import Callable
-
 import lightning.pytorch as pl
 import torch
 import torch.nn.functional as F
@@ -17,8 +15,7 @@ from src.flow import build_tau_scheduler
 from src.flow.coefficients import make_schedule, waypoint_strength
 from src.flow.sampler import sample_tokens, sample_tokens_euler
 from src.flow.sampling_probe import SamplingProbe
-from src.flow.schedule import generation_grid
-from src.metrics import schedule_bin_edges
+from src.flow.schedule import TimeReparametrization
 from src.metrics.utils import is_binned
 from src.models import build_audio_decoder, build_denoiser
 from src.reporting import MetricReporting
@@ -71,30 +68,30 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         canvas_len: int,
         tokenizer: WhisperTokenizerFast,
         vocab_map: VocabMap | None = None,
-        sample_t_fn: Callable | None = None,
+        time_reparam: TimeReparametrization | None = None,
     ) -> None:
         """Build both models, the interpolant coefficients and the metric bank.
 
-        sample_t_fn maps a uniform draw to a flow time (tau^-1 from make_tau_inverse).
-        Left as None, t is uniform — which at this vocabulary spends most of every batch
+        time_reparam is the map from a uniform draw to a flow time. Left as None it is the
+        identity and t is uniform — which at this vocabulary spends most of every batch
         below the dead zone, where x_t carries nothing and the denoiser can only hear the
         audio.
         """
         super().__init__()
-        # tokenizer/vocab_map/sample_t_fn are objects, not hyperparameters: they would
+        # tokenizer/vocab_map/time_reparam are objects, not hyperparameters: they would
         # not survive a checkpoint round-trip and are rebuilt from the data instead.
         self.save_hyperparameters(
-            ignore=["tokenizer", "vocab_map", "sample_t_fn"], logger=False
+            ignore=["tokenizer", "vocab_map", "time_reparam"], logger=False
         )
         self.cfg = cfg
         self.vocab_size = vocab_size
         self.pad_id = pad_id
         self.canvas_len = canvas_len
-        self.sample_t_fn = sample_t_fn
+        self.time_reparam = time_reparam or TimeReparametrization.identity()
         self.tokenizer = tokenizer
         self.vocab_map = vocab_map
         self.sampling_probe = SamplingProbe(cfg.get("sampling"), cfg.data.batch_size)
-        self.tau = build_tau_scheduler(cfg.schedule, seed=cfg.seed)
+        self.tau_scheduler = build_tau_scheduler(cfg.schedule, seed=cfg.seed)
 
         self.denoiser = build_denoiser(cfg.model.denoiser, vocab_size)
         self.mu_nn = (
@@ -147,7 +144,7 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             tokenizer,
             pad_id,
             vocab_map,
-            sample_t_fn=sample_t_fn,
+            time_reparam=self.time_reparam,
             loss_bins=cfg.metrics.get("loss_bins", 10),
             perr_bins=cfg.metrics.get("perr_bins", 10),
             wer_bins=OmegaConf.to_container(cfg.metrics.get("wer_bins", {})) or None,
@@ -167,29 +164,25 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         it, or the new edges would be applied to counts gathered under the old ones.
         """
         super().on_train_epoch_start()
-        if self.tau.is_due(self):
-            new_tau, skipped = self.tau.refresh(
+        if self.tau_scheduler.is_due(self):
+            new, skipped = self.tau_scheduler.refresh(
                 self, getattr(self.trainer, "datamodule", None)
             )
             if skipped is not None:
                 self.print(skipped)
-            # Outside the `new_tau is not None` branch: a refresh that was declined still
+            # Outside the `new is not None` branch: a refresh that was declined still
             # says which curve is driving, and under `warmup` that is the answer.
             self.log_tau_source()
-            if new_tau is not None:
-                self.sample_t_fn = new_tau
+            if new is not None:
+                self.time_reparam = new
                 for metric in self.metrics.values():
                     if is_binned(metric):
-                        metric.set_edges(schedule_bin_edges(new_tau, metric.num_bins))
-                lo = float(new_tau(0.0))
-                self.log("tau/t0", lo)
-                self.log_tau_shape(new_tau)
-                self.print(
-                    f"tau refreshed for epoch {self.current_epoch}"
-                    f"t in [{lo:.3f}, 1.000] now carries the draw"
-                )
-                if self.tau.mu_accuracy is not None:
-                    self.print(f"mu accuracy EMA {self.tau.mu_accuracy:.4f}")
+                        metric.set_edges(new.bin_edges(metric.num_bins))
+                self.log("tau/t0", new.t_start)
+                self.log_tau_shape(new)
+                self.print(f"tau refreshed for epoch {self.current_epoch}: {new!r}")
+                if self.tau_scheduler.mu_accuracy is not None:
+                    self.print(f"mu accuracy EMA {self.tau_scheduler.mu_accuracy:.4f}")
         self.reset_metrics("train")
 
     def training_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
@@ -222,7 +215,7 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             }
 
         u = self.draw_u(tokens.size(0))
-        t = u if self.sample_t_fn is None else self.sample_t_fn(u)
+        t = self.time_reparam.t_of(u)
         i_t = self.make_interpolant(x1=x1, t=t, mu=mu)
 
         # `uniform` hands the denoiser the draw itself, as FLM does: at large V the t that
@@ -322,7 +315,7 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         """
         super().on_train_epoch_end()
         self.log_metrics("train")
-        self.tau.observe_mu(self.metrics)
+        self.tau_scheduler.observe_mu(self.metrics)
         self.log_mu_accuracy()
 
     def on_validation_epoch_start(self) -> None:
@@ -399,11 +392,7 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         if init_from_mu is None:
             init_from_mu = bool(self.cfg.get("sampling", {}).get("init_from_mu", False))
 
-        if self.sample_t_fn is None:
-            gen_grid = torch.linspace(0, 1, num_steps + 1).tolist()
-            u_grid = gen_grid
-        else:
-            gen_grid, u_grid = generation_grid(self.sample_t_fn, num_steps)
+        gen_grid, u_grid = self.time_reparam.sampling_grid(num_steps)
 
         # Algorithm 6 of the paper, or the equivalent-for-affine-gamma rebuild. They agree
         # exactly on linear and audio_cond and differ at O(h^2) on three_term.

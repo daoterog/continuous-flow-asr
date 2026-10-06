@@ -53,7 +53,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         canvas_len=cfg.data.canvas_len,
         tokenizer=dm.tokenizer,
         vocab_map=dm.vocab_map,
-        sample_t_fn=None,
     )
     print(f"teacher   {cfg.distill.teacher}")
     n_student = sum(p.numel() for p in model.two_time_denoiser.parameters())

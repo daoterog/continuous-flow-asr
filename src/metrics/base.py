@@ -4,8 +4,6 @@ Scoring a transcript is `src.metrics.scoring`; this file is only about where a s
 t falls and how the bins are cut.
 """
 
-from collections.abc import Callable
-
 import numpy as np
 import torch
 from torchmetrics import Metric
@@ -14,48 +12,12 @@ from torchmetrics import Metric
 Edges = torch.Tensor | np.ndarray | list[float] | None
 
 
-def schedule_bin_edges(
-    sample_t_fn: Callable | None, num_bins: int = 10
-) -> torch.Tensor:
-    """Bin edges following the training schedule, so no bin sits empty.
-
-    flow_step draws u ~ U[0, 1] and takes t = sample_t_fn(u), which makes sample_t_fn the
-    quantile function of t: the edges tau^-1(k/n) ARE the k/n quantiles, by construction.
-    Equal-width bins are the wrong grid under that schedule — the reparameterization puts
-    nothing below the dead zone, so ~65% of the bins stay empty and every sample crowds
-    into the top two or three.
-
-    Pass sample_t_fn=None (or leave it off) for plain equal-width bins.
-    """
-    if sample_t_fn is None:
-        return torch.linspace(0, 1, num_bins + 1)
-    edges = np.asarray(sample_t_fn(np.linspace(0.0, 1.0, num_bins + 1)), dtype=np.float64)
-    if np.all(np.diff(edges) > 0):
-        return torch.as_tensor(edges, dtype=torch.float32)
-
-    # A measured tau saturates: once the denoiser recovers everything above some t, tau is
-    # 1 there and tau^-1 is flat, so the top quantiles land on the same t. Those bins would
-    # hold almost nothing anyway, so nudge them apart rather than refusing to bin at all —
-    # raising here would kill a run for a schedule that is perfectly usable.
-    span = float(edges[-1] - edges[0])
-    if span <= 0:
-        raise ValueError(
-            f"sample_t_fn is constant on [0, 1] at {edges[0]:.4f}, so there is no schedule "
-            f"to bin along. The model recovers nothing anywhere; train further first."
-        )
-    eps = span * 1e-6
-    for i in range(1, edges.size):
-        if edges[i] <= edges[i - 1]:
-            edges[i] = edges[i - 1] + eps
-    return torch.as_tensor(edges, dtype=torch.float32)
-
-
 class TimeBinnedMetric(Metric):
     """Base for metrics. All they share is the t -> bin mapping.
 
     Equal-width bins by default. Pass `edges` to bin some other way; in particular
-    schedule_bin_edges(sample_t_fn, n), which is what keeps every bin populated once t is
-    drawn through a reparameterization rather than uniformly.
+    `TimeReparametrization.bin_edges(n)`, which is what keeps every bin populated once t
+    is drawn through a reparameterization rather than uniformly.
 
     `num_bins=1` is the degenerate case, and is how a quantity that cannot vary with t is
     measured — mu_psi's forward takes audio and nothing else, so its prediction is the

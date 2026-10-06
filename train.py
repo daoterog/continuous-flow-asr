@@ -38,7 +38,7 @@ from transformers import WhisperTokenizerFast
 from src.checkpointing import ComponentCheckpoint, manifest_for
 from src.data import ROLES, AudioFeatureDataModule
 from src.flow.coefficients import make_schedule
-from src.flow.schedule import exact_tau_inverse
+from src.flow.schedule import TimeReparametrization
 from src.flow_mapping import DISTILL_GROUPS
 from src.pl_module import FlowMatching
 
@@ -175,23 +175,24 @@ def validate_distill_split(cfg: DictConfig) -> None:
         )
 
 
-def build_sample_t_fn(dm: AudioFeatureDataModule, cfg: DictConfig) -> object | None:
-    """The prior tau^-1: what the interpolant alone leaves recoverable, with no model."""
+def build_time_reparam(dm: AudioFeatureDataModule, cfg: DictConfig) -> TimeReparametrization:
+    """The prior tau: what the interpolant alone leaves recoverable, with no model.
+
+    The identity when `schedule.enabled` is false, so t is drawn uniformly.
+    """
     if not cfg.schedule.enabled:
-        return None
+        return TimeReparametrization.identity()
     gamma_fn = make_schedule(cfg.flow.get("gamma"))
-    tau_inverse = exact_tau_inverse(
+    reparam = TimeReparametrization.exact(
         dm.vocab_size,
         alpha_fn=make_schedule(cfg.flow.get("alpha", "linear_down")),
         beta_fn=make_schedule(cfg.flow.get("beta", "linear_up")),
         gamma_fn=gamma_fn,
         mu_accuracy=float(cfg.schedule.get("mu_accuracy", 0.0)),
     )
-    lo, hi = float(tau_inverse(0.0)), float(tau_inverse(1.0))
     path = "with mu" if gamma_fn is not None else "linear"
-    print(f"tau: exact curve on the {path} path over {dm.vocab_size:,} tokens, "
-        f"t in [{lo:.3f}, {hi:.3f}] carries the draw")
-    return tau_inverse
+    print(f"tau: exact curve on the {path} path over {dm.vocab_size:,} tokens: {reparam!r}")
+    return reparam
 
 
 def setup_reproducibility(cfg: DictConfig) -> None:
@@ -341,7 +342,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     dm = build_datamodule(cfg)
     print(dm.summary())
 
-    sample_t_fn = build_sample_t_fn(dm, cfg)
+    time_reparam = build_time_reparam(dm, cfg)
     model = FlowMatching(
         cfg,
         vocab_size=dm.vocab_size,
@@ -349,7 +350,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         canvas_len=cfg.data.canvas_len,
         tokenizer=dm.tokenizer,
         vocab_map=dm.vocab_map,
-        sample_t_fn=sample_t_fn,
+        time_reparam=time_reparam,
     )
 
     logger = build_logger(cfg)

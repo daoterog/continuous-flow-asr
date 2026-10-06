@@ -5,7 +5,7 @@
 validates a bank of them. Measuring only — what reaches a logger is `src.reporting`.
 """
 
-from .base import TimeBinnedMetric, schedule_bin_edges
+from .base import TimeBinnedMetric
 from .loss import BinnedLoss
 from .scoring import corpus_wer, edit_counts, ids_to_text, score_samples
 from .token_error import BinnedTokenError
@@ -31,7 +31,6 @@ __all__ = [
     "edit_counts",
     "ids_to_text",
     "make_metrics",
-    "schedule_bin_edges",
     "score_samples",
     "section_for",
     "split_key",

@@ -186,7 +186,7 @@ def time_one(config: str, overrides: list[str], args: argparse.Namespace) -> dic
     model = T.FlowMatching(
         cfg, vocab_size=dm.vocab_size, pad_id=dm.pad_id,
         canvas_len=cfg.data.canvas_len, tokenizer=dm.tokenizer,
-        vocab_map=dm.vocab_map, sample_t_fn=T.build_sample_t_fn(dm, cfg),
+        vocab_map=dm.vocab_map, time_reparam=T.build_time_reparam(dm, cfg),
     )
     timer = StepTimer(args.warmup)
     hook = type("BenchTimer", (Callback,), {"on_train_batch_end": staticmethod(

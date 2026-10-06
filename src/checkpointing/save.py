@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import lightning.pytorch as pl
-import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf
 
@@ -70,19 +69,19 @@ def save_components(
 
 
 def save_tau(module: pl.LightningModule, out_dir: Path, variant: str) -> Path | None:
-    """Write the tau^-1 live at this moment as `tau_<variant>.npz`, if the run has one.
+    """Write the time reparametrization live at this moment as `tau_<variant>.npz`.
 
     The weights were trained against that curve: under `flow.time_input: uniform` it is
     what pairs each time input u with its flow time t, and in any case it is the grid they
     should be sampled on. A refreshed curve, a measured one above all, cannot be rebuilt
-    from the config, so it travels with the weights it belongs to.
+    from the config, so it travels with the weights it belongs to. Nothing is written for
+    the identity, which any loader rebuilds for free.
     """
-    tau_inverse = getattr(module, "sample_t_fn", None)
-    knots = getattr(tau_inverse, "knots", None)
-    if knots is None:
+    reparam = getattr(module, "time_reparam", None)
+    if reparam is None or reparam.is_identity:
         return None
     path = Path(out_dir) / f"{TAU}_{variant}.npz"
-    np.savez(path, tau_k=np.asarray(knots[0]), t_k=np.asarray(knots[1]))
+    reparam.save(path)
     return path
 
 

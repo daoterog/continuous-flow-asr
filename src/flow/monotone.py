@@ -47,7 +47,7 @@ def centered_isotonic(
     The result increases in y: PAVA gives one value per block and the blocks are what we
     return, so no two consecutive knots carry the same value. On a perfectly flat run the
     rise can be a single ulp — PAVA's own merged means drift in the last bit — which
-    `make_tau_inverse` absorbs, since it interpolates with the gap clamped away from zero.
+    `TimeReparametrization.from_recovery` absorbs, since it interpolates with the gap clamped away from zero.
     """
     x = np.asarray(x, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)

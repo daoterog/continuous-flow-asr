@@ -1,7 +1,7 @@
 """Rebuild tau^-1 the obvious way, plot every stage, and check it against the real one.
 
-`src.flow.schedule.make_tau_inverse` is written for the training loop: it has to run on
-GPU tensors every step without syncing, so the interpolation is hand-rolled. This does the
+`src.flow.schedule.TimeReparametrization` is written for the training loop: it has to run
+on GPU tensors every step without syncing, so the interpolation is hand-rolled. This does the
 same thing with `np.interp` and no device handling, which is readable, and then asserts the
 two agree so the fast one needs no further trust.
 
@@ -25,7 +25,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from src.flow.schedule import make_tau_inverse, sweep_corruption
+from src.flow.schedule import TimeReparametrization, sweep_corruption
 
 FLAT_EPS = 1e-3
 
@@ -96,26 +96,26 @@ def readable_tau_inverse(ts: np.ndarray, tau: np.ndarray) -> "callable":
 def compare(ts: np.ndarray, recovery: np.ndarray, vocab_size: int) -> dict:
     """Largest disagreement between this file's tau^-1 and the one training uses."""
     mine = readable_tau_inverse(ts, readable_tau(recovery, vocab_size))
-    theirs = make_tau_inverse(ts, recovery, vocab_size)
+    theirs = TimeReparametrization.from_recovery(ts, recovery, vocab_size)
 
     u = np.linspace(0.0, 1.0, 20001)
-    got_np, want = theirs(u), mine(u)
-    got_torch = theirs(torch.as_tensor(u)).numpy()
+    got_np, want = theirs.t_of(u), mine(u)
+    got_torch = theirs.t_of(torch.as_tensor(u)).numpy()
 
     rng = np.random.default_rng(0)
     u_rand = rng.random(100_000)
-    # make_tau_inverse stores tau already clamped, so compare against the clamped form;
+    # from_recovery stores tau already clamped, so compare against the clamped form;
     # the gap before clamping is the dead-zone noise and is bounded by flat_eps.
     tau_raw = readable_tau(recovery, vocab_size)
     tau_clamped = tau_raw.copy()
     tau_clamped[tau_clamped < FLAT_EPS] = 0.0
     return {
-        "tau (clamped)": float(np.abs(tau_clamped - theirs.tau).max()),
+        "tau (clamped)": float(np.abs(tau_clamped - theirs.curve_u).max()),
         "noise flat_eps removed": float(np.abs(tau_raw - tau_clamped).max()),
         "numpy path": float(np.abs(got_np - want).max()),
         "torch path": float(np.abs(got_torch - want).max()),
-        "random draws": float(np.abs(theirs(u_rand) - mine(u_rand)).max()),
-        "knots kept": theirs.knots[0].size,
+        "random draws": float(np.abs(theirs.t_of(u_rand) - mine(u_rand)).max()),
+        "knots kept": theirs.t_knots.size,
         "grid points": ts.size,
     }
 
@@ -201,14 +201,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"vocabulary {args.vocab_size:,}  {args.n_utts} utterances x {args.canvas_len}\n")
     plot(ts, recovery, args.vocab_size, args.out)
 
-    tau_inv = make_tau_inverse(ts, recovery, args.vocab_size)
+    reparam = TimeReparametrization.from_recovery(ts, recovery, args.vocab_size)
     rng = np.random.default_rng(0)
-    drawn = tau_inv(rng.random(200_000))
+    drawn = reparam.t_of(rng.random(200_000))
     qs = np.percentile(drawn, [1, 10, 50, 90, 99])
     print("t that training draws:  " + "  ".join(
         f"q{q}={v:.3f}" for q, v in zip([1, 10, 50, 90, 99], qs, strict=True)))
 
-    print("\nreadable vs. make_tau_inverse, largest absolute difference:")
+    print("\nreadable vs. TimeReparametrization, largest absolute difference:")
     for name, value in compare(ts, recovery, args.vocab_size).items():
         print(f"  {name:<14} {value:.3e}" if isinstance(value, float) else
               f"  {name:<14} {value}")

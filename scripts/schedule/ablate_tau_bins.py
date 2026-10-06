@@ -41,7 +41,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from src.flow.schedule import make_tau_inverse, sweep_corruption
+from src.flow.schedule import TimeReparametrization, sweep_corruption
 
 # Quantiles of the drawn t, so the summary says where the schedule moved, not just by how
 # much. q50 is the bulk; q01 is the low-t tail, which is the part a coarse grid distorts.
@@ -68,7 +68,7 @@ def sweep(
 
 def drawn_t(ts: np.ndarray, recovery: np.ndarray, vocab_size: int, u: np.ndarray) -> np.ndarray:
     """The flow times tau^-1 maps `u` to, for a curve sampled on `ts`."""
-    return make_tau_inverse(ts, recovery, vocab_size)(u)
+    return TimeReparametrization.from_recovery(ts, recovery, vocab_size).t_of(u)
 
 
 def divisors_of(n: int, lo: int = 8) -> list[int]:

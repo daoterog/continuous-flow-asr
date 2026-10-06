@@ -1,13 +1,11 @@
 """Reading a components directory back into usable models."""
 
-from collections.abc import Callable
 from pathlib import Path
 
-import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf
 
-from src.flow.schedule import tau_inverse_from_knots
+from src.flow.schedule import TimeReparametrization
 from src.models import build_audio_decoder, build_denoiser
 
 from .layout import COMPONENTS, MANIFEST, TAU, VOCAB_MAP
@@ -23,13 +21,10 @@ def load_manifest(run_dir: Path) -> DictConfig:
     return OmegaConf.load(path)
 
 
-def load_tau(run_dir: Path, variant: str = "final") -> Callable | None:
-    """The tau^-1 saved with `<name>_<variant>.pth`, or None for a run that wrote none."""
+def load_tau(run_dir: Path, variant: str = "final") -> TimeReparametrization | None:
+    """The time reparametrization saved with `<name>_<variant>.pth`, or None if none was."""
     path = Path(run_dir) / f"{TAU}_{variant}.npz"
-    if not path.exists():
-        return None
-    knots = np.load(path)
-    return tau_inverse_from_knots(knots["tau_k"], knots["t_k"])
+    return TimeReparametrization.load(path) if path.exists() else None
 
 
 def load_vocab_map(run_dir: Path, tokenizer_size: int) -> torch.Tensor | None:

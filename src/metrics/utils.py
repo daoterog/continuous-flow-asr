@@ -1,13 +1,12 @@
 """Building and inspecting the metric bank: construction, naming, validation."""
 
 import warnings
-from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
 
-from .base import TimeBinnedMetric, schedule_bin_edges
+from .base import TimeBinnedMetric
 from .loss import BinnedLoss
 from .token_error import BinnedTokenError
 from .wer import BinnedWER
@@ -16,6 +15,7 @@ if TYPE_CHECKING:
     from transformers import WhisperTokenizerFast
 
     from src.data import VocabMap
+    from src.flow.schedule import TimeReparametrization
 
 SPLITS = ("train", "val", "test")
 
@@ -54,12 +54,12 @@ def make_metrics(
     perr_bins: int = 10,
     wer_bins: dict | None = None,
     input_perr_bins: int = 0,
-    sample_t_fn: Callable | None = None,
+    time_reparam: "TimeReparametrization | None" = None,
 ) -> nn.ModuleDict:
     """Build the `{split}_{model}_{metric}` ModuleDict the reporting mixin drives.
 
-    Pass the SAME sample_t_fn the module samples t with. The bins then follow the
-    schedule's quantiles instead of being equal-width in t, which is the difference
+    Pass the SAME `time_reparam` the module draws t through. The bins then follow its
+    quantiles instead of being equal-width in t, which is the difference
     between every bin holding ~1/n of the epoch and two thirds of them being empty.
 
     A ModuleDict keyed by split gives each split its own instances; sharing one would
@@ -68,7 +68,9 @@ def make_metrics(
     wer_bins = DEFAULT_WER_BINS | (wer_bins or {})
 
     def edges_for(n: int) -> torch.Tensor | None:
-        return None if sample_t_fn is None else schedule_bin_edges(sample_t_fn, n)
+        if time_reparam is None or time_reparam.is_identity:
+            return None
+        return time_reparam.bin_edges(n)
 
     metrics = nn.ModuleDict()
     for split in SPLITS:
@@ -138,7 +140,9 @@ def edge_values(metric: TimeBinnedMetric) -> tuple[float, float] | tuple[None, N
     return values[populated[0]].item(), values[populated[-1]].item()
 
 
-def check_metrics(metrics: nn.ModuleDict, sample_t_fn: Callable | None = None) -> None:
+def check_metrics(
+    metrics: nn.ModuleDict, time_reparam: "TimeReparametrization | None" = None
+) -> None:
     """Every leaf must declare `inputs`, and the bins must match how t is drawn."""
     uniform = []
     for key, m in metrics.items():
@@ -149,13 +153,14 @@ def check_metrics(metrics: nn.ModuleDict, sample_t_fn: Callable | None = None) -
             )
         # An unbinned metric has one bin spanning all of t, so schedule edges are not
         # something it is missing — the warning below would be noise.
-        if sample_t_fn is not None and is_binned(m) and not getattr(m, "schedule_bins", False):
+        reparametrized = time_reparam is not None and not time_reparam.is_identity
+        if reparametrized and is_binned(m) and not getattr(m, "schedule_bins", False):
             uniform.append(key)
     if uniform:
         warnings.warn(
-            f"t is drawn through sample_t_fn, but {len(uniform)} metric(s) use "
+            f"t is drawn through {time_reparam!r}, but {len(uniform)} metric(s) use "
             f"equal-width t bins — most of those bins will stay empty. Pass the same "
-            f"sample_t_fn to make_metrics(). ({', '.join(uniform[:4])}"
+            f"time_reparam to make_metrics(). ({', '.join(uniform[:4])}"
             f"{', ...' if len(uniform) > 4 else ''})",
             stacklevel=2,
         )

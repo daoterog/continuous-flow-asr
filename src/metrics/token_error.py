@@ -72,5 +72,5 @@ class BinnedTokenError(TimeBinnedMetric):
         return (self.errors.sum() / n).item()
 
     def recovery(self) -> torch.Tensor:
-        """(num_bins,) 1 - P_e, i.e. token recovery — what make_tau_inverse consumes."""
+        """(num_bins,) 1 - P_e, i.e. token recovery — what TimeReparametrization.from_recovery consumes."""
         return 1 - self.compute()

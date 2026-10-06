@@ -29,7 +29,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from src.flow.schedule import make_tau_inverse, sweep_corruption
+from src.flow.schedule import TimeReparametrization, sweep_corruption
 
 
 def measure_p_e(
@@ -84,10 +84,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     fit_ts = np.linspace(0.0, 1.0, args.num_bins + 1)
     fit_recovery = 1.0 - measure_p_e(tokens, args.vocab_size, fit_ts, seed=0)
-    tau_inverse = make_tau_inverse(fit_ts, fit_recovery, args.vocab_size)
+    reparam = TimeReparametrization.from_recovery(fit_ts, fit_recovery, args.vocab_size)
 
     u = np.linspace(0.0, 1.0, args.points)
-    t_tau = np.asarray(tau_inverse(u))
+    t_tau = np.asarray(reparam.t_of(u))
     # Both arms measured under the same fresh corruption, so the contrast is the schedule
     # and nothing else.
     p_e_tau = measure_p_e(tokens, args.vocab_size, t_tau, seed=1)

@@ -11,7 +11,6 @@ the teacher plus one extra time embedder, zero-initialised, so it *starts* as th
 learns only the dependence on where it is jumping to.
 """
 
-from collections.abc import Callable
 
 import lightning.pytorch as pl
 import torch
@@ -23,6 +22,7 @@ from src.checkpointing import load_components
 from src.data import VocabMap
 from src.flow.coefficients import make_schedule, waypoint_strength
 from src.flow.sampling_probe import SamplingProbe
+from src.flow.schedule import TimeReparametrization
 from src.models import build_two_time_denoiser, load_teacher_weights
 from src.reporting import MetricReporting
 
@@ -54,7 +54,7 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         canvas_len: int,
         tokenizer: WhisperTokenizerFast,
         vocab_map: VocabMap | None = None,
-        sample_t_fn: Callable | None = None,
+        time_reparam: TimeReparametrization | None = None,
     ) -> None:
         """Load the teacher, build the student from it, and take the path it was trained on.
 
@@ -63,16 +63,16 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         denoise the same probability path or it is learning a different map.
         """
         super().__init__()
-        # tokenizer/vocab_map/sample_t_fn are objects, not hyperparameters: they would
+        # tokenizer/vocab_map/time_reparam are objects, not hyperparameters: they would
         # not survive a checkpoint round-trip and are rebuilt from the data instead.
         self.save_hyperparameters(
-            ignore=["tokenizer", "vocab_map", "sample_t_fn"], logger=False
+            ignore=["tokenizer", "vocab_map", "time_reparam"], logger=False
         )
         self.cfg = cfg
         self.vocab_size = vocab_size
         self.pad_id = pad_id
         self.canvas_len = canvas_len
-        self.sample_t_fn = sample_t_fn
+        self.time_reparam = time_reparam or TimeReparametrization.identity()
         self.tokenizer = tokenizer
         self.vocab_map = vocab_map
 

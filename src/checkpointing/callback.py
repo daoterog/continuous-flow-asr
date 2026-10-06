@@ -71,9 +71,9 @@ class ComponentCheckpoint(pl.Callback):
         # Only for a run that actually refreshed. One that did not trained on the prior all
         # the way through, and recording where mu happened to settle would send sample_eval
         # off to rebuild a schedule the model never saw.
-        tau = getattr(module, "tau", None)
-        settled = getattr(tau, "mu_accuracy", None)
-        if settled is not None and int(tau.cfg.get("refresh_every_n_epochs", 0)) > 0:
+        scheduler = getattr(module, "tau_scheduler", None)
+        settled = getattr(scheduler, "mu_accuracy", None)
+        if settled is not None and int(scheduler.cfg.get("refresh_every_n_epochs", 0)) > 0:
             self.manifest = OmegaConf.merge(
                 self.manifest, OmegaConf.create({"mu_accuracy_final": float(settled)})
             )

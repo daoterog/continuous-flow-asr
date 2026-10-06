@@ -156,7 +156,7 @@ def _build(cfg: DictConfig, dm: AudioFeatureDataModule) -> FlowMatching:
     return FlowMatching(
         cfg, vocab_size=dm.vocab_size, pad_id=dm.pad_id,
         canvas_len=cfg.data.canvas_len, tokenizer=dm.tokenizer,
-        vocab_map=dm.vocab_map, sample_t_fn=T.build_sample_t_fn(dm, cfg),
+        vocab_map=dm.vocab_map, time_reparam=T.build_time_reparam(dm, cfg),
     )
 
 
@@ -186,9 +186,9 @@ def _model_from_components(
     # approximates a simulated curve and cannot reproduce a measured one at all.
     saved = load_tau(args.components, variant=args.variant)
     if saved is not None:
-        model.sample_t_fn = saved
-        print(f"tau from the run's saved tau_{args.variant}.npz")
-    elif model.time_input == "uniform" and model.sample_t_fn is not None:
+        model.time_reparam = saved
+        print(f"tau from the run's saved tau_{args.variant}.npz: {saved!r}")
+    elif model.time_input == "uniform" and not model.time_reparam.is_identity:
         print("warning: no saved tau for a time_input=uniform model; the u fed to the "
               "denoiser follows the rebuilt curve, not the one it trained against")
     return model

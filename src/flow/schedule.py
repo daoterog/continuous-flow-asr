@@ -1,14 +1,14 @@
 """The time reparameterization: tau, its inverse, and the curves behind it.
 
 Not metrics, though one of them is measured with one. ``BinnedTokenError`` reports P_e(t);
-this module turns a P_e curve into tau (Eq. 25), inverts it, and hands training and the
-sampler the same u -> t map. Two curves can feed it:
+this module turns a P_e curve into a `TimeReparametrization` (Eq. 25), which hands
+training, the sampler and the binned metrics the same u <-> t map. Two curves can feed it:
 
   * what the interpolant alone does to a target, available before a single step of
-    training. ``src.flow.recovery`` integrates this exactly and ``exact_tau_inverse``
-    below is the whole construction; ``sweep_corruption`` is the Monte Carlo form it
-    replaced, kept because the scripts that validate the exact curve need something
-    independent to contest it with.
+    training. ``src.flow.recovery`` integrates this exactly and
+    ``TimeReparametrization.exact`` below is the whole construction; ``sweep_corruption``
+    is the Monte Carlo form it replaced, kept because the scripts that validate the exact
+    curve need something independent to contest it with.
   * the model's own P_e, via MeasuredTau — which moves left as the denoiser learns to read
     the audio and recovers tokens the corrupted field alone could not.
 
@@ -17,12 +17,17 @@ second. They decide when tau is re-derived and hand the model the new one.
 """
 
 from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
 from src.flow.recovery import recovery_curve
+
+# What the map accepts and returns, matched: a float, an array, or a tensor on any device.
+ArrayLike = float | np.ndarray | torch.Tensor
 
 # Values of t the exact curve is evaluated at before inverting. Not a precision tradeoff
 # the way `schedule.num_bins` is for the measured curve: the curve is exact at every point,
@@ -133,161 +138,288 @@ def tau_from_recovery(
     return np.maximum.accumulate(tau)
 
 
-def make_tau_inverse(
-    ts: np.ndarray | list[float],
-    recovery: np.ndarray | list[float],
-    vocab_size: int,
-    flat_eps: float = 1e-3,
-    p_e0: float | None = None,
-) -> Callable:
-    """Build t = tau^-1(u), the map from a uniform draw to a flow time.
+@dataclass(frozen=True, eq=False)
+class TimeReparametrization:
+    """u = tau(t), the fraction of decoding done by flow time t, and its inverse.
 
-    This is the per-token error rate.
+    Training draws u ~ U[0, 1] and builds the interpolant at t = tau^-1(u), so the batch
+    lands where tokens are actually being decided rather than in the dead zone, where x_t
+    carries nothing. The sampler walks the same map (`sampling_grid`), the binned metrics
+    cut their bins along it (`bin_edges`), and a `flow.time_input: uniform` denoiser is fed
+    u itself.
 
-    Inverting it means reading the graph with the axes swapped, interpolating with tau as
-    x and t as y. Two details that needs:
-      * tau is pinned at 0 across the dead zone, and interpolation needs x strictly
-        increasing. Keeping the LAST t of each flat run makes tau^-1(0) the right edge of
-        that zone instead of spreading samples across a region where nothing is decided.
-      * below flat_eps tau is indistinguishable from 0 — part sampling noise, part real
-        but negligible recovery — and the monotone fix above has already frozen those in
-        as genuine-looking steps. Clamping to exactly 0 is what stops them becoming knots.
+    The curve is piecewise-linear through its knots, and both directions read the same
+    knots with the axes swapped. Build one with a named constructor:
 
-    Neither end needs anchoring when the curve is swept at t the schedule did not choose:
-    tau is normalised by the lowest bin's error so tau(lowest) == 0 by construction, and
-    the highest bin sits at ~1. Measured on a trained checkpoint with a 150-bin sweep,
-    tau^-1(0) lands at 0.030 and tau^-1(1) at 0.997 on their own, and tau clears flat_eps
-    within 5 bins. A wide flat run then means the model really is making no progress there,
-    and skipping it is the point.
+        TimeReparametrization.identity()            no schedule: u == t
+        TimeReparametrization.exact(V, a, b, g)     the interpolant's own curve, no model
+        TimeReparametrization.from_recovery(...)    from a measured recovery curve
+        TimeReparametrization.load(path)            as saved next to a checkpoint
 
-    See scripts/schedule/explain_tau.py, which rebuilds this with np.interp and plots each stage.
-
-    The returned callable carries `tau`, `ts` and `knots` as attributes, for plotting and
-    for ``schedule_bin_edges``.
-
-    A tensor argument is interpolated on its own device. Training calls this once per
-    step, so routing it through numpy would mean a device-to-host copy — and therefore a
-    full CUDA sync, blocking on every kernel still in flight — inside the hot loop.
+    `tau_scheduler` strategies (`src.flow.tau_*`) decide when a new one replaces the old.
     """
-    ts = np.asarray(ts, dtype=np.float64)
-    tau = tau_from_recovery(recovery, vocab_size, p_e0=p_e0)
-    tau[tau < flat_eps] = 0.0
 
-    keep = np.concatenate([np.diff(tau) > 0, [True]])  # last index of every flat run
-    tau_k, t_k = tau[keep], ts[keep]
-    tau_inverse = tau_inverse_from_knots(tau_k, t_k)
-    tau_inverse.tau = tau
-    tau_inverse.ts = ts
-    return tau_inverse
+    # Flow times, increasing. The first is tau^-1(0), the right edge of the dead zone; the
+    # last is where recovery saturates.
+    t_knots: np.ndarray
+    # tau at those times, strictly increasing, in [0, 1].
+    u_knots: np.ndarray
+    # Where the curve came from: "identity", "simulated", "measured".
+    source: str
+    # The whole tau(t) curve before it was thinned to knots, for plotting. Only
+    # `from_recovery` has one; the knots alone define the map.
+    curve_t: np.ndarray | None = field(default=None, repr=False)
+    curve_u: np.ndarray | None = field(default=None, repr=False)
+    # Knots uploaded per device, so a tensor never round-trips through the host.
+    _device_knots: dict = field(default_factory=dict, repr=False, compare=False)
 
+    def __post_init__(self) -> None:
+        """Hold the knots as float64 and check they describe a map."""
+        t_k = np.asarray(self.t_knots, dtype=np.float64)
+        u_k = np.asarray(self.u_knots, dtype=np.float64)
+        object.__setattr__(self, "t_knots", t_k)
+        object.__setattr__(self, "u_knots", u_k)
+        if t_k.ndim != 1 or t_k.shape != u_k.shape or t_k.size == 0:
+            raise ValueError(
+                f"knots must be two non-empty 1-D arrays of one length, got "
+                f"{t_k.shape} and {u_k.shape}"
+            )
+        if np.any(np.diff(u_k) <= 0) or np.any(np.diff(t_k) < 0):
+            raise ValueError("u_knots must be strictly increasing and t_knots increasing")
+        if t_k.min() < 0 or t_k.max() > 1 or u_k.min() < 0 or u_k.max() > 1:
+            raise ValueError("knots must lie in [0, 1]")
 
-def tau_inverse_from_knots(tau_k: np.ndarray, t_k: np.ndarray) -> Callable:
-    """t = tau^-1(u) from its knots alone: piecewise-linear, `tau_k` strictly increasing.
+    # -- constructors ---------------------------------------------------------------
 
-    What `make_tau_inverse` builds once it has the knots, split out so a curve saved with
-    a checkpoint (`save_tau`) can be rebuilt exactly, including a measured one that no
-    config could reproduce. The returned callable carries `knots`.
-    """
-    tau_k = np.asarray(tau_k, dtype=np.float64)
-    t_k = np.asarray(t_k, dtype=np.float64)
-    knots: dict[tuple, tuple[torch.Tensor, torch.Tensor]] = {}  # uploaded once per device
+    @classmethod
+    def identity(cls) -> "TimeReparametrization":
+        """No reparametrization: t is drawn uniformly, so u and t are the same number."""
+        return cls(np.array([0.0, 1.0]), np.array([0.0, 1.0]), source="identity")
 
-    def _knots_on(device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
-        if device not in knots:
+    @classmethod
+    def from_recovery(
+        cls,
+        ts: np.ndarray | list[float],
+        recovery: np.ndarray | list[float],
+        vocab_size: int,
+        *,
+        flat_eps: float = 1e-3,
+        p_e0: float | None = None,
+        source: str = "measured",
+    ) -> "TimeReparametrization":
+        """tau from a token-recovery curve sampled at `ts` (`tau_from_recovery`, Eq. 25).
+
+        Inverting it means reading the graph with the axes swapped, interpolating with tau
+        as x and t as y. Two details that needs:
+          * tau is pinned at 0 across the dead zone, and interpolation needs x strictly
+            increasing. Keeping the LAST t of each flat run makes tau^-1(0) the right edge
+            of that zone instead of spreading samples across a region where nothing is
+            decided.
+          * below flat_eps tau is indistinguishable from 0 — part sampling noise, part real
+            but negligible recovery — and the monotone fix has already frozen those in as
+            genuine-looking steps. Clamping to exactly 0 is what stops them becoming knots.
+
+        Neither end needs anchoring when the curve is swept at t the schedule did not
+        choose: tau is normalised by the lowest bin's error so tau(lowest) == 0 by
+        construction, and the highest bin sits at ~1. Measured on a trained checkpoint with
+        a 150-bin sweep, tau^-1(0) lands at 0.030 and tau^-1(1) at 0.997 on their own, and
+        tau clears flat_eps within 5 bins. A wide flat run then means the model really is
+        making no progress there, and skipping it is the point.
+
+        See scripts/schedule/explain_tau.py, which rebuilds this with np.interp and plots
+        each stage.
+        """
+        ts = np.asarray(ts, dtype=np.float64)
+        tau = tau_from_recovery(recovery, vocab_size, p_e0=p_e0)
+        tau[tau < flat_eps] = 0.0
+        keep = np.concatenate([np.diff(tau) > 0, [True]])  # last index of every flat run
+        return cls(ts[keep], tau[keep], source=source, curve_t=ts, curve_u=tau)
+
+    @classmethod
+    def exact(
+        cls,
+        vocab_size: int,
+        alpha_fn: Callable,
+        beta_fn: Callable,
+        gamma_fn: Callable | None = None,
+        mu_accuracy: float = 0.0,
+        points: int = EXACT_GRID_POINTS,
+    ) -> "TimeReparametrization":
+        """tau for the interpolant path itself, with no model and no sampling in it.
+
+        The prior tau, and the only thing `SimulatedTau` ever rebuilds. It needs no tokens
+        and no datamodule: recovery under the interpolant depends on the vocabulary size and
+        the coefficients alone, which is why `sweep_corruption` was drawing real targets
+        only to average the vocabulary out of them again.
+
+        Two arguments `from_recovery` defaults differently for the measured curve:
+
+          * `p_e0` is the path's own error at t=0, not the chance rate `1 - 1/V`. They agree
+            when gamma(0) == 0, but `audio_cond` has gamma(0) == 1, so mu is already in the
+            field at t=0 and recovery starts above chance — under the chance normaliser
+            tau(0) comes out at 0.012 rather than 0 at mu accuracy 0.9, and drifts further
+            up as mu learns. This is what `MeasuredTau` already passes.
+          * `flat_eps` is 0. It exists to stop sampling noise near tau=0 being frozen in as
+            knots, and the exact curve has none: it is strictly increasing from t=0 up to
+            the point where recovery saturates, so tau^-1(0) can be read at face value.
+
+        The saturation at the top is real and is left alone — recovery reaches 1.0 to
+        machine precision around t=0.93 at V=1193, so tau is flat above it and many u map
+        to the same t. `sampling_grid` collapses those, which is still the right handling.
+        """
+        ts = np.linspace(0.0, 1.0, points)
+        recovery = recovery_curve(ts, vocab_size, alpha_fn, beta_fn, gamma_fn, mu_accuracy)
+        return cls.from_recovery(
+            ts, recovery, vocab_size, flat_eps=0.0, p_e0=float(1.0 - recovery[0]),
+            source="simulated",
+        )
+
+    @classmethod
+    def load(cls, path: str | Path) -> "TimeReparametrization":
+        """Rebuild a curve written by `save`, exactly, whatever it was built from."""
+        data = np.load(path)
+        return cls(data["t_knots"], data["u_knots"], source=str(data["source"]))
+
+    def save(self, path: str | Path) -> None:
+        """Write the knots, which are the whole map, as `.npz`."""
+        np.savez(path, t_knots=self.t_knots, u_knots=self.u_knots, source=self.source)
+
+    # -- the map ----------------------------------------------------------------------
+
+    def t_of(self, u: ArrayLike) -> ArrayLike:
+        """tau^-1: the flow time a uniform draw u maps to. Clamps outside [0, 1].
+
+        A tensor is interpolated on its own device. Training calls this once per step, so
+        routing it through numpy would mean a device-to-host copy — and therefore a full
+        CUDA sync, blocking on every kernel still in flight — inside the hot loop.
+        """
+        if self.is_identity:
+            return u
+        return self._interp(u, self.u_knots, self.t_knots, 0)
+
+    def u_of(self, t: ArrayLike) -> ArrayLike:
+        """tau: the uniform draw that lands at flow time t. 0 below t_start, 1 above t_end.
+
+        Training never needs this direction — it draws u first. It is for code that picks
+        t first, such as a probe at fixed flow times.
+        """
+        if self.is_identity:
+            return t
+        return self._interp(t, self.t_knots, self.u_knots, 1)
+
+    # -- read-outs --------------------------------------------------------------------
+
+    @property
+    def is_identity(self) -> bool:
+        """Whether this is no reparametrization at all (`schedule.enabled: false`)."""
+        return self.source == "identity"
+
+    @property
+    def t_start(self) -> float:
+        """tau^-1(0): where the draw, and sampling, begin — the edge of the dead zone."""
+        return float(self.t_of(0.0))
+
+    @property
+    def t_end(self) -> float:
+        """tau^-1(1): where the draw ends — where recovery saturates."""
+        return float(self.t_of(1.0))
+
+    @property
+    def median_t(self) -> float:
+        """The t half a uniform batch lands at or below. tau^-1 is t's quantile function,
+        so this is tau^-1(0.5) exactly, with no sampling and no seed to wobble."""
+        return float(self.t_of(0.5))
+
+    def quantiles(self, qs: ArrayLike) -> np.ndarray:
+        """The flow times at quantiles `qs` in [0, 1] of the training draw."""
+        return np.asarray(self.t_of(np.asarray(qs, dtype=np.float64)), dtype=np.float64)
+
+    def sampling_grid(self, num_steps: int) -> tuple[np.ndarray, np.ndarray]:
+        """(t_n, u_n) with u_n = n/N and t_n = tau^-1(u_n) — the sampler's schedule.
+
+        Training and generation have to share this. Once the model is trained under the
+        reparameterization it has seen almost nothing below the dead zone, so integrating
+        on a uniform-in-t grid afterwards would run it far out of distribution. u_n comes
+        back too, for a denoiser fed `flow.time_input: uniform`.
+
+        Repeated t are dropped, keeping the first u of each run, so `num_steps` is a budget
+        rather than a promise. Wherever tau is flat, several u map to the same t, and the
+        integrator would re-run the denoiser on a state it has already seen — measured on a
+        trained checkpoint, five of sixteen steps all landed on t=1.000 and integrated
+        nothing. Collapsing them skips the dead interval and spends the steps that remain
+        on t that actually differ.
+
+        This is `bin_edges(num_steps)` up to that collapse: the two share a construction,
+        but a bin may legitimately be empty while a step may not be a no-op.
+        """
+        u = np.linspace(0.0, 1.0, num_steps + 1)
+        t = np.asarray(self.t_of(u), dtype=np.float64)
+        keep = np.concatenate([[True], np.diff(t) > 0])
+        t, u = t[keep], u[keep]
+        if t.size < 2:  # a constant tau leaves nothing to integrate along
+            return np.array([float(t[0]) if t.size else 0.0, 1.0]), np.array([0.0, 1.0])
+        return t, u
+
+    def bin_edges(self, num_bins: int) -> torch.Tensor:
+        """Bin edges at the k/n quantiles of the training draw, so no bin sits empty.
+
+        Equal-width bins are the wrong grid under a reparametrization — it puts nothing
+        below the dead zone, so ~65% of them would stay empty and every sample would crowd
+        into the top two or three. Under the identity these are equal-width anyway.
+        """
+        if self.is_identity:
+            return torch.linspace(0, 1, num_bins + 1)
+        edges = self.quantiles(np.linspace(0.0, 1.0, num_bins + 1))
+        if np.all(np.diff(edges) > 0):
+            return torch.as_tensor(edges, dtype=torch.float32)
+
+        # A measured tau saturates: once the denoiser recovers everything above some t, tau
+        # is 1 there and tau^-1 is flat, so the top quantiles land on the same t. Those bins
+        # would hold almost nothing anyway, so nudge them apart rather than refusing to bin
+        # at all — raising here would kill a run for a schedule that is perfectly usable.
+        span = float(edges[-1] - edges[0])
+        if span <= 0:
+            raise ValueError(
+                f"{self!r} is constant on [0, 1] at t={edges[0]:.4f}, so there is no "
+                f"schedule to bin along. The model recovers nothing anywhere; train further "
+                f"first."
+            )
+        eps = span * 1e-6
+        for i in range(1, edges.size):
+            if edges[i] <= edges[i - 1]:
+                edges[i] = edges[i - 1] + eps
+        return torch.as_tensor(edges, dtype=torch.float32)
+
+    def __repr__(self) -> str:
+        """`TimeReparametrization(measured, t in [0.512, 0.997], median 0.803, 143 knots)`."""
+        return (
+            f"TimeReparametrization({self.source}, t in [{self.t_start:.3f}, "
+            f"{self.t_end:.3f}], median {self.median_t:.3f}, {self.t_knots.size} knots)"
+        )
+
+    # -- internals --------------------------------------------------------------------
+
+    def _interp(self, x: ArrayLike, xk: np.ndarray, yk: np.ndarray, direction: int):
+        """Piecewise-linear y(x) through (xk, yk), matching np.interp's clamp at the ends."""
+        if not torch.is_tensor(x):
+            out = np.interp(np.asarray(x, dtype=np.float64), xk, yk)
+            return float(out) if np.ndim(x) == 0 else out
+        if xk.size == 1:  # the curve never rises: every input lands on the one knot
+            return torch.full_like(x, float(yk[0]))
+
+        key = (x.device, direction)
+        if key not in self._device_knots:
             # float64 so the interpolation matches np.interp to ~1e-9 rather than the
             # ~4e-5 float32 accumulates; it is a handful of values, so the cost is nil.
-            knots[device] = (
-                torch.as_tensor(tau_k, dtype=torch.float64, device=device),
-                torch.as_tensor(t_k, dtype=torch.float64, device=device),
+            self._device_knots[key] = (
+                torch.as_tensor(xk, dtype=torch.float64, device=x.device),
+                torch.as_tensor(yk, dtype=torch.float64, device=x.device),
             )
-        return knots[device]
-
-    def tau_inverse(u: np.ndarray | torch.Tensor) -> np.ndarray | torch.Tensor:
-        """Map u: (B,) uniform in [0, 1] to t: (B,) flow times."""
-        if not torch.is_tensor(u):
-            return np.interp(np.asarray(u), tau_k, t_k)
-
-        xk, yk = _knots_on(u.device)
-        if xk.numel() == 1:  # tau never rises: every draw lands on the one knot
-            return torch.full_like(u, float(t_k[0]))
-
-        # Piecewise-linear, matching np.interp including its clamp outside the knots:
-        # below the first knot w goes negative and above the last it exceeds 1, and the
+        xk_t, yk_t = self._device_knots[key]
+        # Below the first knot w goes negative and above the last it exceeds 1, and the
         # clamp pins both to the endpoint values.
-        x = u.detach().double()
-        idx = torch.searchsorted(xk, x.contiguous(), right=True).clamp(1, xk.numel() - 1)
-        lo, hi = xk[idx - 1], xk[idx]
-        w = ((x - lo) / (hi - lo).clamp_min(torch.finfo(torch.float64).tiny)).clamp(0, 1)
-        return torch.lerp(yk[idx - 1], yk[idx], w).to(u.dtype)
-
-    tau_inverse.knots = (tau_k, t_k)
-    return tau_inverse
-
-
-def exact_tau_inverse(
-    vocab_size: int,
-    alpha_fn: Callable,
-    beta_fn: Callable,
-    gamma_fn: Callable | None = None,
-    mu_accuracy: float = 0.0,
-    points: int = EXACT_GRID_POINTS,
-) -> Callable:
-    """Build t = tau^-1(u) for the interpolant path, with no model and no sampling in it.
-
-    The prior tau, and the only thing `SimulatedTau` ever rebuilds. It needs no tokens and
-    no datamodule: recovery under the interpolant depends on the vocabulary size and the
-    coefficients alone, which is why `sweep_corruption` was drawing real targets only to
-    average the vocabulary out of them again.
-
-    Two arguments `make_tau_inverse` defaults differently for the measured curve:
-
-      * `p_e0` is the path's own error at t=0, not the chance rate `1 - 1/V`. They agree
-        when gamma(0) == 0, but `audio_cond` has gamma(0) == 1, so mu is already in the
-        field at t=0 and recovery starts above chance — under the chance normaliser tau(0)
-        comes out at 0.012 rather than 0 at mu accuracy 0.9, and drifts further up as mu
-        learns. This is what `MeasuredTau` already passes.
-      * `flat_eps` is 0. It exists to stop sampling noise near tau=0 being frozen in as
-        knots, and the exact curve has none: it is strictly increasing from t=0 up to the
-        point where recovery saturates, so tau^-1(0) can be read at face value.
-
-    The saturation at the top is real and is left alone — recovery reaches 1.0 to machine
-    precision around t=0.93 at V=1193, so tau is flat above it and many u map to the same
-    t. `generation_grid` collapses those, which is still the right handling.
-    """
-    ts = np.linspace(0.0, 1.0, points)
-    recovery = recovery_curve(ts, vocab_size, alpha_fn, beta_fn, gamma_fn, mu_accuracy)
-    return make_tau_inverse(
-        ts, recovery, vocab_size, flat_eps=0.0, p_e0=float(1.0 - recovery[0])
-    )
-
-
-def generation_grid(
-    tau_inverse: Callable, num_steps: int
-) -> tuple[np.ndarray, np.ndarray]:
-    """(t_n, u_n) with t_n = tau^-1(u_n), u_n = n/N — the sampler's schedule, uniform in tau.
-
-    Both are returned because a denoiser trained with `flow.time_input: uniform` is fed
-    u_n while the state is still stepped in t_n, and u_n is what this starts from — no need
-    to map t back.
-
-    Training and generation have to share this. Once the model is trained under the
-    reparameterization it has seen almost nothing below the dead zone, so integrating on
-    a uniform-in-t grid afterwards would run it far out of distribution.
-
-    Repeated t are dropped, so `num_steps` is a budget rather than a promise. Wherever tau
-    is flat, several u map to the same t, and the integrator would re-run the denoiser on a
-    state it has already seen — measured on a trained checkpoint, five of sixteen steps all
-    landed on t=1.000 and integrated nothing. Collapsing them skips the dead interval and
-    spends the steps that remain on t that actually differ.
-
-    This is `schedule_bin_edges(tau_inverse, num_steps)` up to that collapse: the two share
-    a construction, but a bin may legitimately be empty while a step may not be a no-op.
-    """
-    u = np.linspace(0.0, 1.0, num_steps + 1)
-    grid = np.asarray(tau_inverse(u), dtype=np.float64)
-    # Of each run of repeated t, the first u is the one kept.
-    keep = np.concatenate([[True], np.diff(grid) > 0])
-    grid, u = grid[keep], u[keep]
-    if grid.size < 2:  # a constant tau leaves nothing to integrate along
-        return np.array([float(grid[0]) if grid.size else 0.0, 1.0]), np.array([0.0, 1.0])
-    return grid, u
+        xd = x.detach().double()
+        idx = torch.searchsorted(xk_t, xd.contiguous(), right=True).clamp(1, xk_t.numel() - 1)
+        lo, hi = xk_t[idx - 1], xk_t[idx]
+        w = ((xd - lo) / (hi - lo).clamp_min(torch.finfo(torch.float64).tiny)).clamp(0, 1)
+        return torch.lerp(yk_t[idx - 1], yk_t[idx], w).to(x.dtype)

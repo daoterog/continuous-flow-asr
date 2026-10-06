@@ -108,7 +108,7 @@ def shape_checks(
     apart. Measured on the raw curve, before `tau_from_recovery` clips and accumulates:
 
       * a break only above some t_sat means recovery has saturated to 1.0 and tau to 1,
-        which is a fact about the path and is what `generation_grid`'s collapse of
+        which is a fact about the path and is what `TimeReparametrization.sampling_grid`'s collapse of
         repeated t handles;
       * a break at the BOTTOM would be the thing `flat_eps` exists for. The exact curve
         has none, which is why `tau^-1(0)` can be taken at face value.

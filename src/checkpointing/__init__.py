@@ -12,7 +12,7 @@ So a run writes a directory instead:
         vocab_map.pt      compact id -> Whisper id, without which the tokens mean nothing
         denoiser_best.pth , denoiser_final.pth
         mu_nn_best.pth    , mu_nn_final.pth
-        tau_best.npz      , tau_final.npz   the tau^-1 live when each variant was written
+        tau_best.npz      , tau_final.npz   the TimeReparametrization each was trained on
         training_state.pt optimizer + scheduler + epoch, for resuming a cut-short run
 
 Every `.pth` is a plain state_dict loaded with `weights_only=True`. The manifest is YAML

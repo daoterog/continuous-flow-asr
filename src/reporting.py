@@ -10,8 +10,6 @@ the layer that decides what reaches wandb and in what shape, which is also why i
 reach for a `SamplingProbe` or the `TauScheduler` while the metrics package may not.
 """
 
-from collections.abc import Callable
-
 import numpy as np
 import torch
 import wandb
@@ -21,6 +19,7 @@ from transformers import WhisperTokenizerFast
 
 from src.data import VocabMap
 from src.flow.sampling_probe import SamplingProbe
+from src.flow.schedule import TimeReparametrization
 from src.flow.tau_base import TauScheduler
 from src.metrics.base import TimeBinnedMetric
 from src.metrics.utils import (
@@ -43,7 +42,7 @@ class MetricReporting:
     metrics: nn.ModuleDict
     names: tuple[str, ...]
     sampling_probe: SamplingProbe
-    tau: TauScheduler
+    tau_scheduler: TauScheduler
 
     def init_metrics(
         self,
@@ -51,7 +50,7 @@ class MetricReporting:
         tokenizer: WhisperTokenizerFast,
         pad_id: int,
         vocab_map: VocabMap | None = None,
-        sample_t_fn: Callable | None = None,
+        time_reparam: TimeReparametrization | None = None,
         **bins: int | dict | None,
     ) -> None:
         """Build and validate the metric bank. Call once, from `__init__`."""
@@ -61,10 +60,10 @@ class MetricReporting:
             tokenizer,
             pad_id,
             vocab_map,
-            sample_t_fn=sample_t_fn,
+            time_reparam=time_reparam,
             **bins,
         )
-        check_metrics(self.metrics, sample_t_fn)
+        check_metrics(self.metrics, time_reparam)
 
     def update_metrics(
         self, out: dict, target_ids: torch.Tensor, t: torch.Tensor, split: str
@@ -156,8 +155,8 @@ class MetricReporting:
         finished. Mu's raw error is already a metric, so only the average is reported
         here — `mu_perr/{split}_overall` is the same reading before smoothing.
         """
-        if self.tau.mu_accuracy is not None:
-            self.log("tau/mu_accuracy_ema", self.tau.mu_accuracy)
+        if self.tau_scheduler.mu_accuracy is not None:
+            self.log("tau/mu_accuracy_ema", self.tau_scheduler.mu_accuracy)
 
     def log_tau_source(self) -> None:
         """Report which curve the live schedule came from, as a series rather than a log line.
@@ -168,7 +167,7 @@ class MetricReporting:
         one — which puts the handover on the same x-axis as `tau/t0` and `sampled/wer`,
         where it can be read against them.
         """
-        self.log("tau/source_measured", float(self.tau.source == "measured"))
+        self.log("tau/source_measured", float(self.tau_scheduler.source == "measured"))
 
     def log_sampled(self) -> None:
         """Log the WER a full integration from noise reaches on the fixed val slice.
@@ -195,20 +194,20 @@ class MetricReporting:
                 self.log(f"sampled_{method}/wer", wer, batch_size=n_utts)
                 self.log(f"sampled_{method}/perr", token_error, batch_size=n_utts)
 
-    def log_tau_shape(self, tau_inverse: Callable) -> None:
+    def log_tau_shape(self, reparam: TimeReparametrization) -> None:
         """Record what a schedule actually draws, not just where it starts.
 
         t0 alone says where the support begins; these say how the draw is spread inside
-        it, which is what moves when tau is refreshed. The sample is seeded so successive
-        epochs differ because the schedule moved, not because the draw did.
+        it, which is what moves when tau is refreshed. The quantiles are read off the curve
+        exactly; the histogram is of a seeded draw, so successive epochs differ because the
+        schedule moved, not because the draw did.
         """
-        u = torch.rand(4096, generator=torch.Generator().manual_seed(0))
-        drawn = tau_inverse(u)
-        drawn = drawn.detach().cpu().numpy() if torch.is_tensor(drawn) else np.asarray(drawn)
         for q in (10, 25, 50, 75, 90):
-            self.log(f"tau/t_q{q}", float(np.percentile(drawn, q)))
+            self.log(f"tau/t_q{q}", float(reparam.quantiles(q / 100)))
         if not isinstance(self.logger, WandbLogger) or self.trainer.sanity_checking:
             return
+        u = torch.rand(4096, generator=torch.Generator().manual_seed(0))
+        drawn = reparam.t_of(u).numpy()
         counts, edges = np.histogram(drawn, bins=40, range=(0.0, 1.0))
         self.logger.experiment.log(
             {
