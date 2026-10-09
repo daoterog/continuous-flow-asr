@@ -122,7 +122,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         cfg, vocab_size=dm.vocab_size, pad_id=dm.pad_id, canvas_len=cfg.data.canvas_len,
         tokenizer=dm.tokenizer, vocab_map=dm.vocab_map, time_reparam=reparam,
     )
-    _, built = load_components(args.components, variant=args.variant)
+    _, built, _tau = load_components(args.components, variant=args.variant)
     for name, sub in built.items():
         getattr(model, name).load_state_dict(sub.state_dict(), strict=True)
     model = model.to("cuda" if torch.cuda.is_available() else "cpu").eval()

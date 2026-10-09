@@ -27,7 +27,6 @@ from src.checkpointing import (
     load_components,
     load_manifest,
     load_state_into,
-    load_tau,
 )
 from src.data import AudioFeatureDataModule
 from src.metrics import ids_to_text, score_samples
@@ -164,7 +163,7 @@ def _model_from_components(
     args: argparse.Namespace, cfg: DictConfig, dm: AudioFeatureDataModule
 ) -> FlowMatching:
     """A FlowMatching with the saved state_dicts loaded into its submodules."""
-    manifest, built = load_components(args.components, variant=args.variant)
+    manifest, built, saved = load_components(args.components, variant=args.variant)
     if manifest.vocab_size != dm.vocab_size:
         raise SystemExit(
             f"the weights were saved for vocab {manifest.vocab_size} but this data gives "
@@ -184,7 +183,6 @@ def _model_from_components(
     # The curve these weights were trained against, exactly, where the run saved one. The
     # mu_accuracy_final rebuild is only the fallback for runs from before it did: it
     # approximates a simulated curve and cannot reproduce a measured one at all.
-    saved = load_tau(args.components, variant=args.variant)
     if saved is not None:
         model.time_reparam = saved
         print(f"tau from the run's saved tau_{args.variant}.npz: {saved!r}")

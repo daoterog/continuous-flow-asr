@@ -37,10 +37,19 @@ distill:
   hard: false
 
 sampling:
-  # Stage 3. `sample()` for a two-time model is a different integrator — uniform in tau,
-  # calling the model with both times — and is not written yet. Off so `log_sampled` returns
-  # before reaching it.
-  enabled: false
+  enabled: true
+  # The two-time integrators, under the same names the one-time path uses. They differ only
+  # in whether the state is advanced or rebuilt from a fixed x0 — both ask the model for the
+  # jump it is about to take, and both decode the last prediction.
+  method: interpolant
+  # Score both every sampling epoch, logged as sampled_<method>/wer. The pair is the point:
+  # one step of a flow map against sixteen of an integrator is the whole question.
+  log_methods: [interpolant, euler]
+  # Small and infrequent while the step is still being shaped; sampling integrates the whole
+  # canvas once per step and at 1 step it is cheap, at 16 it is not.
+  num_steps: 16
+  n_utts: 64
+  every_n_epochs: 5
 
 train:
   # The student's own rate. `denoiser_lr` and `audio_decoder_lr` belong to the frozen teacher

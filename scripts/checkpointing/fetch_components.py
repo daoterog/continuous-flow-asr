@@ -160,7 +160,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(
         f"\nload with:\n"
         f"  from src.checkpointing import load_components, run_dir\n"
-        f"  manifest, built = load_components(run_dir({args.run_id!r}, {args.save_dir!r}))"
+        f"  manifest, built, tau = load_components(run_dir({args.run_id!r}, {args.save_dir!r}))"
     )
     return 0
 

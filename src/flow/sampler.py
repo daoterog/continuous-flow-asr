@@ -85,6 +85,31 @@ def denoiser_times(
     return inputs
 
 
+def _endpoint(
+    model: torch.nn.Module,
+    x_t: torch.Tensor,
+    start: float,
+    end: float,
+    audio: torch.Tensor,
+    vocab_size: int,
+    hard: bool,
+) -> torch.Tensor:
+    """One two-time call: the endpoint the model predicts for the jump `start -> end`.
+
+    `D(x_s, s, t)` is an estimate of x1, not of the state at t — which is why the last step
+    of both two-time samplers can decode it directly.
+    """
+    batch = audio.size(0)
+    times = {
+        name: torch.full((batch,), value, device=audio.device, dtype=torch.float32)
+        for name, value in (("startpoint", start), ("endpoint", end))
+    }
+    logits = model(x_t=x_t, audio_embeddings=audio, **times)
+    if hard:
+        return F.one_hot(logits.argmax(dim=-1), vocab_size).to(logits.dtype)
+    return F.softmax(logits, dim=-1)
+
+
 @torch.no_grad()
 def sample_tokens(
     denoiser: torch.nn.Module,
@@ -196,3 +221,103 @@ def sample_tokens_euler(
         x_t = x_t + (t_next - t) * drift(x_t, x1_hat, t, mu, waypoint, eps)
 
     return x_t.argmax(dim=-1)
+
+
+@torch.no_grad()
+def sample_map_interpolant(
+    model: torch.nn.Module,
+    audio: torch.Tensor,
+    grid: np.ndarray | list[float],
+    vocab_size: int,
+    canvas_len: int,
+    alpha_fn: Callable,
+    beta_fn: Callable,
+    gamma_fn: Callable | None = None,
+    mu: torch.Tensor | None = None,
+    hard: bool = False,
+    x1_init: torch.Tensor | None = None,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Integrate a two-time model, rebuilding the interpolant at each step.
+
+    The two-time analogue of `sample_tokens`: the endpoint estimate comes from
+    `D(x, s, t_next)` instead of `D(x, s)`, and the state is rebuilt from the *same* x0 at
+    the next time rather than advanced. x0 held fixed is what distinguishes this from
+    `sample_map`; the error of one step does not carry into the next.
+
+    No `time_grid` and no `waypoint`. Distillation conditions both model inputs on real flow
+    time — `FlowMapping` refuses a teacher trained any other way — so there is no u to feed,
+    and the waypoint term belongs to a gamma this path already rules out.
+    """
+    batch = audio.size(0)
+    x0 = torch.randn(
+        batch, canvas_len, vocab_size, device=audio.device, generator=generator
+    )
+
+    def state(t: float, x1: torch.Tensor | None) -> torch.Tensor:
+        out = alpha_fn(t) * x0
+        if x1 is not None:
+            out = out + beta_fn(t) * x1
+        if gamma_fn is not None and mu is not None:
+            out = out + gamma_fn(t) * mu
+        return out
+
+    times = [float(t) for t in grid]
+    x_t = state(times[0], x1_init)
+    x1_hat = None
+    for step, (t, t_next) in enumerate(pairwise(times)):
+        x1_hat = _endpoint(model, x_t, t, t_next, audio, vocab_size, hard)
+        if step < len(times) - 2:
+            x_t = state(t_next, x1_hat)
+    return x1_hat.argmax(dim=-1)
+
+
+@torch.no_grad()
+def sample_map(
+    model: torch.nn.Module,
+    audio: torch.Tensor,
+    grid: np.ndarray | list[float],
+    vocab_size: int,
+    canvas_len: int,
+    alpha_fn: Callable,
+    beta_fn: Callable,
+    gamma_fn: Callable | None = None,
+    mu: torch.Tensor | None = None,
+    hard: bool = False,
+    x1_init: torch.Tensor | None = None,
+    generator: torch.Generator | None = None,
+    eps: float = 1e-5,
+) -> torch.Tensor:
+    """Integrate a two-time model by advancing the state — FMLM's `generate_samples`.
+
+    The step is the Euler map the distillation rollout already trains against:
+
+        x <- state * x + pred * D(x, s, t_next),
+        state = (1 - t_next) / (1 - s),   pred = (t_next - s) / (1 - s)
+
+    which is `x + h (D - x) / (1 - s)` rearranged, so it is the drift step of
+    `sample_tokens_euler` written in the form `map_step` uses. The difference from
+    `sample_map_interpolant` is only that x carries forward instead of being rebuilt.
+
+    The last step returns the prediction rather than the integrated state (algo.py:1548).
+    That matches `sample_tokens` and differs from `sample_tokens_euler`, which decodes the
+    state — a difference worth keeping in mind, since it is the only thing separating those
+    two one-time samplers.
+    """
+    batch = audio.size(0)
+    x_t = alpha_fn(grid[0]) * torch.randn(
+        batch, canvas_len, vocab_size, device=audio.device, generator=generator
+    )
+    if x1_init is not None:
+        x_t = x_t + beta_fn(grid[0]) * x1_init
+    if gamma_fn is not None and mu is not None:
+        x_t = x_t + gamma_fn(grid[0]) * mu
+
+    times = [float(t) for t in grid]
+    x1_hat = None
+    for step, (t, t_next) in enumerate(pairwise(times)):
+        x1_hat = _endpoint(model, x_t, t, t_next, audio, vocab_size, hard)
+        if step < len(times) - 2:
+            remaining = max(1.0 - t, eps)
+            x_t = ((1.0 - t_next) / remaining) * x_t + ((t_next - t) / remaining) * x1_hat
+    return x1_hat.argmax(dim=-1)

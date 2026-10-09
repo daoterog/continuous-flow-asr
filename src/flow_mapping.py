@@ -21,6 +21,7 @@ from transformers import WhisperTokenizerFast
 from src.checkpointing import load_components
 from src.data import VocabMap
 from src.flow.coefficients import make_schedule, waypoint_strength
+from src.flow.sampler import sample_map, sample_map_interpolant
 from src.flow.sampling_probe import SamplingProbe
 from src.flow.schedule import TimeReparametrization
 from src.models import build_two_time_denoiser, load_teacher_weights
@@ -34,6 +35,11 @@ EPS = 1e-8
 # row trains exactly one, so these are also the relative weights of the three objectives.
 # `train.validate_distill_split` checks the config against this before a module is built.
 DISTILL_GROUPS = ("diagonal", "boundary", "offdiag")
+
+# `sampling.method` selects one, by the same names the one-time path uses so a config
+# reads the same for both modules and a teacher/student pair cannot be set up on
+# different integrators by accident.
+MAP_SAMPLERS = {"interpolant": sample_map_interpolant, "euler": sample_map}
 
 
 class FlowMapping(MetricReporting, pl.LightningModule):
@@ -54,7 +60,6 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         canvas_len: int,
         tokenizer: WhisperTokenizerFast,
         vocab_map: VocabMap | None = None,
-        time_reparam: TimeReparametrization | None = None,
     ) -> None:
         """Load the teacher, build the student from it, and take the path it was trained on.
 
@@ -63,23 +68,19 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         denoise the same probability path or it is learning a different map.
         """
         super().__init__()
-        # tokenizer/vocab_map/time_reparam are objects, not hyperparameters: they would
-        # not survive a checkpoint round-trip and are rebuilt from the data instead.
-        self.save_hyperparameters(
-            ignore=["tokenizer", "vocab_map", "time_reparam"], logger=False
-        )
+        # tokenizer/vocab_map are objects, not hyperparameters: they would not survive a
+        # checkpoint round-trip and are rebuilt from the data instead.
+        self.save_hyperparameters(ignore=["tokenizer", "vocab_map"], logger=False)
         self.cfg = cfg
         self.vocab_size = vocab_size
         self.pad_id = pad_id
         self.canvas_len = canvas_len
-        self.time_reparam = time_reparam or TimeReparametrization.identity()
         self.tokenizer = tokenizer
         self.vocab_map = vocab_map
 
         distill = cfg.distill
-        manifest, teacher = load_components(
-            distill.teacher, variant=distill.get("variant", "best")
-        )
+        variant = distill.get("variant", "best")
+        manifest, teacher, teacher_tau = load_components(distill.teacher, variant=variant)
         for key, want, got in (
             ("vocab_size", int(manifest.vocab_size), int(vocab_size)),
             ("canvas_len", int(manifest.canvas_len), int(canvas_len)),
@@ -144,9 +145,23 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         # gets here; these fractions are therefore also the weight of each objective.
         self.split = tuple(float(distill.split[k]) for k in DISTILL_GROUPS)
 
-        # Sampling a two-time model needs its own integrator; until stage 3 writes one,
-        # `sampling.enabled: false` makes `is_due` False so `sample()` is never reached.
         self.sampling_probe = SamplingProbe(cfg.get("sampling"), cfg.data.batch_size)
+
+        # Always the teacher's, never this run's. A run saves the curve its weights were
+        # trained against beside them, so when one is there it is used verbatim. Older
+        # checkpoints have none; theirs was the simulated curve, which is the closed form at
+        # the accuracy the manifest records, so it rebuilds exactly. Either way the student
+        # samples on the teacher's grid, which is what makes the two ladders comparable.
+        self.time_reparam = teacher_tau or TimeReparametrization.exact(
+            vocab_size,
+            alpha_fn=self.alpha_fn,
+            beta_fn=self.beta_fn,
+            gamma_fn=self.gamma_fn,
+            mu_accuracy=float(
+                manifest.get("mu_accuracy_final")
+                or manifest.run_config.schedule.get("mu_accuracy", 0.0)
+            ),
+        )
 
         # Only the student trains, so only the student is worth compiling.
         if cfg.train.get("compile"):
@@ -507,20 +522,45 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         num_steps: int,
         hard: bool = False,
         init_from_mu: bool | None = None,
+        method: str | None = None,
+        generator: torch.Generator | None = None,
     ) -> torch.Tensor:
-        """Integrate from noise to (B, canvas_len) token ids. Not written yet.
+        """Integrate from noise to (B, canvas_len) token ids, asking for each jump directly.
 
-        TODO(stage 3): a two-time model needs its own integrator and cannot reuse
-        `src/flow/sampler.py`. Those samplers call a model with a single time and rebuild the
-        state from the interpolant; this one steps on a grid uniform in tau, calls the model
-        with *both* ends of each step, and advances by the same Euler map `map_step` already
-        uses — `state * x + pred * D`. The last step returns the prediction instead of
-        stepping into t=1 (`algo.py:1516`).
+        The two-time analogue of `FlowMatching.sample`, and `sampling.method` picks the same
+        two names. Both variants call the model with the ends of the step it is about to
+        take, and both decode the last prediction; they differ only in whether the state is
+        advanced or rebuilt. At `num_steps = 1` either is one call asking for 0 -> 1, which
+        is the number this whole exercise is about.
+
+        The grid is the teacher's, and both model inputs are real flow time — distillation
+        has no u conditioning, so the `u` leg of `sampling_grid` is unused here.
         """
-        del audio, num_steps, hard, init_from_mu
-        raise NotImplementedError(
-            "FlowMapping.sample is stage 3. Set sampling.enabled=false, or score the "
-            "teacher instead with scripts.evaluation.sample_eval."
+        mu = None
+        if self.mu_nn is not None:
+            mu = F.softmax(self.mu_nn(audio), dim=-1)
+        if init_from_mu is None:
+            init_from_mu = bool(self.cfg.get("sampling", {}).get("init_from_mu", False))
+        if method is None:
+            method = str(self.cfg.get("sampling", {}).get("method", "interpolant"))
+        if method not in MAP_SAMPLERS:
+            raise ValueError(
+                f"sampling.method must be one of {sorted(MAP_SAMPLERS)}, got {method!r}"
+            )
+        grid, _u = self.time_reparam.sampling_grid(num_steps)
+        return MAP_SAMPLERS[method](
+            self.two_time_denoiser,
+            audio,
+            grid,
+            self.vocab_size,
+            self.canvas_len,
+            self.alpha_fn,
+            self.beta_fn,
+            self.gamma_fn,
+            mu,
+            hard=hard,
+            x1_init=mu if init_from_mu else None,
+            generator=generator,
         )
 
     def configure_optimizers(self) -> dict:

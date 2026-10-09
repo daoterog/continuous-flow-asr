@@ -43,11 +43,18 @@ def load_vocab_map(run_dir: Path, tokenizer_size: int) -> torch.Tensor | None:
 
 def load_components(
     run_dir: Path, variant: str = "final", map_location: str | torch.device = "cpu"
-) -> tuple[DictConfig, dict[str, torch.nn.Module]]:
-    """Rebuild the models from a manifest and load `<name>_<variant>.pth` into them.
+) -> tuple[DictConfig, dict[str, torch.nn.Module], TimeReparametrization | None]:
+    """Rebuild everything a run saved that another model might want from it.
 
-    Returns (manifest, {name: module}). The modules are in eval mode and carry no
-    optimizer state — this is the path for distillation and inference, not for resuming.
+    Returns (manifest, {name: module}, reparametrization). The modules are in eval mode and
+    carry no optimizer state — this is the path for distillation and inference, not for
+    resuming.
+
+    The curve comes back alongside the weights because it is as much a part of the
+    checkpoint as they are: the weights were trained against it, and a refreshed one cannot
+    be rebuilt from the config the run started with. Loading them together is what stops a
+    caller pairing one run's weights with another run's grid. None when the run used the
+    identity, which any caller rebuilds for free.
     """
     run_dir = Path(run_dir)
     manifest = load_manifest(run_dir)
@@ -80,4 +87,4 @@ def load_components(
             f"no component weights for variant '{variant}' under {run_dir}; "
             f"found {sorted(p.name for p in run_dir.glob('*.pth'))}"
         )
-    return manifest, built
+    return manifest, built, load_tau(run_dir, variant)
