@@ -83,9 +83,19 @@ sampling:
   # the wrong question. Logged as sampled_<method>_<n>/wer.
   num_steps: [1, 2, 4, 16]
   n_utts: 64
-  every_n_epochs: 5
+  # No `every_n_epochs` here on purpose — see the note at the top of `train:`. The ladder is
+  # eight cells where an ordinary run has one, so its cadence belongs to the run profile that
+  # also sets `check_val_every_n_epoch`: the probe fires inside the validation hook, so a
+  # cadence that does not divide that one is silently skipped.
 
 train:
+  # Nothing in this file restates a `base.yaml` default. `build_config` layers
+  # base -> profiles -> variant, so the variant wins, and a redundant pin is how a config
+  # quietly opts out of `--run sweep` / `--run full`: `num_epochs: 50` and
+  # `sampling.every_n_epochs: 5` both read as harmless restatements and both blocked the
+  # profile that was meant to move them. Only keys that override a profile *on purpose*
+  # belong here, and each one below says why.
+  #
   # The student's own rate. `denoiser_lr` and `audio_decoder_lr` belong to the frozen teacher
   # and are inert here. Far below what training from scratch used (2e-3), because the student
   # starts *as* the teacher rather than at init — it is correcting a map, not learning one.
@@ -100,7 +110,7 @@ train:
   # Both terms are worse above ~2e-4, so this is not a fidelity/quality dial — higher is just
   # worse. One seed on a tiny subset, so it is a sane starting point, not a tuned value.
   two_time_denoiser_lr: 0.00005
-  num_epochs: 50
-  # Compiling is per-model here and only the student is compiled; left off while the step is
-  # still being shaped, since the warmup dwarfs a short run.
+  # Overrides the snellius profile's `true`. Compiling is per-model here and only the student
+  # is compiled, but `map_step` indexes by group with `nonzero`, which is a data-dependent
+  # shape and the thing that breaks a graph — so this stays off until it has been tested.
   compile: false

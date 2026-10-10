@@ -125,6 +125,9 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         distill = cfg.distill
         variant = distill.get("variant", "best")
         manifest, saved, saved_tau = load_components(distill.teacher, variant=variant)
+        # `train.validate_distill_teacher` checks the teacher's audio_dim against the data,
+        # which it can because it holds the datamodule; these two are what this class is
+        # handed directly.
         for key, want, got in (
             ("vocab_size", int(manifest.vocab_size), int(vocab_size)),
             ("canvas_len", int(manifest.canvas_len), int(canvas_len)),
