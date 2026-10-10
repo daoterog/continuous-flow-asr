@@ -14,6 +14,7 @@ import sys
 from collections.abc import Sequence
 
 import lightning.pytorch as pl
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -102,21 +103,48 @@ def main(argv: Sequence[str] | None = None) -> int:
     assert sum(counts) == big, "rows went missing from the split"
     assert all(abs(c / big - f) < 0.01 for c, f in zip(counts, want, strict=True))
 
-    # 3c. The Euler map is only valid because gamma == alpha on this path. Fed the true
-    #     endpoint, the mapped state has to BE the interpolant at the midpoint. Same seed
-    #     before each build so both draw the same noise.
+    # 3c. The Euler map is only valid because gamma == alpha on this path, and because its
+    #     coefficients are built in real flow time. The midpoint is tau^-1 of the halfway
+    #     point in tau, not the arithmetic mean of s and t, so this is also the check that
+    #     state/pred were right to stay in t: rebuilt in tau they land ~1e-1 out. Fed the
+    #     true endpoint, the mapped state has to BE the interpolant at the midpoint. Same
+    #     seed before each build so both draw the same noise.
     torch.manual_seed(0)
-    s_, _u, _t, state, pred, _w, _g = model.sample_interval(batch_size=2)
+    iv = model.sample_interval(batch_size=2)
     x1 = F.one_hot(batch["tokens"], dm.vocab_size).float()
     with torch.no_grad():
         mu = F.softmax(model.mu_nn(audio), dim=-1) if model.mu_nn is not None else None
         torch.manual_seed(1)
-        x_s = model.make_interpolant(x1=x1, t=s_, mu=mu)
+        x_s = model.make_interpolant(x1=x1, t=iv.startpoint, mu=mu)
         torch.manual_seed(1)
-        x_u = model.make_interpolant(x1=x1, t=_u, mu=mu)
-    err = float((state * x_s + pred * x1 - x_u).abs().max())
+        x_u = model.make_interpolant(x1=x1, t=iv.midpoint, mu=mu)
+    err = float((iv.state * x_s + iv.pred * x1 - x_u).abs().max())
     print(f"\n3c. Euler map vs true interpolant at u   max|diff| = {err:.3e}")
     assert err < 1e-4, "the Euler map does not reproduce the interpolant on this path"
+
+    # 3d. The draw lives in uniform space, so the midpoint is halfway in tau rather than in
+    #     t, and the reported gap is the one that was drawn.
+    torch.manual_seed(0)
+    iv = model.sample_interval(batch_size=4096)
+    u = model.time_reparam.u_of(iv.startpoint.numpy())
+    u_end = model.time_reparam.u_of(iv.endpoint.numpy())
+    u_mid = model.time_reparam.u_of(iv.midpoint.numpy())
+    print("3d. interval drawn in uniform space")
+    print(f"    gap == u_end - u_start             "
+          f"max|diff| = {float(np.abs(iv.gap.numpy() - (u_end - u)).max()):.3e}")
+    print(f"    midpoint halfway in tau            "
+          f"max|diff| = {float(np.abs(u_mid - (u + u_end) / 2).max()):.3e}")
+    assert np.abs(iv.gap.numpy() - (u_end - u)).max() < 1e-3, "gap is not the drawn gap"
+    assert np.abs(u_mid - (u + u_end) / 2).max() < 1e-3, "midpoint is not halfway in tau"
+    # Off-diagonal rows only. Pooling the three groups would put half the batch at gap 0
+    # (the diagonal) and 1.6% at gap 1 (the boundary), so the pooled median is 0 and says
+    # nothing about the draw. Only this group's metrics see the gap axis anyway.
+    gap = iv.gap[iv.groups == 2].numpy()
+    print("    offdiag tau-gap q1/25/50/75/99      "
+          + "  ".join(f"{np.percentile(gap, q):.3f}" for q in (1, 25, 50, 75, 99)))
+    assert abs(np.median(gap) - 0.5) < 0.05, "the off-diagonal tau-gap draw is not uniform"
+    assert float(iv.gap[iv.groups == 0].abs().max()) == 0.0, "the diagonal has a gap"
+    assert float(iv.gap[iv.groups == 1].min()) == 1.0, "the boundary is not the whole jump"
 
     # 4. One step, forward and backward.
     loss = model.training_step(batch, 0)

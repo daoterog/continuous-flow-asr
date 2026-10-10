@@ -12,6 +12,8 @@ learns only the dependence on where it is jumping to.
 """
 
 
+from typing import NamedTuple
+
 import lightning.pytorch as pl
 import torch
 from omegaconf import DictConfig, OmegaConf
@@ -44,6 +46,38 @@ DISTILL_GROUPS = ("diagonal", "boundary", "offdiag")
 # them is not "where in the flow" but "how far a jump", so they bin on gap = t - s. The name
 # reaches the logged key, which is what stops a gap being reported under one that says `t`.
 METRIC_AXES = {"offdiag": "gap"}
+
+
+class MapInterval(NamedTuple):
+    """One batch's drawn interval: the three times, the coefficients, and the regime.
+
+    Named rather than a bare tuple because there are eight of them and `map_step` reads
+    most: positional unpacking stops being legible, and appending a field would silently
+    shift one at every call site.
+    """
+
+    # The three flow times the models are conditioned on, (B,) each. s <= u <= t.
+    startpoint: torch.Tensor
+    midpoint: torch.Tensor
+    endpoint: torch.Tensor
+    # The Euler map from s to u, x_u = state * x_s + pred * D(x_s, s, u). (B, 1, 1).
+    state: torch.Tensor
+    pred: torch.Tensor
+    # lambda_sut: how much of the distillation target comes from the first sub-step rather
+    # than the second (algo.py:1330). (B, 1, 1).
+    weighting: torch.Tensor
+    # Which regime each row trains, indexing DISTILL_GROUPS. (B,).
+    groups: torch.Tensor
+    # The jump's size in uniform space, u_end - u_start, i.e. the fraction of the decoding
+    # this one evaluation has to cover. (B,).
+    #
+    # This is *the* gap, and the reason the metric axis is this rather than t - s: the
+    # reparametrization only decides which flow time the interpolant is built at, so a gap
+    # is measured the same whatever curve is in use, while t - s moves with the curve. It
+    # is also the only one that stays uniform — drawn flat on [0, 1] here, where t - s
+    # comes out with a median of 0.096 and a 99th percentile of 0.598, which would leave
+    # the top of an equal-width histogram empty.
+    gap: torch.Tensor
 
 # `sampling.method` selects one, by the same names the one-time path uses so a config
 # reads the same for both modules and a teacher/student pair cannot be set up on
@@ -185,18 +219,19 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         # t; the off-diagonal in the gap, which is the size of the jump; the boundary not at
         # all, since its rows are pinned at (0, 1).
         #
-        # `time_reparam` is deliberately None, not forgotten. tau's quantiles are the right
-        # cut when t is drawn through tau, and here nothing is: `sample_interval` draws the
-        # gap uniformly and the startpoint uniformly in t. Equal-width bins therefore hold
-        # ~1/n of the batch each, which is exactly what tau's edges would be there to
-        # achieve — applying them anyway would pile the whole epoch into the top bins.
+        # The teacher's tau, because `sample_interval` draws in uniform space and maps: the
+        # diagonal's startpoint is tau^-1 of a uniform draw, distributed exactly like the
+        # one-time path's t, so equal-width bins in t would leave the bottom half of them
+        # empty and pile the epoch into bins 5-8. `make_metrics` applies these edges only to
+        # the groups binned on t — tau's quantiles are quantiles OF t, so they mean nothing
+        # on the gap axis, which stays equal-width and uniform by construction.
         metrics = cfg.get("metrics", {})
         self.init_metrics(
             DISTILL_GROUPS,
             tokenizer,
             pad_id,
             vocab_map,
-            time_reparam=None,
+            time_reparam=self.time_reparam,
             axes=METRIC_AXES,
             loss_bins=metrics.get("loss_bins", 10),
             perr_bins=metrics.get("perr_bins", 10),
@@ -288,17 +323,15 @@ class FlowMapping(MetricReporting, pl.LightningModule):
                 mu_logits = self.mu_nn(audio)
                 mu = F.softmax(mu_logits, dim=-1)
 
-        startpoint, midpoint, endpoint, state, pred, weighting, groups = (
-            self.sample_interval(batch_size=tokens.size(0))
-        )
-        i_start_point = self.make_interpolant(x1=x1, t=startpoint, mu=mu)
+        iv = self.sample_interval(batch_size=tokens.size(0))
+        i_start_point = self.make_interpolant(x1=x1, t=iv.startpoint, mu=mu)
 
         # One forward for the whole batch, at each row's own (s, t). On diagonal rows s == t,
         # so the same call is the one-step prediction there (algo.py:1306).
         student_logits = self.two_time_denoiser(
             x_t=i_start_point,
-            startpoint=startpoint,
-            endpoint=endpoint,
+            startpoint=iv.startpoint,
+            endpoint=iv.endpoint,
             audio_embeddings=audio,
         )
         student_logprobs = F.log_softmax(student_logits, dim=-1)
@@ -307,7 +340,7 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         # The objective's two slices. `idx_rollout` is every non-diagonal row — boundary
         # and off-diagonal together — because FMLM folds the full jump into the rollout
         # term as its widest case (algo.py:1285).
-        is_diagonal = groups == 0
+        is_diagonal = iv.groups == 0
         idx_diag = is_diagonal.nonzero(as_tuple=True)[0]
         idx_rollout = (~is_diagonal).nonzero(as_tuple=True)[0]
 
@@ -318,7 +351,7 @@ class FlowMapping(MetricReporting, pl.LightningModule):
             teacher_target = F.softmax(
                 self.denoiser(
                     x_t=i_start_point[idx_diag],
-                    time=startpoint[idx_diag],
+                    time=iv.startpoint[idx_diag],
                     audio_embeddings=audio[idx_diag],
                 ),
                 dim=-1,
@@ -332,8 +365,8 @@ class FlowMapping(MetricReporting, pl.LightningModule):
             audio_od = audio[idx_rollout]
             mid_logits = self.two_time_denoiser(
                 x_t=x_s,
-                startpoint=startpoint[idx_rollout],
-                endpoint=midpoint[idx_rollout],
+                startpoint=iv.startpoint[idx_rollout],
+                endpoint=iv.midpoint[idx_rollout],
                 audio_embeddings=audio_od,
             )
 
@@ -344,17 +377,17 @@ class FlowMapping(MetricReporting, pl.LightningModule):
             else:
                 d_su = F.softmax(mid_logits, dim=-1)
 
-            x_su = state[idx_rollout] * x_s + pred[idx_rollout] * d_su
+            x_su = iv.state[idx_rollout] * x_s + iv.pred[idx_rollout] * d_su
             d_ut = F.softmax(
                 self.two_time_denoiser(
                     x_t=x_su,
-                    startpoint=midpoint[idx_rollout],
-                    endpoint=endpoint[idx_rollout],
+                    startpoint=iv.midpoint[idx_rollout],
+                    endpoint=iv.endpoint[idx_rollout],
                     audio_embeddings=audio_od,
                 ),
                 dim=-1,
             )
-            w = weighting[idx_rollout]
+            w = iv.weighting[idx_rollout]
             rollout_target = w * d_su + (1.0 - w) * d_ut
 
         per_token[idx_rollout] = -torch.sum(
@@ -369,20 +402,15 @@ class FlowMapping(MetricReporting, pl.LightningModule):
 
         loss = per_seq.mean()
 
-        # Read after the group overwrites, never from `sample_interval`'s own `gap`: the
-        # diagonal and boundary rows have had their times replaced by then, so that local
-        # holds a jump those rows never took.
-        gap = endpoint - startpoint
-
         # Reporting only — the objective above is already complete. Three slices rather than
         # the two it used, because the boundary rows are read apart from the off-diagonal
         # ones they train with, and each group is measured along the axis its own question
         # is asked in: the diagonal at the flow time it denoised, the off-diagonal at the
         # size of the jump it was asked for.
         for name, idx, bin_value in (
-            ("diagonal", idx_diag, startpoint),
-            ("boundary", (groups == 1).nonzero(as_tuple=True)[0], startpoint),
-            ("offdiag", (groups == 2).nonzero(as_tuple=True)[0], gap),
+            ("diagonal", idx_diag, iv.startpoint),
+            ("boundary", (iv.groups == 1).nonzero(as_tuple=True)[0], iv.startpoint),
+            ("offdiag", (iv.groups == 2).nonzero(as_tuple=True)[0], iv.gap),
         ):
             # An empty group contributes nothing rather than a zero that would pull its
             # mean down. `assign_groups` can produce one whenever a share is small against
@@ -405,7 +433,7 @@ class FlowMapping(MetricReporting, pl.LightningModule):
             out["input"] = {
                 "pred_ids": i_start_point.argmax(dim=-1),
                 "target_ids": tokens,
-                "bin_value": startpoint,
+                "bin_value": iv.startpoint,
             }
 
         return loss, out
@@ -442,51 +470,82 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         decayed = floor + (1.0 - floor) * torch.exp(-(distance - 1.0) / decay)
         return torch.where(is_pad, decayed, torch.ones_like(decayed))
 
-    def sample_interval(self, batch_size: int) -> tuple[torch.Tensor, ...]:
-        """Draw (s, u, t) with s <= u <= t <= 1, plus the coefficients the algebra needs.
+    def sample_interval(self, batch_size: int) -> MapInterval:
+        """Draw an interval in uniform space, then map its three points to flow time.
 
-        The three times come back as (B,) because that is what the models take. Everything
-        derived from them comes back as (B, 1, 1), because it multiplies (B, L, V) fields —
-        a (B,) factor would broadcast against the *vocabulary* axis instead of the batch,
-        which is silent whenever B happens not to equal V.
+        The draw is uniform in u and the times come out of tau^-1, which is FMLM's
+        `uniform_diff` (algo.py:1260-1297) — they draw `tau_d`, `tau_s`, `tau_t` and only
+        then call `_tau_to_t` on each. Doing it the other way round, uniformly in t, sounds
+        equivalent and is not: tau is decoding progress, so what a jump *means* is how much
+        tau it covers, and a uniform draw in t is wildly non-uniform in tau. Measured on
+        this teacher's curve, drawing in t puts 20.5% of rows on jumps covering under 2% of
+        the decoding and 43% on jumps covering over 90% — two thirds of the batch is either
+        a no-op or almost the whole jump. Drawing in u gives 2% and 10%. A 16-step sample
+        takes sixteen steps of exactly 1/16 in u, and the t-space draw almost never
+        produced one.
 
-        Three such coefficients, all pure functions of the times, so they are built here
-        rather than inline:
-
-          state, pred   the Euler map from s to u, x_u = state * x_s + pred * D(x_s, s, u)
-          weighting     lambda_sut, how much of the distillation target comes from the first
-                        sub-step rather than the second (algo.py:1330)
-
-        Every denominator is clamped: `step_size` can be 0, which puts u on top of s and
-        makes both (t - s) and (u - s) vanish.
-
-        Rows are assigned to one of three regimes by `distill.split`, and the times are
-        overwritten accordingly — `s = t` on the diagonal, `s = 0, t = 1` on the boundary.
+        Rows are assigned to one of three regimes by `distill.split`, and the draw is
+        overwritten accordingly — `u_s = u_t` on the diagonal, `u_s = 0, u_t = 1` on the
+        boundary, which maps to `tau^-1(0) -> tau^-1(1)`. That is `sampling_grid(1)`, so
+        the boundary rows are the one-step jump by construction rather than by coincidence.
         The assignment is a fresh permutation each step, so a given utterance is not pinned
         to one regime for the whole run.
+
+        The three times come back as (B,) because that is what the models take. The
+        coefficients come back as (B, 1, 1), because they multiply (B, L, V) fields — a
+        (B,) factor would broadcast against the *vocabulary* axis instead of the batch,
+        which is silent whenever B happens not to equal V.
+
+        They are also built in real flow time, not in u, which looks like an oversight and
+        is not. The interpolant is affine in t, `I_t = alpha(t) x0 + beta(t) x1`, so
+        eliminating x0 to step from s to u is only valid there; in u there is no such
+        algebra, because tau^-1 is not affine. FMLM is the same — `X_su` and `lambda_sut`
+        (algo.py:1315-1322) are built from the mapped `s_od, u_od, t_od`, and only the
+        network's conditioning uses tau.
+
+        Every denominator is clamped: the drawn gap can be 0, which puts u on top of s and
+        makes both (t - s) and (u - s) vanish.
         """
         groups = self.assign_groups(batch_size)
 
         gap = torch.rand(batch_size, device=self.device)
-        start_point = torch.rand(batch_size, device=self.device) * (1.0 - gap)
-        end_point = start_point + gap
+        u_start = torch.rand(batch_size, device=self.device) * (1.0 - gap)
+        u_end = u_start + gap
 
-        diagonal = torch.rand(batch_size, device=self.device)
-        start_point = torch.where(groups == 0, diagonal, start_point)
-        end_point = torch.where(groups == 0, diagonal, end_point)
-        start_point = torch.where(groups == 1, torch.zeros_like(start_point), start_point)
-        end_point = torch.where(groups == 1, torch.ones_like(end_point), end_point)
+        u_diagonal = torch.rand(batch_size, device=self.device)
+        u_start = torch.where(groups == 0, u_diagonal, u_start)
+        u_end = torch.where(groups == 0, u_diagonal, u_end)
+        u_start = torch.where(groups == 1, torch.zeros_like(u_start), u_start)
+        u_end = torch.where(groups == 1, torch.ones_like(u_end), u_end)
 
-        # TODO(stage 3): FMLM takes the midpoint in tau and only then maps to real time, so
-        # their three are not equally spaced in t. Ours are, which is a different split.
-        mid_point = (start_point + end_point) / 2.0
+        # Halfway in uniform space, as FMLM takes it (algo.py:1296). The arithmetic mean in
+        # t would be a different intermediate state, since tau^-1 is not affine.
+        u_mid = (u_start + u_end) / 2.0
+
+        # Recomputed rather than carried down from the draw above: the diagonal and boundary
+        # rows have had their endpoints replaced, so the gap drawn for them is not the gap
+        # they ended up with.
+        gap = u_end - u_start
+
+        start_point, mid_point, end_point = (
+            self.time_reparam.t_of(x) for x in (u_start, u_mid, u_end)
+        )
 
         s, u, t = (x[:, None, None] for x in (start_point, mid_point, end_point))
         remaining = (1.0 - s).clamp_min(EPS)
         state = (1.0 - u) / remaining
         pred = (u - s) / remaining
         weighting = ((1.0 - t) * (u - s)) / ((1.0 - u) * (t - s)).clamp_min(EPS)
-        return start_point, mid_point, end_point, state, pred, weighting, groups
+        return MapInterval(
+            startpoint=start_point,
+            midpoint=mid_point,
+            endpoint=end_point,
+            state=state,
+            pred=pred,
+            weighting=weighting,
+            groups=groups,
+            gap=gap,
+        )
 
     def assign_groups(self, batch_size: int) -> torch.Tensor:
         """(B,) group id per row — 0 diagonal, 1 boundary, 2 off-diagonal.

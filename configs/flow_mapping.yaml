@@ -37,10 +37,17 @@ distill:
   hard: false
 
 # One group per regime of `distill.split`, each resolved along the axis its own question is
-# asked in — the diagonal in flow time, the off-diagonal in the gap t - s, the boundary not
-# at all, since its rows are pinned at (0, 1). Bins are equal-width rather than cut from
-# tau's quantiles, because nothing here is drawn through tau: the gap is uniform and the
-# startpoint is uniform in t, so equal widths already hold ~1/n of the batch each.
+# asked in — the diagonal in flow time, the off-diagonal in the gap, the boundary not at all,
+# since its rows are pinned at (0, 1).
+#
+# The gap is measured in uniform space: it is the fraction of the decoding one jump has to
+# cover, which is also what the sampler's steps are (`sampling_grid` walks u in 1/N steps).
+# Not t - s, which is the same jump expressed through whichever tau is in use and therefore
+# moves with the curve — and which comes out concentrated under the real draw (median 0.096),
+# so an equal-width histogram of it would be empty at the top.
+#
+# The groups binned on t take tau's quantiles as their edges, since their startpoint is
+# tau^-1 of a uniform draw; the gap is drawn flat on [0, 1] and keeps equal-width bins.
 #
 # The number to watch is `offdiag_perr/train_bins_gap`. Unlike either loss term — the
 # off-diagonal one scores the student against its *own* rollout, so it falls both when

@@ -69,8 +69,10 @@ def make_metrics(
     between every bin holding ~1/n of the epoch and two thirds of them being empty.
 
     `axes` names what each group bins on, defaulting to "t". Flow-map distillation bins
-    its off-diagonal group on the gap t - s, and the name reaches the logged key from
-    here, so a gap is never reported under a key that says `t`.
+    its off-diagonal group on the size of the jump, and the name reaches the logged key
+    from here, so a gap is never reported under a key that says `t`. It also decides which
+    groups `time_reparam` reaches: its edges are quantiles OF t, so they mean nothing on
+    any other axis, and an axis that is already uniform keeps its equal-width bins.
 
     A ModuleDict keyed by split gives each split its own instances; sharing one would
     pool train and val into the same bins.
@@ -78,8 +80,8 @@ def make_metrics(
     wer_bins = DEFAULT_WER_BINS | (wer_bins or {})
     axes = axes or {}
 
-    def edges_for(n: int) -> torch.Tensor | None:
-        if time_reparam is None or time_reparam.is_identity:
+    def edges_for(n: int, axis: str) -> torch.Tensor | None:
+        if axis != "t" or time_reparam is None or time_reparam.is_identity:
             return None
         return time_reparam.bin_edges(n)
 
@@ -89,11 +91,12 @@ def make_metrics(
             # argmax of the interpolant itself, with no model involved. Read against
             # denoiser_perr it separates what the field already carried from what the
             # denoiser added, which is the only way to see mu's effect on the input.
+            input_axis = axes.get("input", "t")
             metrics[f"{split}_input_perr"] = BinnedTokenError(
                 input_perr_bins,
-                edges=edges_for(input_perr_bins),
+                edges=edges_for(input_perr_bins, input_axis),
                 pad_id=pad_id,
-                axis=axes.get("input", "t"),
+                axis=input_axis,
             )
         for name in names:
             # A group with no axis collapses to one bin; edges_for is then pointless, so
@@ -103,16 +106,16 @@ def make_metrics(
 
             if n := bins_for(name, loss_bins):
                 metrics[f"{split}_{name}_loss"] = BinnedLoss(
-                    n, edges=edges_for(n) if binned else None, axis=axis
+                    n, edges=edges_for(n, axis) if binned else None, axis=axis
                 )
             if n := bins_for(name, perr_bins):
                 metrics[f"{split}_{name}_perr"] = BinnedTokenError(
-                    n, edges=edges_for(n) if binned else None, pad_id=pad_id, axis=axis
+                    n, edges=edges_for(n, axis) if binned else None, pad_id=pad_id, axis=axis
                 )
             if n := bins_for(name, wer_bins.get(split, 0)):
                 metrics[f"{split}_{name}_wer"] = BinnedWER(
                     tokenizer, pad_id, vocab_map, num_bins=n,
-                    edges=edges_for(n) if binned else None, axis=axis,
+                    edges=edges_for(n, axis) if binned else None, axis=axis,
                 )
     return metrics
 
@@ -186,10 +189,14 @@ def check_metrics(
                 f"{key} ({type(m).__name__}) has no `inputs` — declare it, e.g. "
                 f"inputs = ('pred_ids', 'target_ids', 'bin_value')"
             )
-        # An unbinned metric has one bin spanning all of t, so schedule edges are not
-        # something it is missing — the warning below would be noise.
+        # Two cases where schedule edges are not something a metric is missing, and the
+        # warning below would be noise: an unbinned metric has one bin spanning everything,
+        # and a metric on any axis other than t is binned on a quantity tau says nothing
+        # about — the distillation gap is drawn uniform on [0, 1], so equal-width bins are
+        # already what tau's edges exist to achieve.
         reparametrized = time_reparam is not None and not time_reparam.is_identity
-        if reparametrized and is_binned(m) and not getattr(m, "schedule_bins", False):
+        on_t = getattr(m, "axis", "t") == "t"
+        if reparametrized and on_t and is_binned(m) and not getattr(m, "schedule_bins", False):
             uniform.append(key)
     if uniform:
         warnings.warn(

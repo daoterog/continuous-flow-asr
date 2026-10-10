@@ -90,9 +90,31 @@ PROD_TRIALS: list[tuple[str, list[str]]] = [
     ("prod + compile + fused, no clip",
      [*PROD, "train.compile=true", "train.fused_optimizer=true", "train.grad_clip=null"]),
 ]
+
+
+
+def gpu_trials(at_batch: int) -> list[tuple[str, list[str]]]:
+    """How far batch size fills the A100 under the snellius profile, then two compute knobs.
+
+    The ladder comes first because batch is the biggest lever: it amortises the per-step
+    launch overhead that a 70 ms step is dominated by. utts/s flattening out — or the GPU
+    column staying low while it does — says the loader, not the GPU, has become the limit.
+    The two knobs after it are measured at `at_batch`, the expected knee.
+    """
+    ladder = [(f"batch {b}", [f"data.batch_size={b}"]) for b in (128, 256, 512, 1024)]
+    return [
+        *ladder,
+        (f"batch {at_batch} + matmul high",
+         [f"data.batch_size={at_batch}", "train.matmul_precision=high"]),
+        (f"batch {at_batch} + max-autotune",
+         [f"data.batch_size={at_batch}", "train.compile_mode=max-autotune-no-cudagraphs"]),
+    ]
+
+
 SUITES = {
     "laptop": (TRIALS, "configs/linear.yaml"),
     "prod": (PROD_TRIALS, "configs/audio_cond.yaml"),
+    "gpu": (None, "configs/audio_cond.yaml"),  # built by gpu_trials(--at-batch)
 }
 
 
@@ -134,6 +156,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="laptop: the original throughput ladder; prod: the full-data sweep config",
     )
     p.add_argument("--config", default=None, help="defaults to the suite's own config")
+    p.add_argument("--at-batch", type=int, default=512,
+                   help="gpu suite: the batch the compute knobs are measured at")
+    p.add_argument(
+        "--eval-timing", action="store_true",
+        help="instead of trials, time one full validation pass and one sampling probe at "
+             "--at-batch under the profile, which is what an eval cadence is chosen from",
+    )
     p.add_argument(
         "--env", choices=["local", "snellius"], default="local",
         help="the machine profile (configs/profiles/where/) the trials run under, which also "
@@ -281,11 +310,80 @@ def time_one(config: str, overrides: list[str], args: argparse.Namespace) -> dic
     }
 
 
+def time_eval(config: str, args: argparse.Namespace) -> dict:
+    """Seconds for one validation pass and one sampling probe, as a run pays them.
+
+    Uses the whole validation split and the profile's val metrics (WER decoding included),
+    after a short fit so the training graph is compiled. Each is run twice and the second
+    is reported: the first also pays compiling the eval-shaped graphs, a one-off per run.
+    """
+    import lightning.pytorch as pl
+
+    import train as T
+
+    cfg, _ = T.build_config([
+        "--config", config, "--offline", "--where", args.env, "--run", "full",
+        f"data.batch_size={args.at_batch}",
+        f"data.subset_n.train={min(args.n_utts, 4096)}",
+        "data.subset_n.val=null",
+        f"data.steps_per_epoch={args.warmup}",
+        "train.num_epochs=1",
+        "train.accelerator=gpu",
+        "train.checkpoint=false",
+        "sampling.enabled=false",  # validate() must not fire the probe; it is timed alone
+        "train.check_val_every_n_epoch=1000000",
+        *args.set,
+    ])
+    T.setup_reproducibility(cfg)
+    dm = T.build_datamodule(cfg)
+    model = T.FlowMatching(
+        cfg, vocab_size=dm.vocab_size, pad_id=dm.pad_id,
+        canvas_len=cfg.data.canvas_len, tokenizer=dm.tokenizer,
+        vocab_map=dm.vocab_map, time_reparam=T.build_time_reparam(dm, cfg),
+    )
+    trainer = pl.Trainer(
+        max_epochs=1, accelerator="gpu", devices=1,
+        precision=cfg.train.precision or "32-true",
+        gradient_clip_val=cfg.train.grad_clip or 0,
+        logger=False, enable_checkpointing=False,
+        enable_progress_bar=False, enable_model_summary=False,
+        num_sanity_val_steps=0,
+    )
+    trainer.fit(model, datamodule=dm)
+
+    def timed(fn) -> list[float]:
+        out = []
+        for _ in range(2):
+            torch.cuda.synchronize()
+            started = time.perf_counter()
+            fn()
+            torch.cuda.synchronize()
+            out.append(time.perf_counter() - started)
+        return out
+
+    val = timed(lambda: trainer.validate(model, datamodule=dm, verbose=False))
+    # Lightning's teardown hands the module back on the CPU after validate(); in a run the
+    # probe is called from inside the trainer, with the model still on the GPU.
+    model.to("cuda")
+    steps = model.sampling_probe.step_counts[0]
+    probe = timed(lambda: model.sampling_probe.score(model, dm, "interpolant", num_steps=steps))
+    return {"val_s": val, "probe_s": probe, "n_val": len(dm.datasets["val"]), "steps": steps}
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run every trial and print a table, fastest last."""
     args = parse_args(argv)
     suite, default_config = SUITES[args.suite]
+    if suite is None:
+        suite = gpu_trials(args.at_batch)
     args.config = args.config or default_config
+    if args.eval_timing:
+        print(f"device: {torch.cuda.get_device_name(0)}   data root: {args.env}")
+        r = time_eval(args.config, args)
+        print(f"\neval at batch {args.at_batch} under the profile, {r['n_val']} val utts:")
+        print(f"  validation pass : {r['val_s'][1]:6.1f} s   (first, with compile: {r['val_s'][0]:.1f} s)")
+        print(f"  sampling probe  : {r['probe_s'][1]:6.1f} s   ({r['steps']} steps; first: {r['probe_s'][0]:.1f} s)")
+        return 0
     trials = suite
     if args.only:
         # A label that matches nothing is almost always a stale checkout rather than a
