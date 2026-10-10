@@ -37,20 +37,15 @@ REPO_DIR="$(dirname "$(dirname "${SCRIPT_DIR}")")"
 source "${REPO_DIR}/jobs/common/sweep.sh"
 tier_defaults
 
-CONFIG="${CONFIG:-configs/audio_cond.yaml}"
+CONFIG="${CONFIG:-configs/recipes/fulldata.yaml}"
 PROJECT="${PROJECT:-flow-asr-flm-parity}"
 ARMS="${ARMS:-control uniform-time}"
 KEEP="${KEEP:-}"
 
-# Held at skilled-lake-22's values so the control is a real reproduction. Everything that
-# depends on the machine or the run kind (eval batch, tau probe size, epochs) comes from
-# configs/profiles/ via --where snellius and the tier's --run.
+# Everything that defines the run lives in the recipe ($CONFIG): model, data, LRs,
+# schedule. The machine and the run kind come from configs/profiles/. Only logging and the
+# arms vary here.
 COMMON=(
-    "data.subset_n.train=null"
-    "schedule.refresh_curve_from=simulated"
-    "schedule.refresh_every_n_epochs=5"
-    "train.denoiser_lr=0.002"
-    "train.audio_decoder_lr=0.001"
     "logging.project=${PROJECT}"
     ${EPOCH_OVERRIDE}
 )

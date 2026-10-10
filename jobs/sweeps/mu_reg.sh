@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# NOTE (2026-10-10): the overfitting below was measured on the 256x2 mu that the
+# flm-parity runs inherited by accident. The recipe now trains mu `micro` (256x1), whose
+# train/val gap was only 0.036 (EXPERIMENTS row 13), and row 14 already found dropout 0.1
+# makes micro worse. Re-run this only if a stride-1 small + micro control shows mu
+# overfitting again.
+#
 # mu memorises the training set: in the flm-parity controls its val CE bottoms out at
 # epoch ~60 (0.40) and climbs to ~1.85 by 300, while its train P_e goes to 0.000 and its
 # val P_e sits at ~0.50. It has no dropout (configs/mu/micro.yaml) and peaks at 1e-3 at
@@ -38,18 +44,14 @@ REPO_DIR="$(dirname "$(dirname "${SCRIPT_DIR}")")"
 source "${REPO_DIR}/jobs/common/sweep.sh"
 tier_defaults
 
-CONFIG="${CONFIG:-configs/audio_cond.yaml}"
+CONFIG="${CONFIG:-configs/recipes/fulldata.yaml}"
 PROJECT="${PROJECT:-flow-asr-mu-reg}"
 ARMS="${ARMS:-control lr3e-4 do0.1 do0.3 lr3e-4-do0.1 lr3e-4-do0.3}"
 
-# The recipe: what makes `control` the flm-parity control. Everything that depends on
-# the machine or the run kind (eval batch, tau probe size, epochs) comes from
-# configs/profiles/ via --where snellius and the tier's --run.
+# Everything that defines the run lives in the recipe ($CONFIG): model, data, LRs,
+# schedule. The machine and the run kind come from configs/profiles/. Only logging and the
+# arms vary here.
 COMMON=(
-    "data.subset_n.train=null"
-    "schedule.refresh_curve_from=simulated"
-    "schedule.refresh_every_n_epochs=5"
-    "train.denoiser_lr=0.002"
     "logging.project=${PROJECT}"
     ${EPOCH_OVERRIDE}
 )

@@ -1,0 +1,62 @@
+# Recipe: what a full-data audio_cond run trains — the model, the data, the optimisation and
+# the schedule — written out rather than inherited, so a cluster run is exactly the one meant.
+#
+#   python train.py --config configs/recipes/fulldata.yaml --where snellius --run sweep
+#
+# Recipes say *what* is trained; the profiles (configs/profiles/) say *where* and *how long*.
+# A recipe must never set a key a profile owns — data.env / num_workers / eval_batch_size /
+# audio_stride / batch_size, schedule.probe_n_utts, train.num_epochs / compile / precision /
+# check_val_every_n_epoch, metrics.wer_bins, sampling.every_n_epochs / log_methods — because
+# the recipe layer sits above the profiles and would silently win (flow_mapping.yaml's
+# `num_epochs: 50` once made `--run full` train 50 epochs while the sweep priced 300).
+#
+# The defaults here are skilled-lake-22's (wandb continuous-flow-asr/q5bsvywz, 18.70% sampled
+# WER), the best full-data run on record. The 29 cluster runs between it and 2026-10-10 did
+# NOT train this: they inherited base.yaml's tiny denoiser and audio_cond.yaml's 256x2 mu.
+_base_: ../audio_cond.yaml
+
+recipe: fulldata
+# The variant this recipe instantiates; keeps wandb groups and manifests as they were.
+variant: audio_cond
+size: small
+mu_size: micro
+
+data:
+  splits:
+    train: {configs: [clean], splits: [train.100]}
+    val:   {configs: [clean], splits: [validation]}
+    test:  {configs: [clean], splits: [test]}
+  subset_n: {train: null, val: null, test: null}
+  canvas_len: 224
+  compact_vocab: true
+
+model:
+  # configs/sizes/small.yaml, ~40.7M parameters.
+  denoiser:
+    hidden_size: 512
+    cond_dim: 128
+    n_heads: 8
+    n_blocks: 8
+    dropout: 0.1
+  # configs/mu/micro.yaml, ~1.8M. Small enough that it cannot memorise the training set:
+  # EXPERIMENTS row 13 measured its train/val accuracy gap at 0.036 against 0.510 for
+  # `small`, and row 14 found dropout 0.1 made it worse (16.06 -> 29.53).
+  audio_decoder:
+    hidden: 256
+    n_heads: 4
+    n_blocks: 1
+    dropout: 0.0
+
+train:
+  denoiser_lr: 2.0e-3
+  audio_decoder_lr: 1.0e-3
+  weight_decay: 0.01
+  grad_clip: 1.0
+
+schedule:
+  enabled: true
+  refresh_curve_from: simulated
+  refresh_every_n_epochs: 5
+  # Row 17: read mu's accuracy on train, where the field is actually built from.
+  refresh_split: train
+  mu_accuracy: 0.0

@@ -1,0 +1,8 @@
+# Recipe: flow-map distillation (configs/flow_mapping.yaml), so a cluster run of it passes the
+# recipe guard in train.build_config. flow_mapping.yaml stays the source of truth for the
+# distillation itself; this only names it as an intended cluster recipe. Same rule as every
+# recipe: never set a key a configs/profiles/ file owns (see fulldata.yaml).
+_base_: ../flow_mapping.yaml
+
+recipe: distill
+variant: flow_mapping

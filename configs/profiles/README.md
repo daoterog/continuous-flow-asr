@@ -24,6 +24,8 @@ beats everything.
 | `where/` | local | snellius | why |
 |---|---|---|---|
 | `data.env` | local | snellius | data root |
+| `data.audio_stride` | 4 | 1 | full 1500-frame latents on the cluster, always; pooling is a laptop-only shortcut |
+| `data.batch_size` | base's 32 | base's 32, until the stride-1 ladder for small + micro sets it | the stride-4 knee (256) does not carry over |
 | `data.num_workers` | 4 | 16 | 6-core laptop vs 18-CPU allocation (a packed job splits them) |
 | `data.eval_batch_size` | null | 512 | 6 GB vs 40 GB card |
 | `schedule.probe_n_utts` | 2048 | 8192 | probe cost vs precision |
@@ -41,3 +43,17 @@ beats everything.
 **Where the numbers come from:** `./jobs/submit/bench_train.sh` timed the full-data recipe
 on the A100 (job 27839620) — 256.6 ms/step as the runs were, 129.9 with train WER off,
 98.7 + compile, 70.0 + bf16. Re-run it if the model or batch changes enough to matter.
+
+## Recipes vs profiles
+
+A **recipe** (`configs/recipes/*.yaml`) says *what* is trained: the model sizes, the data
+splits, the LRs, the schedule. A **profile** says *where* it runs and *how long*. On Snellius,
+`train.build_config` refuses a config without `recipe:`, whether it was reached with
+`--where snellius` or with a plain `data.env=snellius` override. That's because a bare variant
+silently inherits base.yaml's laptop model; every cluster run up to 2026-10-10 did. A
+deliberate one-off passes `recipe=<name>`.
+
+A recipe must never set a key a profile owns (the tables above). The recipe layer sits above
+the profiles, so it would win silently: `flow_mapping.yaml`'s `num_epochs: 50` once made
+`--run full` train 50 epochs while the sweep priced 300. Only pin such a key to override a
+profile on purpose (`flow_mapping.yaml` keeps `train.compile: false`).

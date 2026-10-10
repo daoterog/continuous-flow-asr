@@ -3,6 +3,11 @@
 # Predates the budget standards (jobs/common/sweep.sh): one run per GPU job at its own
 # epoch count. Each submit still prints its SBU, is gated against the cap and lands in
 # the ledger, but new sweeps should use the screen/confirm tiers instead.
+#
+# Its CONFIG is a plain variant, so on Snellius train.py now refuses it (cluster runs must
+# come from configs/recipes/). That is deliberate: these runs trained base.yaml's tiny
+# denoiser at stride 4. To rerun one, point CONFIG at a recipe, or pass recipe=<name> to
+# reproduce the old setting on purpose.
 
 # Two questions, on the full train.100, one job per cell.
 #

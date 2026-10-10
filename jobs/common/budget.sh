@@ -25,11 +25,11 @@ SBU_PER_GPU_HOUR="${SBU_PER_GPU_HOUR:-128}"
 CPUS_PER_RUN=18
 MEM_PER_RUN_G=120
 MEM_MIN_G=160
-# Full train.100, batch 128, under the snellius profile (compile + bf16): the A100
-# benchmark ran 1828 utts/s, i.e. ~16 s of training per 28.5k-utterance epoch, plus val and
-# the amortised sampling probe. Provisional until the first screen's epoch times replace it
-# (the runs before the profiles took 77 s).
-SEC_PER_EPOCH="${SEC_PER_EPOCH:-25}"
+# Deliberately conservative until the stride-1 benchmark for the fulldata recipe (small +
+# micro, full latents) measures it. The 25 s measured earlier was for the tiny denoiser on
+# stride-4 pooled latents, which cluster runs no longer train; small at stride 1 is several
+# times the work per step, and under-pricing would let the gate pass a sweep it should stop.
+SEC_PER_EPOCH="${SEC_PER_EPOCH:-80}"
 # Startup, the tau build, compile's warmup, the cold first epochs off GPFS.
 JOB_OVERHEAD_S="${JOB_OVERHEAD_S:-600}"
 

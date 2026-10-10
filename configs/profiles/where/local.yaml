@@ -3,6 +3,9 @@
 # variant, so a variant that pins one of these keeps its value; see ../README.md.
 data:
   env: local
+  # Mean-pool the Whisper frames 4x: a local-only shortcut that keeps a 6 GB card and a
+  # laptop's RAM workable. The cluster always uses the full latents (where/snellius.yaml).
+  audio_stride: 4
   # base.yaml's own measurement: a 6-core laptop wants 4.
   num_workers: 4
   # null follows data.batch_size, which a 6 GB card already fits.

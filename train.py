@@ -36,7 +36,7 @@ from lightning.pytorch.loggers import Logger, WandbLogger
 from omegaconf import DictConfig, OmegaConf
 from transformers import WhisperTokenizerFast
 
-from src.checkpointing import ComponentCheckpoint, manifest_for
+from src.checkpointing import ComponentCheckpoint, load_manifest, manifest_for
 from src.data import ROLES, AudioFeatureDataModule
 from src.flow.coefficients import make_schedule
 from src.flow.schedule import TimeReparametrization
@@ -190,7 +190,27 @@ def build_config(argv: Sequence[str] | None = None) -> tuple[DictConfig, argpars
         cfg.variant = args.config.stem
 
     validate_distill_split(cfg)
+    require_recipe_on_cluster(cfg, args.config)
     return cfg, args
+
+
+def require_recipe_on_cluster(cfg: DictConfig, config_path: Path) -> None:
+    """Refuse a Snellius config that was not built from a configs/recipes/ file.
+
+    Every cluster run up to 2026-10-10 trained base.yaml's laptop model (a tiny denoiser,
+    stride-4 pooled latents) because nothing said otherwise. A recipe states what is
+    trained; this makes the cluster insist on one. Keyed on the resolved config, not the
+    --where flag, so `data.env=snellius` as a plain override is caught too. A deliberate
+    one-off passes `recipe=<name>` to say so.
+    """
+    on_cluster = cfg.profile.where == "snellius" or cfg.data.get("env") == "snellius"
+    if on_cluster and not cfg.get("recipe"):
+        raise SystemExit(
+            f"{config_path} is not a recipe, and cluster runs must come from one: pass "
+            f"--config configs/recipes/<name>.yaml (fulldata, distill), or add "
+            f"recipe=<name> to state that this one-off is deliberate. Without a recipe the "
+            f"run inherits base.yaml's laptop defaults (tiny denoiser, pooled latents)."
+        )
 
 
 def validate_distill_split(cfg: DictConfig) -> None:
@@ -236,9 +256,44 @@ def build_model(
         vocab_map=dm.vocab_map,
     )
     if cfg.get("distill") is not None:
+        validate_distill_teacher(dm, cfg)
         print(f"distilling from {cfg.distill.teacher}")
         return FlowMapping(cfg, **common)
     return FlowMatching(cfg, time_reparam=build_time_reparam(dm, cfg), **common)
+
+
+def validate_distill_teacher(dm: AudioFeatureDataModule, cfg: DictConfig) -> None:
+    """The student has to be fed what the teacher was fed.
+
+    It is initialised from the teacher's weights and trained against the teacher's own
+    outputs, so a different input distribution makes both meaningless — and this is the one
+    mismatch that raises nothing on its own. `data.audio_stride` pools latents over *frames*
+    (`src/data/features.py:80`), so stride 1 and stride 4 differ by 4x in sequence length at
+    the same width: 1,280 either way, which is why checking `audio_dim` would pass and prove
+    nothing. Attention takes any length, so a stride-4 teacher fed stride-1 features runs
+    happily on 1,500 frames where it learned 375.
+
+    Live risk, not hypothetical: every teacher so far was trained at stride 4, and
+    `configs/profiles/where/snellius.yaml` now sets stride 1.
+
+    `audio_dim` is checked too. Stride does not move it, but a different encoder would, and
+    that would otherwise surface as a shape error inside `load_state_dict`.
+    """
+    manifest = load_manifest(cfg.distill.teacher)
+    checks = (
+        ("data.audio_stride", manifest.run_config.data.get("audio_stride"),
+         cfg.data.get("audio_stride")),
+        ("audio_dim", manifest.audio_dim, dm.d_model),
+    )
+    for key, want, got in checks:
+        if want is None or int(want) == int(got):
+            continue
+        raise ValueError(
+            f"the teacher at {cfg.distill.teacher} was trained with {key}={want} but this "
+            f"run uses {got}. The student is distilled against that teacher's outputs, so "
+            f"it has to see the same features — pass {key}={want}, or distil from a teacher "
+            f"trained at {key}={got}."
+        )
 
 
 def build_time_reparam(dm: AudioFeatureDataModule, cfg: DictConfig) -> TimeReparametrization:

@@ -94,28 +94,59 @@ PROD_TRIALS: list[tuple[str, list[str]]] = [
 
 
 
-def gpu_trials(at_batch: int) -> list[tuple[str, list[str]]]:
-    """How far batch size fills the A100 under the snellius profile, then two compute knobs.
+# What a distillation epoch costs, which no cost model knows. `jobs/common/budget.sh` prices
+# every job from one `SEC_PER_EPOCH`, measured for audio_cond at the profile's batch with
+# compile and bf16 on — and a distillation step differs on both counts: `train.compile` is off
+# (map_step indexes by group with `nonzero`, a data-dependent shape), and the step itself does
+# more work, since half the batch also runs the frozen teacher and the other half a two-step
+# rollout. 1.64x was measured locally at batch 8 with compile off on *both* sides, so it does
+# not describe the ratio against a compiled baseline.
+#
+# The rows isolate the two causes. `distill` is the configuration a sweep would actually run;
+# `one-time, compile off` is the same batch without the extra forwards, so the gap between
+# them is the objective's cost alone; and the profile's own compiled number is what
+# SEC_PER_EPOCH already holds, so the gap to that is what compile is worth here.
+#
+# `distill + compile` is expected to fail or to recompile every step. It is here to find out
+# which, since that is the only thing standing between distillation and the profile default.
+DISTILL = ["train.two_time_denoiser_lr=0.00005"]
+DISTILL_TRIALS: list[tuple[str, list[str]]] = [
+    ("distill", DISTILL),
+    ("distill + bf16", [*DISTILL, "train.precision=bf16-mixed"]),
+    ("distill + compile", [*DISTILL, "train.compile=true"]),
+]
 
-    The ladder comes first because batch is the biggest lever: it amortises the per-step
-    launch overhead that a 70 ms step is dominated by. utts/s flattening out — or the GPU
-    column staying low while it does — says the loader, not the GPU, has become the limit.
-    The two knobs after it are measured at `at_batch`, the expected knee.
+
+# Marks a trial that feeds one batch, kept on the GPU, back every step (see time_one).
+REPLAY = "__replay__"
+
+
+def gpu_trials(at_batch: int, batches: Sequence[int]) -> list[tuple[str, list[str]]]:
+    """How far batch size fills the A100 under the snellius profile, and what the data path costs.
+
+    The ladder comes first because batch is the biggest lever: it amortises per-step launch
+    overhead. utts/s flattening out says something stopped scaling. `replay N` then times
+    the same step with one batch kept on the GPU and fed back — no loader, no pinning, no
+    host-to-device copy — so a replay row well above the real one says the data path, not
+    the GPU, is the limit. At stride 1 a batch carries ~3.8 MB of latents per utterance.
     """
-    ladder = [(f"batch {b}", [f"data.batch_size={b}"]) for b in (128, 256, 512, 1024)]
-    return [
-        *ladder,
-        (f"batch {at_batch} + matmul high",
-         [f"data.batch_size={at_batch}", "train.matmul_precision=high"]),
-        (f"batch {at_batch} + max-autotune",
-         [f"data.batch_size={at_batch}", "train.compile_mode=max-autotune-no-cudagraphs"]),
-    ]
+    ladder = [(f"batch {b}", [f"data.batch_size={b}"]) for b in batches]
+    # Two points, so a gap that grows with the batch (bytes moved) reads differently from
+    # a fixed one (per-step overhead).
+    replay = [(f"replay {b}", [f"data.batch_size={b}", REPLAY])
+              for b in sorted({max(at_batch // 2, 1), at_batch})]
+    return [*ladder, *replay]
 
 
 SUITES = {
     "laptop": (TRIALS, "configs/linear.yaml"),
-    "prod": (PROD_TRIALS, "configs/audio_cond.yaml"),
-    "gpu": (None, "configs/audio_cond.yaml"),  # built by gpu_trials(--at-batch)
+    # The recipe, not configs/audio_cond.yaml: it is what cluster runs train (small + micro)
+    # and what passes the recipe guard under `--env snellius`.
+    "prod": (PROD_TRIALS, "configs/recipes/fulldata.yaml"),
+    "gpu": (None, "configs/recipes/fulldata.yaml"),  # built by gpu_trials(--at-batch, --batches)
+    # The recipe, not configs/flow_mapping.yaml directly: `--env snellius` goes through the
+    # recipe guard in build_config, and the recipe adds nothing but its own name.
+    "distill": (DISTILL_TRIALS, "configs/recipes/distill.yaml"),
 }
 
 
@@ -157,11 +188,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--suite", choices=sorted(SUITES), default="laptop",
-        help="laptop: the original throughput ladder; prod: the full-data sweep config",
+        help="laptop: the original throughput ladder; prod: the full-data sweep config; "
+             "distill: what a flow-map distillation epoch costs, which no cost model knows",
     )
     p.add_argument("--config", default=None, help="defaults to the suite's own config")
-    p.add_argument("--at-batch", type=int, default=512,
-                   help="gpu suite: the batch the compute knobs are measured at")
+    p.add_argument("--at-batch", type=int, default=128,
+                   help="gpu suite: the batch the replay trial and --eval-timing run at")
+    p.add_argument("--batches", type=int, nargs="+", default=[32, 64, 128, 256, 512],
+                   help="gpu suite: the batch ladder (an OOM row is recorded, not fatal)")
     p.add_argument(
         "--eval-timing", action="store_true",
         help="instead of trials, time one full validation pass and one sampling probe at "
@@ -257,6 +291,22 @@ def warm_cache(config: str, args: argparse.Namespace) -> float:
     return elapsed
 
 
+class ReplayLoader:
+    """`steps` iterations of the same on-GPU batch, sized like a DataLoader for Lightning."""
+
+    def __init__(self, batch: dict, steps: int) -> None:
+        """Hold the batch; `steps` is what `len` reports to the LR schedule."""
+        self.batch, self.steps = batch, steps
+
+    def __len__(self) -> int:
+        """Batches per epoch."""
+        return self.steps
+
+    def __iter__(self):
+        """The same batch, `steps` times."""
+        return iter([self.batch] * self.steps)
+
+
 def time_one(config: str, overrides: list[str], args: argparse.Namespace) -> dict:
     """One trial: build, warm up, then time `--steps` optimizer steps end to end."""
     import lightning.pytorch as pl
@@ -265,6 +315,8 @@ def time_one(config: str, overrides: list[str], args: argparse.Namespace) -> dic
     import train as T
 
     total = args.warmup + args.steps
+    replay = REPLAY in overrides
+    overrides = [o for o in overrides if o != REPLAY]
     cfg, _ = T.build_config([
         "--config", config, "--offline", "--where", args.env,
         f"data.subset_n.train={args.n_utts}",
@@ -302,7 +354,14 @@ def time_one(config: str, overrides: list[str], args: argparse.Namespace) -> dic
     )
 
     torch.cuda.reset_peak_memory_stats()
-    trainer.fit(model, datamodule=dm)
+    if replay:
+        # One real batch, moved to the GPU once and handed back every step: the step with
+        # the data path removed, which is the compute ceiling for this batch.
+        batch = next(iter(dm.train_dataloader()))
+        batch = {k: v.to("cuda", non_blocking=True) for k, v in batch.items()}
+        trainer.fit(model, train_dataloaders=ReplayLoader(batch, total))
+    else:
+        trainer.fit(model, datamodule=dm)
     elapsed, timed_steps, gpu_util = timer.elapsed()
     per_step = elapsed / max(timed_steps, 1)
     return {
@@ -379,7 +438,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     suite, default_config = SUITES[args.suite]
     if suite is None:
-        suite = gpu_trials(args.at_batch)
+        suite = gpu_trials(args.at_batch, args.batches)
     args.config = args.config or default_config
     if args.eval_timing:
         print(f"device: {torch.cuda.get_device_name(0)}   data root: {args.env}")
