@@ -33,7 +33,7 @@ class BinnedWER(TimeBinnedMetric):
     # The contract the training loop drives every binned metric through: `inputs` names
     # the keys of the per-batch record it wants fed to update(), and label/ylim let the
     # plotting helpers annotate the axis without knowing what the metric is.
-    inputs = ("pred_ids", "target_ids", "t")
+    inputs = ("pred_ids", "target_ids", "bin_value")
     label = "WER %"
     ylim = (0, 105)
 
@@ -46,7 +46,7 @@ class BinnedWER(TimeBinnedMetric):
         edges: Edges = None,
         **kwargs: object,
     ) -> None:
-        """Hold what decoding needs, plus a running error/word count per t-bin.
+        """Hold what decoding needs, plus a running error/word count per bin.
 
         vocab_map is needed because update() has to turn compact ids back into Whisper
         ids before the tokenizer sees them.
@@ -59,9 +59,9 @@ class BinnedWER(TimeBinnedMetric):
         self.add_state("ref_words", default=torch.zeros(self.num_bins), dist_reduce_fx="sum")
 
     def update(
-        self, pred_ids: torch.Tensor, target_ids: torch.Tensor, t: torch.Tensor
+        self, pred_ids: torch.Tensor, target_ids: torch.Tensor, bin_value: torch.Tensor
     ) -> None:
-        """Accumulate one batch. pred_ids/target_ids: (B, L) ids; t: (B,) flow times."""
+        """Accumulate one batch. pred_ids/target_ids: (B, L) ids; bin_value: (B,)."""
         preds = ids_to_text(pred_ids, self.tokenizer, self.pad_id, self.vocab_map)
         refs = ids_to_text(target_ids, self.tokenizer, self.pad_id, self.vocab_map)
 
@@ -69,7 +69,9 @@ class BinnedWER(TimeBinnedMetric):
         # host-to-device round trips per utterance.
         errors = [0.0] * self.num_bins
         ref_words = [0.0] * self.num_bins
-        for b, ref, pred in zip(self._bin_indices(t).tolist(), refs, preds, strict=True):
+        for b, ref, pred in zip(
+            self._bin_indices(bin_value).tolist(), refs, preds, strict=True
+        ):
             ref, pred = normalize_reference(ref), data_utils.normalizer(pred)
             if not ref.strip():
                 continue

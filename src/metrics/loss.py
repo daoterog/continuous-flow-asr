@@ -17,19 +17,19 @@ class BinnedLoss(TimeBinnedMetric):
     tracking on training epochs as well as validation ones.
     """
 
-    inputs = ("loss_per_seq", "t")
+    inputs = ("loss_per_seq", "bin_value")
     label = "cross-entropy"
     ylim = (0, None)
 
     def __init__(self, num_bins: int = 10, edges: Edges = None, **kwargs: object) -> None:
-        """Track a running loss sum and count per t-bin."""
+        """Track a running loss sum and count per bin."""
         super().__init__(num_bins=num_bins, edges=edges, **kwargs)
         self.add_state("loss_sum", default=torch.zeros(self.num_bins), dist_reduce_fx="sum")
         self.add_state("count", default=torch.zeros(self.num_bins), dist_reduce_fx="sum")
 
-    def update(self, loss_per_seq: torch.Tensor, t: torch.Tensor) -> None:
+    def update(self, loss_per_seq: torch.Tensor, bin_value: torch.Tensor) -> None:
         """Accumulate one batch. loss_per_seq: (B,) per row, NOT the batch mean."""
-        idx = self._bin_indices(t)
+        idx = self._bin_indices(bin_value)
         loss = loss_per_seq.detach().float()
         self.loss_sum.scatter_add_(0, idx, loss)
         self.count.scatter_add_(0, idx, torch.ones_like(loss))

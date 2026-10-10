@@ -23,6 +23,7 @@ from src.flow.schedule import TimeReparametrization
 from src.flow.tau_base import TauScheduler
 from src.metrics.base import TimeBinnedMetric
 from src.metrics.utils import (
+    bins_key,
     check_metrics,
     edge_values,
     is_binned,
@@ -35,8 +36,13 @@ from src.metrics.utils import (
 class MetricReporting:
     """Metric bank plus the logging hooks, mixed into a LightningModule.
 
-    Keys come out as `{model}_{metric}/{split}_{stat}` so one wandb section is one metric
-    of one model, with train and val next to each other.
+    Keys come out as `{group}_{metric}/{split}_{stat}` so one wandb section is one metric
+    of one group, with train and val next to each other. A group is a model on the
+    one-time path (`denoiser`, `mu`) and one of the distillation regimes on the flow-map
+    path (`diagonal`, `offdiag`, `boundary`).
+
+    The per-bin stats carry the name of the axis they resolve, so `_low_gap` and
+    `_high_gap` cannot be read as flow times.
     """
 
     metrics: nn.ModuleDict
@@ -66,11 +72,22 @@ class MetricReporting:
         check_metrics(self.metrics, time_reparam)
 
     def update_metrics(
-        self, out: dict, target_ids: torch.Tensor, t: torch.Tensor, split: str
+        self, out: dict, target_ids: torch.Tensor, bin_value: torch.Tensor, split: str
     ) -> None:
-        """Feed one batch's per-model records to every metric of this split."""
+        """Feed one batch's per-group records to every metric of this split.
+
+        `target_ids` and `bin_value` are the defaults; a record may override either. That
+        is what lets one `out` hold groups measured on different axes against different
+        slices of the batch — flow-map distillation bins its off-diagonal group on the
+        jump size and its diagonal group on the flow time, each over its own rows, while
+        the one-time path overrides neither.
+        """
         for name, part in out.items():
-            record = {"pred_ids": part["pred_ids"], "target_ids": target_ids, "t": t}
+            record = {
+                "pred_ids": part["pred_ids"],
+                "target_ids": part.get("target_ids", target_ids),
+                "bin_value": part.get("bin_value", bin_value),
+            }
             if "loss_per_seq" in part:
                 record["loss_per_seq"] = part["loss_per_seq"]
             for key, metric in self.metrics.items():
@@ -83,6 +100,10 @@ class MetricReporting:
             f"total_loss/{split}", loss, on_step=False, on_epoch=True, batch_size=batch_size
         )
         for name in self.names:
+            if name not in out:
+                # A group can be absent from a batch — distillation assigns rows by a
+                # permutation, so a 1.6% share can come up empty. Nothing to report.
+                continue
             if f"{split}_{name}_loss" in self.metrics:
                 # `log_metrics` already emits {name}_loss/{split}_overall from BinnedLoss,
                 # so we don't need to log it again.
@@ -111,9 +132,9 @@ class MetricReporting:
             if is_binned(metric):
                 low, high = edge_values(metric)
                 if low is not None:
-                    self.log(f"{section}/{split}_low_t", low)
-                    self.log(f"{section}/{split}_high_t", high)
-                self._log_bins(f"{section}/{split}_bins", metric)
+                    self.log(f"{section}/{split}_low_{metric.axis}", low)
+                    self.log(f"{section}/{split}_high_{metric.axis}", high)
+                self._log_bins(bins_key(section, split, metric), metric)
 
     def _log_bins(self, key: str, metric: TimeBinnedMetric) -> None:
         """Send one metric's per-bin values to wandb as a histogram over the bin index.
@@ -231,5 +252,5 @@ class MetricReporting:
                 continue
             split, _, _ = split_key(key)
             self.logger.experiment.define_metric(
-                f"{section_for(key)}/{split}_bins", step_metric="epoch"
+                bins_key(section_for(key), split, metric), step_metric="epoch"
             )

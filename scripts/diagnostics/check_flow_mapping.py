@@ -137,11 +137,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     #     on both sides of its own entropy, so it was a constant: requires_grad False and no
     #     gradient at all. This is the check that would have caught it.
     torch.manual_seed(0)
-    _l, out, *_ = model.map_step(batch)
-    for name, rec in out.items():
+    _l, out = model.map_step(batch)
+    # `out` also carries metric-only records with no loss in them — `input` is the argmax
+    # of the interpolant, which no objective scores.
+    terms = {name: rec for name, rec in out.items() if "loss" in rec}
+    for name, rec in terms.items():
         print(f"   {name:<10} loss {float(rec['loss'].detach()):.4f}  "
               f"n={rec['n']:<3} requires_grad={rec['loss'].requires_grad}")
-    live = [n for n, r in out.items() if r["n"] and not r["loss"].requires_grad]
+    live = [n for n, r in terms.items() if r["n"] and not r["loss"].requires_grad]
     assert not live, f"non-empty term(s) with no gradient: {live}"
 
     model.eval()

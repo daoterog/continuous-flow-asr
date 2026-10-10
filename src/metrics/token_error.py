@@ -24,7 +24,7 @@ class BinnedTokenError(TimeBinnedMetric):
     positions are padding, so a model with every real token wrong still reports 0.19.
     """
 
-    inputs = ("pred_ids", "target_ids", "t")
+    inputs = ("pred_ids", "target_ids", "bin_value")
     label = r"$P_e$ (token error)"
     ylim = (0, 1.02)
 
@@ -35,17 +35,17 @@ class BinnedTokenError(TimeBinnedMetric):
         pad_id: int | None = None,
         **kwargs: object,
     ) -> None:
-        """Track a running wrong-token count and total per t-bin."""
+        """Track a running wrong-token count and total per bin."""
         super().__init__(num_bins=num_bins, edges=edges, **kwargs)
         self.pad_id = pad_id
         self.add_state("errors", default=torch.zeros(self.num_bins), dist_reduce_fx="sum")
         self.add_state("count", default=torch.zeros(self.num_bins), dist_reduce_fx="sum")
 
     def update(
-        self, pred_ids: torch.Tensor, target_ids: torch.Tensor, t: torch.Tensor
+        self, pred_ids: torch.Tensor, target_ids: torch.Tensor, bin_value: torch.Tensor
     ) -> None:
         """Accumulate one batch of (B, L) predictions against (B, L) targets."""
-        idx = self._bin_indices(t)
+        idx = self._bin_indices(bin_value)
         scored = (
             torch.ones_like(target_ids, dtype=torch.bool)
             if self.pad_id is None

@@ -34,7 +34,16 @@ EPS = 1e-8
 # The three regimes a batch is divided into, in the order `distill.split` names them. Each
 # row trains exactly one, so these are also the relative weights of the three objectives.
 # `train.validate_distill_split` checks the config against this before a module is built.
+#
+# Also the metric bank's group names, so one vocabulary serves the config key, the code and
+# the wandb section — there is no second set of names to map between.
 DISTILL_GROUPS = ("diagonal", "boundary", "offdiag")
+
+# What each group's metrics resolve along, for any group that is not measured in flow time.
+# The off-diagonal rows are the ones the whole exercise is about and the question asked of
+# them is not "where in the flow" but "how far a jump", so they bin on gap = t - s. The name
+# reaches the logged key, which is what stops a gap being reported under one that says `t`.
+METRIC_AXES = {"offdiag": "gap"}
 
 # `sampling.method` selects one, by the same names the one-time path uses so a config
 # reads the same for both modules and a teacher/student pair cannot be set up on
@@ -171,11 +180,29 @@ class FlowMapping(MetricReporting, pl.LightningModule):
                 self.two_time_denoiser, mode=cfg.train.get("compile_mode", "default")
             )
 
-        # TODO(stage 3): how to evaluate a flow map is still open — the binned metrics take
-        # one t and this step has three (start, mid, end), and the two loss terms are not
-        # comparable to each other. Until that is settled there is no metric bank, so every
-        # call that iterates `self.metrics` is commented out rather than fed an empty one.
-        # self.init_metrics(...)
+        # One group per regime, each resolved along the axis its own question is asked in:
+        # the diagonal in flow time, where s == t and drift from the teacher is local to a
+        # t; the off-diagonal in the gap, which is the size of the jump; the boundary not at
+        # all, since its rows are pinned at (0, 1).
+        #
+        # `time_reparam` is deliberately None, not forgotten. tau's quantiles are the right
+        # cut when t is drawn through tau, and here nothing is: `sample_interval` draws the
+        # gap uniformly and the startpoint uniformly in t. Equal-width bins therefore hold
+        # ~1/n of the batch each, which is exactly what tau's edges would be there to
+        # achieve — applying them anyway would pile the whole epoch into the top bins.
+        metrics = cfg.get("metrics", {})
+        self.init_metrics(
+            DISTILL_GROUPS,
+            tokenizer,
+            pad_id,
+            vocab_map,
+            time_reparam=None,
+            axes=METRIC_AXES,
+            loss_bins=metrics.get("loss_bins", 10),
+            perr_bins=metrics.get("perr_bins", 10),
+            wer_bins=OmegaConf.to_container(metrics.get("wer_bins", {})) or None,
+            input_perr_bins=metrics.get("input_perr_bins", 10),
+        )
 
     @property
     def components(self) -> tuple[str, ...]:
@@ -198,40 +225,36 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         return self
 
     def on_fit_start(self) -> None:
-        """Nothing to declare yet — the histogram panels arrive with the metric bank."""
+        """Declare the histogram panels' step metric before anything is logged."""
         super().on_fit_start()
-        # TODO(stage 3): self._define_bin_metrics()
+        self._define_bin_metrics()
 
     def on_train_epoch_start(self) -> None:
         """Clear the train accumulators.
 
-        No schedule refresh: tau is the teacher's and does not move, so there is nothing
-        here to re-derive.
+        No schedule refresh, and so no re-binning either: tau is the teacher's and does not
+        move, and in any case these bins are equal-width rather than cut from it.
         """
         super().on_train_epoch_start()
-        # TODO(stage 3): self.reset_metrics("train")
+        self.reset_metrics("train")
 
     def training_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
         """One optimizer step."""
         return self._step(batch, "train")
 
     def _step(self, batch: dict, split: str) -> torch.Tensor:
-        """One forward pass, logged as scalars until there is a metric bank to fill."""
-        loss, out, _startpoint, _midpoint, _endpoint, _weighting = self.map_step(batch)
+        """One forward pass, with each group's record fed to its own metrics.
+
+        Every record carries its own rows, targets and axis value, so `update_metrics`
+        needs no defaults from here — the two it takes are never the ones used.
+        """
+        loss, out = self.map_step(batch)
         self._check_finite(loss, out, split)
-        # TODO: move loss logging into log_losses once it is implemented.
-        batch_size = batch["tokens"].size(0)
-        self.log(f"total_loss/{split}", loss, on_step=False, on_epoch=True,
-                 batch_size=batch_size)
-        for name, record in out.items():
-            self.log(f"{name}/{split}", record["loss"], on_step=False, on_epoch=True,
-                     batch_size=batch_size)
-        # TODO(stage 3): self.log_losses(...) and self.update_metrics(...) once the metric
-        # bank exists. `update_metrics` takes a single t and this step has three, so the two
-        # terms need separate calls against their own times.
+        self.log_losses(loss, out, split, batch_size=batch["tokens"].size(0))
+        self.update_metrics(out, batch["tokens"], None, split)
         return loss
 
-    def map_step(self, batch: dict) -> tuple:
+    def map_step(self, batch: dict) -> tuple[torch.Tensor, dict]:
         """One PSD distillation step (FMLM's `FMLM.loss`, algo.py:1246-1349).
 
         Every row trains exactly one term, chosen by `distill.split`:
@@ -247,6 +270,12 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         One student forward covers the whole batch; the two losses are slices of it. The
         rollout that builds the off-diagonal target runs entirely under `no_grad`: it is a
         target, and the gradient goes only into the single `student_logits` call.
+
+        The objective has two terms but the records it returns name three groups, because
+        the boundary rows are trained with the off-diagonal ones and read separately: their
+        jump is 0 -> 1, which is exactly what a one-step sample asks for, so their error is
+        a dense estimate of the headline number that the 64-utterance probe only reaches
+        every few epochs.
         """
         audio = batch["audio"].float()
         tokens = batch["tokens"]
@@ -273,10 +302,14 @@ class FlowMapping(MetricReporting, pl.LightningModule):
             audio_embeddings=audio,
         )
         student_logprobs = F.log_softmax(student_logits, dim=-1)
+        pred_ids = student_logits.argmax(dim=-1)
 
+        # The objective's two slices. `idx_rollout` is every non-diagonal row — boundary
+        # and off-diagonal together — because FMLM folds the full jump into the rollout
+        # term as its widest case (algo.py:1285).
         is_diagonal = groups == 0
         idx_diag = is_diagonal.nonzero(as_tuple=True)[0]
-        idx_offdiag = (~is_diagonal).nonzero(as_tuple=True)[0]
+        idx_rollout = (~is_diagonal).nonzero(as_tuple=True)[0]
 
         # Each row contributes exactly one term, so the split is also the weighting.
         per_token = torch.zeros_like(tokens, dtype=student_logits.dtype)
@@ -295,12 +328,12 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         )
 
         with torch.no_grad():
-            x_s = i_start_point[idx_offdiag]
-            audio_od = audio[idx_offdiag]
+            x_s = i_start_point[idx_rollout]
+            audio_od = audio[idx_rollout]
             mid_logits = self.two_time_denoiser(
                 x_t=x_s,
-                startpoint=startpoint[idx_offdiag],
-                endpoint=midpoint[idx_offdiag],
+                startpoint=startpoint[idx_rollout],
+                endpoint=midpoint[idx_rollout],
                 audio_embeddings=audio_od,
             )
 
@@ -311,21 +344,21 @@ class FlowMapping(MetricReporting, pl.LightningModule):
             else:
                 d_su = F.softmax(mid_logits, dim=-1)
 
-            x_su = state[idx_offdiag] * x_s + pred[idx_offdiag] * d_su
+            x_su = state[idx_rollout] * x_s + pred[idx_rollout] * d_su
             d_ut = F.softmax(
                 self.two_time_denoiser(
                     x_t=x_su,
-                    startpoint=midpoint[idx_offdiag],
-                    endpoint=endpoint[idx_offdiag],
+                    startpoint=midpoint[idx_rollout],
+                    endpoint=endpoint[idx_rollout],
                     audio_embeddings=audio_od,
                 ),
                 dim=-1,
             )
-            w = weighting[idx_offdiag]
+            w = weighting[idx_rollout]
             rollout_target = w * d_su + (1.0 - w) * d_ut
 
-        per_token[idx_offdiag] = -torch.sum(
-            rollout_target * student_logprobs[idx_offdiag], dim=-1
+        per_token[idx_rollout] = -torch.sum(
+            rollout_target * student_logprobs[idx_rollout], dim=-1
         )
 
         weights = self.token_weights(tokens)
@@ -334,21 +367,48 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         else:
             per_seq = (per_token * weights).sum(dim=1) / weights.sum(dim=1).clamp(min=1e-8)
 
-        out["diagonal"] = {
-            "loss": per_seq[idx_diag].mean() if idx_diag.numel() else per_seq.new_zeros(()),
-            "n": idx_diag.numel(),
-        }
-        out["offdiag"] = {
-            "loss": (
-                per_seq[idx_offdiag].mean()
-                if idx_offdiag.numel()
-                else per_seq.new_zeros(())
-            ),
-            "n": idx_offdiag.numel(),
-        }
         loss = per_seq.mean()
 
-        return loss, out, startpoint, midpoint, endpoint, weighting
+        # Read after the group overwrites, never from `sample_interval`'s own `gap`: the
+        # diagonal and boundary rows have had their times replaced by then, so that local
+        # holds a jump those rows never took.
+        gap = endpoint - startpoint
+
+        # Reporting only — the objective above is already complete. Three slices rather than
+        # the two it used, because the boundary rows are read apart from the off-diagonal
+        # ones they train with, and each group is measured along the axis its own question
+        # is asked in: the diagonal at the flow time it denoised, the off-diagonal at the
+        # size of the jump it was asked for.
+        for name, idx, bin_value in (
+            ("diagonal", idx_diag, startpoint),
+            ("boundary", (groups == 1).nonzero(as_tuple=True)[0], startpoint),
+            ("offdiag", (groups == 2).nonzero(as_tuple=True)[0], gap),
+        ):
+            # An empty group contributes nothing rather than a zero that would pull its
+            # mean down. `assign_groups` can produce one whenever a share is small against
+            # the batch — boundary is 1.6% of it.
+            if not idx.numel():
+                continue
+            out[name] = {
+                "loss": per_seq[idx].mean(),
+                "loss_per_seq": per_seq[idx],
+                "pred_ids": pred_ids[idx],
+                "target_ids": tokens[idx],
+                "bin_value": bin_value[idx],
+                "n": idx.numel(),
+            }
+
+        # argmax of the field the student was handed, with no model in it. Read against
+        # diagonal_perr it separates what I_s already carried from what the student added,
+        # which is the only way to tell a good denoiser from an easy input.
+        if self.cfg.get("metrics", {}).get("input_perr_bins"):
+            out["input"] = {
+                "pred_ids": i_start_point.argmax(dim=-1),
+                "target_ids": tokens,
+                "bin_value": startpoint,
+            }
+
+        return loss, out
 
     def token_weights(self, tokens: torch.Tensor) -> torch.Tensor | None:
         """(B, L) loss weights, or None when every position counts the same.
@@ -465,38 +525,39 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         return i_t
 
     def on_train_epoch_end(self) -> None:
-        """Nothing to flush yet; the losses are logged per step."""
+        """Flush the train metrics."""
         super().on_train_epoch_end()
-        # TODO(stage 3): self.log_metrics("train")
+        self.log_metrics("train")
 
     def on_validation_epoch_start(self) -> None:
         """Clear the val accumulators before the pass fills them."""
         super().on_validation_epoch_start()
-        # TODO(stage 3): self.reset_metrics("val")
+        self.reset_metrics("val")
 
     def validation_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
         """One validation batch."""
         return self._step(batch, "val")
 
     def on_validation_epoch_end(self) -> None:
-        """Sample from noise, when there is a sampler to do it with.
+        """Flush the val metrics, then sample from noise if this epoch is due one.
 
-        `sampling.enabled: false` makes this return before touching `sample()`, which a
-        two-time model does not have yet.
+        `boundary_perr/val_overall` and `sampled_*_1/perr` measure the same jump — the
+        boundary rows sit at (0, 1) and tau's grid starts at t=0 — so when both land in the
+        same epoch they are each other's check.
         """
         super().on_validation_epoch_end()
-        # TODO(stage 3): self.log_metrics("val")
+        self.log_metrics("val")
         self.log_sampled()
 
     def on_test_start(self) -> None:
         """Same, for a `trainer.test()` that did not go through `fit`."""
         super().on_test_start()
-        # TODO(stage 3): self._define_bin_metrics()
+        self._define_bin_metrics()
 
     def on_test_epoch_start(self) -> None:
         """Clear the test accumulators before the pass fills them."""
         super().on_test_epoch_start()
-        # TODO(stage 3): self.reset_metrics("test")
+        self.reset_metrics("test")
 
     def test_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
         """One test batch. Only reached through an explicit `trainer.test()`."""
@@ -505,7 +566,7 @@ class FlowMapping(MetricReporting, pl.LightningModule):
     def on_test_epoch_end(self) -> None:
         """Flush the test metrics."""
         super().on_test_epoch_end()
-        # TODO(stage 3): self.log_metrics("test")
+        self.log_metrics("test")
 
     def _check_finite(self, loss: torch.Tensor, out: dict, split: str) -> None:
         """Stop the run the first time the objective is not finite."""

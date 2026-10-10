@@ -23,21 +23,26 @@ SPLITS = ("train", "val", "test")
 # default; loss and P_e are scatter-adds and stay on everywhere.
 DEFAULT_WER_BINS = {"train": 0, "val": 10, "test": 10}
 
-# Models whose prediction does not depend on t. mu_psi's forward takes audio and nothing
-# else, so the same utterance yields the same logits whichever t-bin its batch happened to
-# draw — binning mu reports how the t draws landed, not anything about mu. These get a
-# single bin, which makes `overall()` the entire quantity and suppresses the per-bin
-# histogram, the low_t/high_t pair and the bin-edge summary, all of which would be either
-# constant or noise. The denoiser and the interpolant do vary with t and stay binned.
-AUDIO_ONLY = ("mu",)
+# Groups with no axis to resolve, for either of two reasons.
+#
+#   mu        its forward takes audio and nothing else, so the same utterance yields the
+#             same logits whichever bin its batch happened to draw — binning mu reports
+#             how the draws landed, not anything about mu.
+#   boundary  distillation's boundary rows are pinned at (s, t) = (0, 1), so every row is
+#             at the same point and there is no spread to resolve.
+#
+# These get a single bin, which makes `overall()` the entire quantity and suppresses the
+# per-bin histogram, the low/high pair and the bin-edge summary, all of which would be
+# either constant or noise.
+UNBINNED = ("mu", "boundary")
 
 
 def bins_for(name: str, n: int) -> int:
-    """Bin count for one model's metric: one bin if it cannot vary with t, else `n`.
+    """Bin count for one group's metric: one bin if it has no axis, else `n`.
 
     A zero stays zero — that is how the config switches a metric off entirely.
     """
-    return 1 if (n and name in AUDIO_ONLY) else n
+    return 1 if (n and name in UNBINNED) else n
 
 
 def is_binned(metric: TimeBinnedMetric) -> bool:
@@ -55,17 +60,23 @@ def make_metrics(
     wer_bins: dict | None = None,
     input_perr_bins: int = 0,
     time_reparam: "TimeReparametrization | None" = None,
+    axes: dict[str, str] | None = None,
 ) -> nn.ModuleDict:
-    """Build the `{split}_{model}_{metric}` ModuleDict the reporting mixin drives.
+    """Build the `{split}_{group}_{metric}` ModuleDict the reporting mixin drives.
 
     Pass the SAME `time_reparam` the module draws t through. The bins then follow its
     quantiles instead of being equal-width in t, which is the difference
     between every bin holding ~1/n of the epoch and two thirds of them being empty.
 
+    `axes` names what each group bins on, defaulting to "t". Flow-map distillation bins
+    its off-diagonal group on the gap t - s, and the name reaches the logged key from
+    here, so a gap is never reported under a key that says `t`.
+
     A ModuleDict keyed by split gives each split its own instances; sharing one would
     pool train and val into the same bins.
     """
     wer_bins = DEFAULT_WER_BINS | (wer_bins or {})
+    axes = axes or {}
 
     def edges_for(n: int) -> torch.Tensor | None:
         if time_reparam is None or time_reparam.is_identity:
@@ -79,25 +90,29 @@ def make_metrics(
             # denoiser_perr it separates what the field already carried from what the
             # denoiser added, which is the only way to see mu's effect on the input.
             metrics[f"{split}_input_perr"] = BinnedTokenError(
-                input_perr_bins, edges=edges_for(input_perr_bins), pad_id=pad_id
+                input_perr_bins,
+                edges=edges_for(input_perr_bins),
+                pad_id=pad_id,
+                axis=axes.get("input", "t"),
             )
         for name in names:
-            # An audio-only model collapses to one bin; edges_for is then pointless, so
+            # A group with no axis collapses to one bin; edges_for is then pointless, so
             # it is not called and the metric keeps the default full-range bin.
-            binned = name not in AUDIO_ONLY
+            binned = name not in UNBINNED
+            axis = axes.get(name, "t")
 
             if n := bins_for(name, loss_bins):
                 metrics[f"{split}_{name}_loss"] = BinnedLoss(
-                    n, edges=edges_for(n) if binned else None
+                    n, edges=edges_for(n) if binned else None, axis=axis
                 )
             if n := bins_for(name, perr_bins):
                 metrics[f"{split}_{name}_perr"] = BinnedTokenError(
-                    n, edges=edges_for(n) if binned else None, pad_id=pad_id
+                    n, edges=edges_for(n) if binned else None, pad_id=pad_id, axis=axis
                 )
             if n := bins_for(name, wer_bins.get(split, 0)):
                 metrics[f"{split}_{name}_wer"] = BinnedWER(
                     tokenizer, pad_id, vocab_map, num_bins=n,
-                    edges=edges_for(n) if binned else None,
+                    edges=edges_for(n) if binned else None, axis=axis,
                 )
     return metrics
 
@@ -105,30 +120,50 @@ def make_metrics(
 def split_key(key: str) -> tuple[str, str, str]:
     """`val_denoiser_wer` -> ("val", "denoiser", "wer").
 
-    Safe as a plain split because no split, model or metric name contains an underscore;
+    Safe as a plain split because no split, group or metric name contains an underscore;
     make_metrics is the only place these keys are built.
     """
-    split, model, name = key.split("_", 2)
-    return split, model, name
+    split, group, name = key.split("_", 2)
+    return split, group, name
 
 
 def section_for(key: str) -> str:
     """`val_denoiser_wer` -> "denoiser_wer", the wandb section the panels land in.
 
-    One section per metric per model, holding train and val side by side. Grouping by
+    One section per metric per group, holding train and val side by side. Grouping by
     split instead would put every metric of a split together and force a cross-section
     jump to compare the two.
     """
-    _, model, name = split_key(key)
-    return f"{model}_{name}"
+    _, group, name = split_key(key)
+    return f"{group}_{name}"
+
+
+def bins_key(section: str, split: str, metric: TimeBinnedMetric) -> str:
+    """The wandb key one metric's per-bin histogram is logged under.
+
+    The axis is in the key unless it is `t`, which keeps `denoiser_perr/val_bins` exactly
+    where it has always been — existing runs are compared against that key — while a gap
+    histogram lands at `offdiag_perr/train_bins_gap` and cannot be mistaken for one in t.
+
+    Built here rather than inline because two callers must agree on the string: the one
+    that logs the histogram and the one that declares its step metric. A drift between
+    them loses the epoch axis silently.
+    """
+    if metric.axis == "t":
+        return f"{section}/{split}_bins"
+    return f"{section}/{split}_bins_{metric.axis}"
 
 
 def edge_values(metric: TimeBinnedMetric) -> tuple[float, float] | tuple[None, None]:
-    """The metric in its lowest and highest *populated* t bin.
+    """The metric in its lowest and highest *populated* bin.
 
-    The two ends of the flow answer different questions: the low-t bin is where x_t is
-    still noise and only the audio can carry the prediction, the high-t bin is where the
-    target is nearly clean. A single `overall` averages them and hides which end moved.
+    The two ends of an axis answer different questions. In t: the low bin is where x_t is
+    still noise and only the audio can carry the prediction, the high bin is where the
+    target is nearly clean. In the distillation gap: the low bin is the short jump a
+    teacher already handles, the high bin is the long jump the flow map exists to make, so
+    the pair is also the collapse signature — low rising toward high is a student going
+    constant in its endpoint. A single `overall` averages them and hides which end moved.
+
     Empty bins are skipped — under uniform bins with a reparameterized t the low ones are
     empty by construction.
     """
@@ -149,7 +184,7 @@ def check_metrics(
         if not hasattr(m, "inputs"):
             raise TypeError(
                 f"{key} ({type(m).__name__}) has no `inputs` — declare it, e.g. "
-                f"inputs = ('pred_ids', 'target_ids', 't')"
+                f"inputs = ('pred_ids', 'target_ids', 'bin_value')"
             )
         # An unbinned metric has one bin spanning all of t, so schedule edges are not
         # something it is missing — the warning below would be noise.
