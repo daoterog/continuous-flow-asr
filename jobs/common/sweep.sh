@@ -9,8 +9,11 @@
 # Tiers. Each picks a run-kind profile (configs/profiles/run/), which owns the epoch
 # count and the eval cadence; explicit EPOCHS / SEEDS / PACK in the environment still win.
 #
-#   screen   --run sweep   100 epochs, 1 seed, 2 runs per GPU    the default: ranks arms
-#   confirm  --run full    300 epochs, 2 seeds, 2 runs per GPU   only the screen's winner(s)
+#   screen   --run sweep   100 epochs, 1 seed, 2 runs per job    the default: ranks arms
+#   confirm  --run full    300 epochs, 2 seeds, 2 runs per job   only the screen's winner(s)
+#
+# A job of PACK runs gives each its own GPU. Two runs cost what one does, since a job is
+# billed for 2 GPUs either way (jobs/common/budget.sh), so an odd run out wastes a GPU.
 #
 # EPOCHS here only prices the sweep and names its runs. Set it explicitly to change the
 # length: tier_defaults then sets EPOCH_OVERRIDE, which a sweep adds to its runs.
@@ -53,15 +56,15 @@ flush_runs() {
     local groups=()
     for ((i = 0; i < n; i += PACK)); do groups+=("${i}"); done
 
-    echo "tier      : ${TIER} (--run ${TRAIN_RUN})  epochs ${EPOCHS}  seeds '${SEEDS}'  ${PACK} run(s) per GPU"
+    echo "tier      : ${TIER} (--run ${TRAIN_RUN})  epochs ${EPOCHS}  seeds '${SEEDS}'  ${PACK} run(s) per job, one GPU each"
     for i in "${groups[@]}"; do
         size=$((n - i < PACK ? n - i : PACK))
-        job_s="$(est_job_seconds "${EPOCHS}" "${size}")"
-        total=$((total + $(seconds_to_sbu "${job_s}")))
+        job_s="$(est_job_seconds "${EPOCHS}")"
+        total=$((total + $(job_sbu "${job_s}" "${size}")))
         jobs=$((jobs + 1))
     done
     echo "plan      : ${n} runs in ${jobs} GPU jobs, expected ${total} SBU"
-    echo "            (${SEC_PER_EPOCH} s/epoch, x${PACK_SLOWDOWN} when packed, ${SBU_PER_GPU_HOUR} SBU/GPU-h)"
+    echo "            (${SEC_PER_EPOCH} s/epoch + ${JOB_OVERHEAD_S} s, one GPU per run, ${SBU_PER_GPU_HOUR} SBU/GPU-h, a job billed >=2 GPUs)"
 
     if [[ -n "${SUBMIT}" ]]; then
         budget_gate "${total}" || exit 1
@@ -69,7 +72,7 @@ flush_runs() {
 
     for i in "${groups[@]}"; do
         size=$((n - i < PACK ? n - i : PACK))
-        job_s="$(est_job_seconds "${EPOCHS}" "${size}")"
+        job_s="$(est_job_seconds "${EPOCHS}")"
         # Walltime is free — billing is on elapsed time — so ask for twice the estimate
         # plus half an hour. A run cut off before it finishes is the expensive failure.
         wall="$(awk -v s="${job_s}" 'BEGIN { w = 2 * s + 1800; if (w > 432000) w = 432000;

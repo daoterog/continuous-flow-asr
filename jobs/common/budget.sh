@@ -1,7 +1,12 @@
 # SBU accounting for every Snellius submission. Source it, do not execute it.
 #
-# The budget is 100k SBU counted from 25-08-2026, and every training job bills 256 SBU per
-# hour (one A100 plus its quarter of the node), so a full-data 300-epoch run costs ~1,730.
+# The budget is 100k SBU counted from 25-08-2026. An A100 hour is 128 SBU, but a job is
+# charged for the largest of its shares of the node — 4 GPUs, 72 cores, 480 GiB, so one
+# share is 1 GPU, 18 cores or 120 GiB. A training job needs 160G (the 102 GiB feature cache
+# plus its processes), which is 2 shares, so even a one-run job is billed as 2 GPUs
+# (sacct's billing=256). jobs/submit/train.sh therefore pairs runs, one per GPU, which is
+# the same price as one run alone.
+#
 # What is billed is the time a job actually runs, not its walltime: asking for a generous
 # walltime is free, and a run cut off before it finishes is the expensive failure.
 #
@@ -15,14 +20,17 @@
 BUDGET_SINCE="${BUDGET_SINCE:-25-08-2026}"
 BUDGET_CAP="${BUDGET_CAP:-100000}"
 SWEEP_CAP="${SWEEP_CAP:-3000}"
-# From sacct: every flow_train job is allocated billing=256 for 1 GPU, 18 CPUs, 160G.
-SBU_PER_GPU_HOUR="${SBU_PER_GPU_HOUR:-256}"
-# Full train.100 at batch 128, warm page cache: the flm-parity runs took 6.7 h for 300.
-SEC_PER_EPOCH="${SEC_PER_EPOCH:-80}"
-# How much slower each run gets when two share a GPU. 1.5 is a placeholder until the
-# calibration job measures it; packing pays as long as this stays below the pack size.
-PACK_SLOWDOWN="${PACK_SLOWDOWN:-1.5}"
-# Startup, the tau build, the cold first epochs off GPFS.
+SBU_PER_GPU_HOUR="${SBU_PER_GPU_HOUR:-128}"
+# Per run, per GPU: 18 cores and at least 160G for the whole job (see jobs/batch/train.sh).
+CPUS_PER_RUN=18
+MEM_PER_RUN_G=120
+MEM_MIN_G=160
+# Full train.100, batch 128, under the snellius profile (compile + bf16): the A100
+# benchmark ran 1828 utts/s, i.e. ~16 s of training per 28.5k-utterance epoch, plus val and
+# the amortised sampling probe. Provisional until the first screen's epoch times replace it
+# (the runs before the profiles took 77 s).
+SEC_PER_EPOCH="${SEC_PER_EPOCH:-25}"
+# Startup, the tau build, compile's warmup, the cold first epochs off GPFS.
 JOB_OVERHEAD_S="${JOB_OVERHEAD_S:-600}"
 
 _BUDGET_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -40,16 +48,36 @@ _slurm_seconds() {
     }'
 }
 
-# Expected wall seconds of one job running EPOCHS epochs, PACK runs side by side.
-est_job_seconds() {
-    local epochs="$1" pack="${2:-1}"
-    awk -v e="${epochs}" -v p="${pack}" -v s="${SEC_PER_EPOCH}" -v f="${PACK_SLOWDOWN}" \
-        -v o="${JOB_OVERHEAD_S}" 'BEGIN { printf "%d", e * s * (p > 1 ? f : 1) + o }'
+# What a job of N runs asks for, one GPU and 18 cores per run: "GPUS CPUS MEM_G".
+job_resources() {
+    local n="${1:-1}" mem
+    mem=$((MEM_PER_RUN_G * n))
+    ((mem < MEM_MIN_G)) && mem=${MEM_MIN_G}
+    echo "${n} $((CPUS_PER_RUN * n)) ${mem}"
 }
 
-# SBU for a given number of wall seconds on one GPU.
-seconds_to_sbu() {
-    awk -v s="$1" -v r="${SBU_PER_GPU_HOUR}" 'BEGIN { printf "%.0f", s / 3600 * r }'
+# GPUs a job of N runs is charged for: the largest of its GPU, CPU and memory shares.
+charged_gpus() {
+    local gpus cpus mem
+    read -r gpus cpus mem <<< "$(job_resources "${1:-1}")"
+    awk -v g="${gpus}" -v c="${cpus}" -v m="${mem}" 'BEGIN {
+        x = g; cs = c / 18; ms = m / 120
+        if (cs > x) x = cs; if (ms > x) x = ms
+        printf "%d", (x == int(x) ? x : int(x) + 1)
+    }'
+}
+
+# Expected wall seconds of one job running EPOCHS epochs. Its runs each have their own
+# GPU, so the number of runs does not change it.
+est_job_seconds() {
+    awk -v e="$1" -v s="${SEC_PER_EPOCH}" -v o="${JOB_OVERHEAD_S}" \
+        'BEGIN { printf "%d", e * s + o }'
+}
+
+# SBU for SECONDS of wall time on a job of N runs.
+job_sbu() {
+    awk -v s="$1" -v g="$(charged_gpus "${2:-1}")" -v r="${SBU_PER_GPU_HOUR}" \
+        'BEGIN { printf "%.0f", s / 3600 * r * g }'
 }
 
 # SBU spent since BUDGET_SINCE, net of restitutions. BUDGET_SPENT overrides it, which is
@@ -78,7 +106,7 @@ budget_queued() {
             rem="$(awk -v e="${est}" -v u="$(_slurm_seconds "${used}")" -v r="${SBU_PER_GPU_HOUR}" \
                 'BEGIN { x = e - u / 3600 * r; printf "%.0f", (x > 0 ? x : 0) }')"
         else
-            rem="$(seconds_to_sbu "$(_slurm_seconds "${left}")")"
+            rem="$(job_sbu "$(_slurm_seconds "${left}")" 1)"
         fi
         total=$((total + rem))
     done < <(squeue -u "${USER}" -h -t RUNNING,PENDING -o "%i|%L|%M" 2>/dev/null)

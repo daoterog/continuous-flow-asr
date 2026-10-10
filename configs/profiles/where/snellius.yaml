@@ -13,10 +13,13 @@ schedule:
   # Precision of the measured tau curve is 1/sqrt(n); 8192 halves the error of 2048 at t0.
   probe_n_utts: 8192
 train:
-  # Pending the A100 benchmark (scripts/diagnostics/bench_train.py --suite prod): turn on
-  # only once it is measured to win on this card. Every run so far had it off.
-  compile: false
-  precision: null
+  # Measured on the A100 (bench_train --suite prod, job 27839620), batch 128 audio_cond,
+  # ms/step:  as run 256.6 | train WER off 129.9 | + compile 98.7 | + bf16 70.0
+  # i.e. 3.7x every run before the profiles. DRAX already ran its blocks in bf16 and keeps
+  # its output layer fp32, so bf16-mixed mostly moves mu and the embeddings — but compare
+  # bf16 runs only with bf16 runs.
+  compile: true
+  precision: bf16-mixed
 metrics:
   # Off for train: decoding 2 x 128 transcripts and scoring WER on every step costs
   # 68.6 ms of CPU against 0.5 ms without it, ~15 s of a ~77 s epoch with the GPU idle.

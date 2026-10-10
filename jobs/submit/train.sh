@@ -11,8 +11,10 @@
 #   WALLTIME=02:00:00 ./jobs/submit/train.sh configs/linear.yaml    # skip the estimate
 #
 # Everything after the config is passed through to train.py as OmegaConf overrides. A
-# literal `::` starts the next run's overrides; the runs share the GPU (see
-# jobs/batch/train.sh). The walltime is sized off the first run.
+# literal `::` starts the next run's overrides. Each run gets its own GPU and 18 cores in
+# one job (see jobs/batch/train.sh), which for two runs costs the same as one: a job is
+# billed for 2 GPUs either way (jobs/common/budget.sh). The walltime is sized off the first
+# run.
 #
 # Budget (jobs/common/budget.sh): the expected cost is EXPECTED_S seconds when the caller
 # knows it (jobs/common/sweep.sh passes it), else the step-count estimate, else the whole
@@ -98,18 +100,19 @@ done
 echo "profile   : --where snellius --run ${TRAIN_RUN:-full}"
 echo "walltime  : ${WALLTIME}"
 
-# What this job is expected to cost: the caller's figure, else the step-count estimate
-# (scaled for packing), else the whole walltime as the worst case.
+# What this job is expected to cost: the caller's figure, else the step-count estimate,
+# else the whole walltime as the worst case — times the GPUs it is charged for.
 if [[ -n "${EXPECTED_S}" ]]; then
     JOB_S="${EXPECTED_S}"
 elif [[ -n "${EST_S}" ]]; then
-    JOB_S="$(awk -v e="${EST_S}" -v n="${#RUNS[@]}" -v f="${PACK_SLOWDOWN}" -v o="${OVERHEAD_S}" \
-        'BEGIN { printf "%d", e * (n > 1 ? f : 1) + o }')"
+    JOB_S=$((EST_S + OVERHEAD_S))
 else
     JOB_S="$(_slurm_seconds "${WALLTIME}")"
 fi
-JOB_SBU="$(seconds_to_sbu "${JOB_S}")"
-echo "expected  : $(fmt_hms "${JOB_S}") on 1 GPU = ${JOB_SBU} SBU for ${#RUNS[@]} run(s)"
+read -r GPUS CPUS MEM_G <<< "$(job_resources "${#RUNS[@]}")"
+JOB_SBU="$(job_sbu "${JOB_S}" "${#RUNS[@]}")"
+echo "resources : ${GPUS} GPU, ${CPUS} CPUs, ${MEM_G}G -> charged as $(charged_gpus "${#RUNS[@]}") GPUs"
+echo "expected  : $(fmt_hms "${JOB_S}") = ${JOB_SBU} SBU for ${#RUNS[@]} run(s)"
 if [[ -z "${BUDGET_GATED}" ]]; then
     budget_gate "${JOB_SBU}"
 fi
@@ -125,6 +128,7 @@ for i in "${!RUNS[@]}"; do
 done
 JOBID="$(sbatch --parsable \
     --time="${WALLTIME}" \
+    --gpus="${GPUS}" --cpus-per-task="${CPUS}" --mem="${MEM_G}G" \
     --export=ALL \
     "${BATCH_DIR}/train.sh")"
 JOBID="${JOBID%%;*}"

@@ -5,15 +5,22 @@ runs, and `common/` holds what they share.
 
 ## Budget standards
 
-The budget is **100k SBU counted from 25-08-2026**. A training job bills **256 SBU per hour**
-(one A100 plus its quarter of the node) for the time it actually runs, so a full-data
-300-epoch run costs ~1,730 SBU. One run alone keeps the GPU at a median 39%, so two runs
-share each job.
+The budget is **100k SBU counted from 25-08-2026**. An A100 hour is **128 SBU**, but a job
+is billed for the largest of its node shares (1 GPU, 18 cores or 120 GiB each). A training
+job needs 160G for the feature cache, which is 2 shares, so **every job is billed as 2
+GPUs**. Jobs therefore carry two runs, each on its own GPU, for the price of one.
 
-| tier | epochs | seeds | runs per GPU job | expected per job | use |
+Under the snellius profile (compile + bf16, train WER off) a run is 3.7× faster than the
+runs before it (A100 benchmark, job 27839620: 70 ms/step against 257). With pairing, a
+300-epoch run costs ~290 SBU instead of ~1,730.
+
+| tier | epochs | seeds | runs per job (one GPU each) | expected per job | use |
 |---|---|---|---|---|---|
-| `screen` | 100 | 1 | 2 | ~900 SBU | the default: rank the arms |
-| `confirm` | 300 | 2 | 2 (the seeds share a job) | ~2,600 SBU | only the screen's winner(s) |
+| `screen` | 100 | 1 | 2 | ~220 SBU | the default: rank the arms |
+| `confirm` | 300 | 2 | 2 (the seeds share a job) | ~580 SBU | only the screen's winner(s) |
+
+These rest on `SEC_PER_EPOCH=25` in `common/budget.sh`, derived from the benchmark. Re-set
+it from the first screen's real epoch times.
 
 A screen carries its own control: a 100-epoch run is only comparable to another one.
 
@@ -37,12 +44,10 @@ its SBU and submits nothing.
 batch, cheap per-step metrics) and the tier's `--run sweep|full` (epochs, eval cadence) —
 see `configs/profiles/README.md`. Sweep `COMMON` blocks hold the recipe only.
 
-**Calibration (pending):** `SEC_PER_EPOCH=80` and `PACK_SLOWDOWN=1.5` in `common/budget.sh`
-are from the runs before the profiles. Run `./jobs/submit/bench_train.sh` (~130 SBU) once:
-part 1 gives the single-run ms/step and GPU % per setting, part 2 runs the best setting
-twice at once. Set `SEC_PER_EPOCH` from part 1's winner, `PACK_SLOWDOWN` = single utts/s ÷
-packed utts/s per run, and keep `PACK=2` only if that stays well below 2.
+**Throughput:** `./jobs/submit/bench_train.sh` (~128 SBU) re-times the recipe on the A100
+under each setting, if the model or the batch changes enough to matter.
 
-**Packing by hand:** separate runs with `::` in `submit/train.sh`, e.g.
-`./jobs/submit/train.sh configs/audio_cond.yaml seed=0 :: seed=1`. Each run logs to
-`slurm_output_<job>_<i>.out`.
+**Pairing by hand:** separate runs with `::` in `submit/train.sh`, e.g.
+`./jobs/submit/train.sh configs/audio_cond.yaml seed=0 :: seed=1`. Each run gets its own GPU
+and logs to `slurm_output_<job>_<i>.out`. A lone run costs the same as a pair, so pair
+whenever there is a second run to give it.

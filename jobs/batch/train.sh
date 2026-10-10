@@ -44,11 +44,12 @@
 #   TRAIN_OVERRIDES_<i> — run i's space-separated OmegaConf dotlist overrides, may be empty
 #                         (TRAIN_OVERRIDES is still read for a single run, as before)
 #
-# Why share: one run keeps the A100 at a median 39% and uses 9 of its 40 GB, and the job
-# bills 256 SBU/h whether the GPU is busy or not. The runs mmap the same feature files, so
-# the page cache holds them once and the 160G above still covers two (102 GiB of features
-# + ~20 GiB per run for its workers and main process). The 16 dataloader workers are split
-# between the runs, so the 18 CPUs are not oversubscribed.
+# Why several runs per job: a job is billed for the largest of its node shares (1 GPU,
+# 18 cores or 120 GiB each), and the 160G below is already 2 shares — so a one-run job pays
+# for 2 GPUs and uses 1. jobs/submit/train.sh asks for one GPU and 18 cores per run
+# (--gpus, --cpus-per-task and --mem on the sbatch line override the defaults here), and
+# each run below is pinned to its own GPU with the profile's full 16 workers. The runs mmap
+# the same feature files, so the page cache holds them once: 102 GiB plus ~20 GiB per run.
 
 set -eo pipefail
 
@@ -85,16 +86,20 @@ if [[ "${TRAIN_N}" -eq 1 ]]; then
 fi
 
 # Each run logs to its own file next to this job's .out; this one only says which is which.
-# The profile's 16 workers are split between the runs — a property of the packing, not of
-# the machine — and the split comes first so a run's own data.num_workers still wins.
-WORKERS=$((16 / TRAIN_N))
+# Run i gets the i-th GPU Slurm handed this job — the i-th entry of CUDA_VISIBLE_DEVICES,
+# which need not be 0..N-1.
+IFS=',' read -ra GPU_IDS <<< "${CUDA_VISIBLE_DEVICES:-$(seq -s, 0 $((TRAIN_N - 1)))}"
+if ((${#GPU_IDS[@]} < TRAIN_N)); then
+    echo "ERROR: ${TRAIN_N} runs but only ${#GPU_IDS[@]} GPU(s) visible (${CUDA_VISIBLE_DEVICES:-unset})" >&2
+    exit 1
+fi
 PIDS=()
 for ((i = 0; i < TRAIN_N; i++)); do
     var="TRAIN_OVERRIDES_${i}"
-    OVERRIDES="data.num_workers=${WORKERS} ${!var}"
     LOG="slurm_output_${SLURM_JOB_ID:-local}_${i}.out"
-    echo "run ${i}     : ${OVERRIDES}  -> ${LOG}"
-    python train.py --config "${TRAIN_CONFIG}" "${PROFILE[@]}" ${OVERRIDES} > "${LOG}" 2>&1 &
+    echo "run ${i}     : GPU ${GPU_IDS[$i]}  ${!var}  -> ${LOG}"
+    CUDA_VISIBLE_DEVICES="${GPU_IDS[$i]}" \
+        python train.py --config "${TRAIN_CONFIG}" "${PROFILE[@]}" ${!var} > "${LOG}" 2>&1 &
     PIDS+=($!)
 done
 
