@@ -2,6 +2,11 @@
 # `--run full`, which jobs/batch/train.sh uses unless told otherwise.
 train:
   num_epochs: 300
+  # 60 validations over 300 epochs: enough for the `_best` components and a readable curve,
+  # at a fifth of the per-epoch cost of validating every epoch.
+  check_val_every_n_epoch: 5
 sampling:
-  every_n_epochs: 5
+  # A multiple of check_val_every_n_epoch (the probe runs inside the validation epoch);
+  # 30 integrations from noise over the run.
+  every_n_epochs: 10
   log_methods: null

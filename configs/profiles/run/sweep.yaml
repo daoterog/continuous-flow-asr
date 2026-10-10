@@ -4,7 +4,12 @@
 # which is why a screen carries its own control.
 train:
   num_epochs: 100
+  # Validate every 10 epochs: 10 readings over the run, the last at epoch 100, which is all a
+  # screen is read for (plus mu's train/val gap). Each pass is a full val split with WER
+  # decoded on the CPU — about a third of an epoch once compile + bf16 made the step fast.
+  check_val_every_n_epoch: 10
 sampling:
-  # The endpoint and a rough curve are all a screen is read for; each probe is ~19 s.
+  # Must be a multiple of check_val_every_n_epoch: the probe runs inside the validation
+  # epoch, so a probe epoch without validation never fires. Both count (epoch + 1) % k.
   every_n_epochs: 10
   log_methods: null

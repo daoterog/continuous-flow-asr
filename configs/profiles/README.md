@@ -34,7 +34,8 @@ beats everything.
 | `run/` | sweep | full | why |
 |---|---|---|---|
 | `train.num_epochs` | 100 | 300 | screen vs final (`TIER` in `jobs/common/sweep.sh`) |
-| `sampling.every_n_epochs` | 10 | 5 | a screen is read at its endpoint |
+| `train.check_val_every_n_epoch` | 10 | 5 | a full val pass with CPU WER decoding is ~⅓ of a fast epoch |
+| `sampling.every_n_epochs` | 10 | 10 | must be a multiple of the val cadence: the probe runs inside validation |
 | `sampling.log_methods` | null | null | Euler is settled; the one place to turn it back on |
 
 **Where the numbers come from:** `./jobs/submit/bench_train.sh` timed the full-data recipe
