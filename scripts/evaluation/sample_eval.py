@@ -33,7 +33,6 @@ from src.metrics import ids_to_text, score_samples
 from src.pl_module import FlowMatching
 
 # The config this machine is configured for, to override a checkpoint's own data.env.
-BASE_CONFIG = Path(__file__).resolve().parents[2] / "configs" / "base.yaml"
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -106,7 +105,7 @@ def _config_from_components(args: argparse.Namespace) -> "DictConfig":
     # message telling you to precompute features you already have. Reset unless the caller
     # asked for one explicitly.
     if not any(o.startswith("data.env=") for o in args.overrides) and args.config is None:
-        here = T.load_config(BASE_CONFIG).data.env
+        here = T.load_config(T.PROFILES_DIR / "where" / f"{T.detect_where()}.yaml").data.env
         if cfg.data.env != here:
             print(f"data.env {cfg.data.env} -> {here} (this machine, not the checkpoint's)")
             cfg.data.env = here

@@ -11,9 +11,16 @@ shared filesystem.
 
     python -m scripts.diagnostics.bench_train --config configs/linear.yaml
     python -m scripts.diagnostics.bench_train --config configs/linear.yaml --steps 60
+    python -m scripts.diagnostics.bench_train --suite prod --env snellius   # jobs/batch/bench_train.sh
+
+`--suite prod` is the configuration the full-data sweeps actually run — audio_cond at batch
+128 under the snellius profile — one change per row, so each line is one decision. Every
+row also reports how busy the GPU was during its timed steps, which is what says whether
+two runs can share it.
 """
 
 import argparse
+import subprocess
 import sys
 import time
 from collections.abc import Sequence
@@ -69,22 +76,79 @@ TRIALS: list[tuple[str, list[str]]] = [
 ]
 
 
+# The full-data recipe (jobs/sweeps/mu_reg.sh's control) under the snellius profile, then
+# one change per row. Training WER is on in the first row only, as it was in every run so
+# far; the profile turns it off. bf16 rather than fp16: the A100 has it natively, needs no
+# grad scaler, and DRAX already autocasts its blocks to it.
+PROD = ["data.batch_size=128", "train.denoiser_lr=0.002"]
+PROD_TRIALS: list[tuple[str, list[str]]] = [
+    ("prod as run (train WER on)", [*PROD, "metrics.wer_bins.train=10"]),
+    ("prod", PROD),
+    ("prod + compile", [*PROD, "train.compile=true"]),
+    ("prod + compile + bf16", [*PROD, "train.compile=true", "train.precision=bf16-mixed"]),
+    # Informational: fused AdamW cannot run with grad_clip, which every run uses.
+    ("prod + compile + fused, no clip",
+     [*PROD, "train.compile=true", "train.fused_optimizer=true", "train.grad_clip=null"]),
+]
+SUITES = {
+    "laptop": (TRIALS, "configs/linear.yaml"),
+    "prod": (PROD_TRIALS, "configs/audio_cond.yaml"),
+}
+
+
+class GpuSampler:
+    """GPU utilisation every 0.5 s while it runs, from `nvidia-smi` in the background."""
+
+    def __init__(self) -> None:
+        """Not started until `start`."""
+        self.proc: subprocess.Popen | None = None
+
+    def start(self) -> None:
+        """Begin sampling; a machine without nvidia-smi just reports nothing."""
+        try:
+            self.proc = subprocess.Popen(
+                ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits",
+                 "-lms", "500", "-i", "0"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            )
+        except FileNotFoundError:
+            self.proc = None
+
+    def stop(self) -> float:
+        """Mean utilisation in percent over the sampled window, NaN if none."""
+        if self.proc is None:
+            return float("nan")
+        self.proc.terminate()
+        out, _ = self.proc.communicate(timeout=5)
+        values = [float(v) for v in out.split() if v.strip().replace(".", "").isdigit()]
+        return sum(values) / len(values) if values else float("nan")
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """What to time and how long to time it for."""
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("--config", default="configs/linear.yaml")
+    p.add_argument(
+        "--suite", choices=sorted(SUITES), default="laptop",
+        help="laptop: the original throughput ladder; prod: the full-data sweep config",
+    )
+    p.add_argument("--config", default=None, help="defaults to the suite's own config")
     p.add_argument(
         "--env", choices=["local", "snellius"], default="local",
-        help="which data root the features live under; the same flag the download and "
-             "precompute scripts take. On the cluster this must be snellius, or the "
-             "features resolve to the empty data/ inside the repo",
+        help="the machine profile (configs/profiles/where/) the trials run under, which also "
+             "sets the data root; the same flag the download and precompute scripts take. "
+             "On the cluster this must be snellius",
     )
     p.add_argument("--steps", type=int, default=40, help="timed steps per trial")
     p.add_argument("--warmup", type=int, default=10, help="untimed steps first")
     p.add_argument("--n-utts", type=int, default=2048, help="training subset to read from")
     p.add_argument("--only", nargs="+", default=None, help="run only these trial labels")
+    p.add_argument(
+        "--set", nargs="+", default=[], metavar="KEY=VALUE",
+        help="dotlist overrides applied to every trial, after its own (e.g. the worker "
+             "split when two copies share a GPU)",
+    )
     p.add_argument(
         "--repeats", type=int, default=1,
         help="time each trial this many times and keep the fastest; 2 guards against a "
@@ -110,6 +174,7 @@ class StepTimer:
         self.warmup = warmup
         self.started: float | None = None
         self.steps = 0
+        self.gpu = GpuSampler()
 
     def on_train_batch_end(self, *_args: object, **_kwargs: object) -> None:
         """Start the clock once warmup is done, then count."""
@@ -119,13 +184,15 @@ class StepTimer:
                 torch.cuda.synchronize()
                 self.started = time.perf_counter()
                 self.steps = 0
+                self.gpu.start()
             return
         self.steps += 1
 
-    def elapsed(self) -> tuple[float, int]:
-        """(seconds, steps) of steady state."""
+    def elapsed(self) -> tuple[float, int, float]:
+        """(seconds, steps, mean GPU utilisation %) of steady state."""
         torch.cuda.synchronize()
-        return time.perf_counter() - self.started, self.steps
+        seconds = time.perf_counter() - self.started
+        return seconds, self.steps, self.gpu.stop()
 
 
 def warm_cache(config: str, args: argparse.Namespace) -> float:
@@ -139,8 +206,7 @@ def warm_cache(config: str, args: argparse.Namespace) -> float:
     import train as T
 
     cfg, _ = T.build_config([
-        "--config", config, "--offline",
-        f"data.env={args.env}",
+        "--config", config, "--offline", "--where", args.env,
         f"data.subset_n.train={args.n_utts}",
         "data.subset_n.val=8",
         "data.batch_size=64",
@@ -167,8 +233,7 @@ def time_one(config: str, overrides: list[str], args: argparse.Namespace) -> dic
 
     total = args.warmup + args.steps
     cfg, _ = T.build_config([
-        "--config", config, "--offline",
-        f"data.env={args.env}",
+        "--config", config, "--offline", "--where", args.env,
         f"data.subset_n.train={args.n_utts}",
         f"data.subset_n.val={min(args.n_utts, 64)}",
         f"data.steps_per_epoch={total}",
@@ -180,6 +245,7 @@ def time_one(config: str, overrides: list[str], args: argparse.Namespace) -> dic
         "train.check_val_every_n_epoch=1000000",
         "metrics.wer_bins.train=0", "metrics.wer_bins.val=0",
         *overrides,
+        *args.set,
     ])
     T.setup_reproducibility(cfg)
     dm = T.build_datamodule(cfg)
@@ -204,12 +270,13 @@ def time_one(config: str, overrides: list[str], args: argparse.Namespace) -> dic
 
     torch.cuda.reset_peak_memory_stats()
     trainer.fit(model, datamodule=dm)
-    elapsed, timed_steps = timer.elapsed()
+    elapsed, timed_steps, gpu_util = timer.elapsed()
     per_step = elapsed / max(timed_steps, 1)
     return {
         "ms_per_step": per_step * 1000,
         "utts_per_s": cfg.data.batch_size / per_step,
         "peak_gib": torch.cuda.max_memory_allocated() / 2**30,
+        "gpu_util": gpu_util,
         "batch": cfg.data.batch_size,
     }
 
@@ -217,24 +284,26 @@ def time_one(config: str, overrides: list[str], args: argparse.Namespace) -> dic
 def main(argv: Sequence[str] | None = None) -> int:
     """Run every trial and print a table, fastest last."""
     args = parse_args(argv)
-    trials = TRIALS
+    suite, default_config = SUITES[args.suite]
+    args.config = args.config or default_config
+    trials = suite
     if args.only:
         # A label that matches nothing is almost always a stale checkout rather than a
         # typo, and silently running the subset that does match burns a whole job to
         # re-measure one row. Name the misses and stop.
-        unknown = [name for name in args.only if name not in dict(TRIALS)]
+        unknown = [name for name in args.only if name not in dict(suite)]
         if unknown:
             print("no such trial: " + ", ".join(repr(u) for u in unknown))
-            print("known trials:\n  " + "\n  ".join(label for label, _ in TRIALS))
+            print("known trials:\n  " + "\n  ".join(label for label, _ in suite))
             return 1
-        trials = [t for t in TRIALS if t[0] in args.only]
+        trials = [t for t in suite if t[0] in args.only]
 
     print(f"device: {torch.cuda.get_device_name(0)}   data root: {args.env}")
     print(f"timing {args.steps} steps (+{args.warmup} warmup) per trial, "
           f"reading from {args.n_utts} utterances")
     if not args.no_warm:
         warm_cache(args.config, args)
-    print(f"{'trial':<30} {'ms/step':>9} {'utts/s':>9} {'peak GiB':>9}")
+    print(f"{'trial':<34} {'ms/step':>9} {'utts/s':>9} {'peak GiB':>9} {'GPU %':>6}")
 
     results = []
     for label, overrides in trials:
@@ -242,28 +311,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             runs = [time_one(args.config, overrides, args) for _ in range(args.repeats)]
             r = min(runs, key=lambda d: d["ms_per_step"])
         except torch.cuda.OutOfMemoryError:
-            print(f"{label:<30} {'OOM':>9}")
+            print(f"{label:<34} {'OOM':>9}")
             torch.cuda.empty_cache()
             continue
         except Exception as exc:
             # Wide enough to keep the actionable part: the resolver's message names the
             # directories it looked in and the command that would create them.
             first_line = " ".join(str(exc).split("\n")[0].split())
-            print(f"{label:<30} FAILED {type(exc).__name__}: {first_line[:120]}")
+            print(f"{label:<34} FAILED {type(exc).__name__}: {first_line[:120]}")
             if not results:  # a first-trial failure is almost always config, not the trial
                 print("  full error:\n    " + str(exc).replace("\n", "\n    "))
                 return 1
             continue
         results.append((label, r))
-        print(f"{label:<30} {r['ms_per_step']:9.1f} {r['utts_per_s']:9.0f} "
-              f"{r['peak_gib']:9.2f}")
+        print(f"{label:<34} {r['ms_per_step']:9.1f} {r['utts_per_s']:9.0f} "
+              f"{r['peak_gib']:9.2f} {r['gpu_util']:6.0f}")
         torch.cuda.empty_cache()
 
     if not results:
         return 1
     best = max(results, key=lambda kv: kv[1]["utts_per_s"])
-    base = next((r for lbl, r in results if lbl.startswith("default")), None)
-    gain = f" ({best[1]['utts_per_s'] / base['utts_per_s']:.2f}x default)" if base else ""
+    # Each suite's first row is its baseline: today's default, or the runs as they were.
+    base = next((r for lbl, r in results if lbl == suite[0][0]), None)
+    gain = f" ({best[1]['utts_per_s'] / base['utts_per_s']:.2f}x {suite[0][0]})" if base else ""
     print(f"\nfastest: {best[0]} at {best[1]['utts_per_s']:.0f} utts/s{gain}")
     print("Use the winning utts/s to size walltimes: STEPS_PER_SEC = utts_per_s / batch.")
     return 0

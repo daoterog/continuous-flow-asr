@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# Predates the budget standards (jobs/common/sweep.sh): one run per GPU job at its own
+# epoch count. Each submit still prints its SBU, is gated against the cap and lands in
+# the ledger, but new sweeps should use the screen/confirm tiers instead.
+
 # Does a larger eval batch make the measured probe faster on an A100?
 #
 # On a 3060 it does not: one 2048-utterance probe at the 512x8 denoiser is flat from chunk
@@ -30,9 +34,15 @@ BATCH="${BATCH:-128}"
 EPOCHS="${EPOCHS:-6}"
 PROBE_N="${PROBE_N:-2048}"
 
-# 6 epochs on full data is ~1,332 steps; the floor in submit/train.sh covers it, but the
-# probe is the point of the job so leave room for the slowest chunk.
-export STEPS_PER_SEC="${STEPS_PER_SEC:-4}"
+# 6 epochs on full data ran in ~11 min, every epoch paying the cold-cache rate because the
+# job ends before the cache fills. 40 min is ~3.5x that, which is the right margin for a
+# job this short — the estimator's own floor is 15 min and would be tight.
+#
+# Superseded by jobs/batch/bench_probe.sh, which times the probe directly instead of
+# inferring it from whole training runs. Kept because it is the end-to-end check that the
+# measured path survives a real run at each chunk, which the synthetic benchmark does not
+# cover.
+export WALLTIME="${WALLTIME:-00:40:00}"
 
 cd "${REPO_DIR}"
 

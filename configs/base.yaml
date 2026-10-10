@@ -272,9 +272,10 @@ sampling:
   # The two are algebraically identical on linear and audio_cond — the mu term cancels in
   # the drift — and differ at O(h^2) on three_term.
   method: interpolant
-  # Integrators scored every sampling epoch, each logged as sampled/<method>/wer.
-  # sampled/wer stays `method`'s. null scores `method` alone. Every method in an epoch
-  # integrates the same x0 (seeded by `seed`), so the gap between them is the integrator.
+  # Integrators scored every sampling epoch. Every cell is logged as
+  # sampled_<method>_<steps>/wer — named in full, so a key always says what produced it.
+  # null scores `method` alone. Every method in an epoch integrates the same x0 (seeded by
+  # `seed`), so the gap between them is the integrator and nothing else.
   log_methods: null
   seed: 0
   num_steps: 16
@@ -351,7 +352,8 @@ train:
   # enough to keep for every run; see src/checkpointing/.
   save_components: true
 
-  # Stop as soon as a metric reaches its target — e.g. `sampled/wer` at 0 for an overfit
+  # Stop as soon as a metric reaches its target — e.g. `sampled_interpolant_16/wer` at 0
+  # for an overfit
   # check, where everything after that is wasted compute. null disables it. Only the
   # target stops the run; a plateau does not.
   early_stop_on: null

@@ -15,6 +15,7 @@ OmegaConf dotlist override.
 import argparse
 import os
 import re
+import socket
 import sys
 import time
 from collections.abc import Sequence
@@ -51,16 +52,33 @@ SIZES_DIR = Path(__file__).resolve().parent / "configs" / "sizes"
 SIZES = sorted(p.stem for p in SIZES_DIR.glob("*.yaml"))
 MU_DIR = Path(__file__).resolve().parent / "configs" / "mu"
 MU_SIZES = sorted(p.stem for p in MU_DIR.glob("*.yaml"))
+# Where a run executes and what kind of run it is: configs/profiles/{where,run}/. They hold
+# the settings that depend on those two facts and nothing else; see configs/profiles/README.md.
+PROFILES_DIR = Path(__file__).resolve().parent / "configs" / "profiles"
+WHERE = sorted(p.stem for p in (PROFILES_DIR / "where").glob("*.yaml"))
+RUN_KINDS = sorted(p.stem for p in (PROFILES_DIR / "run").glob("*.yaml"))
+
+
+def detect_where() -> str:
+    """`snellius` inside a SLURM job or on a Snellius node, else `local`."""
+    if os.environ.get("SLURM_JOB_ID") or socket.getfqdn().endswith(".snellius.surf.nl"):
+        return "snellius"
+    return "local"
 
 
 def load_config(path: Path) -> DictConfig:
     """Load a YAML, resolving a `_base_:` chain relative to each file's own directory."""
+    return OmegaConf.merge(*config_layers(path))
+
+
+def config_layers(path: Path) -> list[DictConfig]:
+    """A YAML and its `_base_:` chain as separate layers, the root base first."""
     path = Path(path)
     cfg = OmegaConf.load(path)
     base = cfg.pop("_base_", None)
     if base is None:
-        return cfg
-    return OmegaConf.merge(load_config(path.parent / base), cfg)
+        return [cfg]
+    return [*config_layers(path.parent / base), cfg]
 
 
 def split_overrides(argv: Sequence[str]) -> tuple[list[str], list[str]]:
@@ -105,6 +123,16 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, l
         help="mu_psi geometry from configs/mu/. Only meaningful on a variant whose "
             "flow.gamma is set, since that is what puts mu in the interpolant",
     )
+    p.add_argument(
+        "--where", choices=WHERE, default=None,
+        help="the machine profile from configs/profiles/where/; detected when omitted "
+            "(snellius inside a SLURM job, else local)",
+    )
+    p.add_argument(
+        "--run", choices=RUN_KINDS, default=None,
+        help="the run-kind profile from configs/profiles/run/ (sweep = a 100-epoch "
+            "screen, full = a 300-epoch run); omitted, base.yaml and the variant decide",
+    )
     p.add_argument("--offline", action="store_true", help="log without a network")
     p.add_argument("--print-config", action="store_true", help="resolve, print and exit")
     p.add_argument(
@@ -116,9 +144,21 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, l
 
 
 def build_config(argv: Sequence[str] | None = None) -> tuple[DictConfig, argparse.Namespace]:
-    """YAML, then --size, then the split flags, then the dotlist overrides."""
+    """base.yaml, the --where/--run profiles, the variant YAML, --size, --mu, the split
+    flags, then the dotlist overrides — each layer winning over the ones before it.
+
+    The profiles sit under the variant rather than over it: they replace defaults that
+    depend on the machine or the kind of run, and a variant that pins one of those keys on
+    purpose (flow_mapping.yaml leaves compile off) keeps it.
+    """
     args, overrides = parse_args(argv)
-    cfg = load_config(args.config)
+    layers = config_layers(args.config)
+    where = args.where or detect_where()
+    profiles = [load_config(PROFILES_DIR / "where" / f"{where}.yaml")]
+    if args.run is not None:
+        profiles.append(load_config(PROFILES_DIR / "run" / f"{args.run}.yaml"))
+    cfg = OmegaConf.merge(layers[0], *profiles, *layers[1:])
+    cfg.profile = {"where": where, "run": args.run}
 
     # Parse cli args, load denoiser config, then mu config.
     # Order matters because denoiser args must match some of mu args.
@@ -363,6 +403,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"total_steps {per_epoch * cfg.train.num_epochs}")
         return 0
 
+    print(f"profile: where={cfg.profile.where} run={cfg.profile.run or '(none)'}  "
+          f"epochs {cfg.train.num_epochs}  compile {cfg.train.compile}  "
+          f"train WER bins {cfg.metrics.wer_bins.get('train', 0)}")
     setup_reproducibility(cfg)
 
     dm = build_datamodule(cfg)

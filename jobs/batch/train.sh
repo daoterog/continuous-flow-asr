@@ -33,11 +33,22 @@
 #SBATCH --mail-type=BEGIN,END,FAIL,TIME_LIMIT_90,REQUEUE
 #SBATCH --mail-user=daniel.otero.gomez@student.uva.nl
 
-# One training run. Submit via submit/train.sh — do not run this script directly.
+# One or more training runs sharing this job's GPU. Submit via submit/train.sh — do not
+# run this script directly.
 #
-# Required env vars (set by submit/train.sh via --export):
-#   TRAIN_CONFIG    — configs/<name>.yaml
-#   TRAIN_OVERRIDES — space-separated OmegaConf dotlist overrides, may be empty
+# Required env vars (set by submit/train.sh through the environment):
+#   TRAIN_CONFIG        — configs/<name>.yaml
+#   TRAIN_N             — how many runs (default 1)
+#   TRAIN_RUN           — the run-kind profile, `sweep` or `full` (default full); the
+#                         machine profile is always `--where snellius` here
+#   TRAIN_OVERRIDES_<i> — run i's space-separated OmegaConf dotlist overrides, may be empty
+#                         (TRAIN_OVERRIDES is still read for a single run, as before)
+#
+# Why share: one run keeps the A100 at a median 39% and uses 9 of its 40 GB, and the job
+# bills 256 SBU/h whether the GPU is busy or not. The runs mmap the same feature files, so
+# the page cache holds them once and the 160G above still covers two (102 GiB of features
+# + ~20 GiB per run for its workers and main process). The 16 dataloader workers are split
+# between the runs, so the 18 CPUs are not oversubscribed.
 
 set -eo pipefail
 
@@ -54,13 +65,46 @@ if [[ -z "${WANDB_API_KEY}" ]] && ! grep -q "api.wandb.ai" "${HOME}/.netrc" 2>/d
     exit 1
 fi
 
-# Features live on scratch, not in the repo's data/ — the DataModule resolves this from
-# data.env, so make the choice explicit rather than relying on the config's default.
-OVERRIDES="data.env=snellius ${TRAIN_OVERRIDES}"
+TRAIN_N="${TRAIN_N:-1}"
+TRAIN_OVERRIDES_0="${TRAIN_OVERRIDES_0-${TRAIN_OVERRIDES}}"
 
 echo "config    : ${TRAIN_CONFIG}"
-echo "overrides : ${OVERRIDES}"
+echo "runs      : ${TRAIN_N}"
 echo "node      : $(hostname)"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
-srun python train.py --config "${TRAIN_CONFIG}" ${OVERRIDES}
+# What depends on running here — the scratch data root, workers, eval batch, compile, the
+# per-step metrics — comes from configs/profiles/where/snellius.yaml, not from overrides.
+PROFILE=(--where snellius --run "${TRAIN_RUN:-full}")
+echo "profile   : ${PROFILE[*]}"
+
+if [[ "${TRAIN_N}" -eq 1 ]]; then
+    echo "overrides : ${TRAIN_OVERRIDES_0}"
+    srun python train.py --config "${TRAIN_CONFIG}" "${PROFILE[@]}" ${TRAIN_OVERRIDES_0}
+    exit $?
+fi
+
+# Each run logs to its own file next to this job's .out; this one only says which is which.
+# The profile's 16 workers are split between the runs — a property of the packing, not of
+# the machine — and the split comes first so a run's own data.num_workers still wins.
+WORKERS=$((16 / TRAIN_N))
+PIDS=()
+for ((i = 0; i < TRAIN_N; i++)); do
+    var="TRAIN_OVERRIDES_${i}"
+    OVERRIDES="data.num_workers=${WORKERS} ${!var}"
+    LOG="slurm_output_${SLURM_JOB_ID:-local}_${i}.out"
+    echo "run ${i}     : ${OVERRIDES}  -> ${LOG}"
+    python train.py --config "${TRAIN_CONFIG}" "${PROFILE[@]}" ${OVERRIDES} > "${LOG}" 2>&1 &
+    PIDS+=($!)
+done
+
+failed=0
+for i in "${!PIDS[@]}"; do
+    if wait "${PIDS[$i]}"; then
+        echo "run ${i}     : finished"
+    else
+        echo "run ${i}     : FAILED (exit $?), see slurm_output_${SLURM_JOB_ID:-local}_${i}.out"
+        failed=1
+    fi
+done
+exit "${failed}"

@@ -1,20 +1,40 @@
 #!/bin/bash
 
-# Submit one training run, with a walltime derived from the config's own step count.
+# Submit one GPU job running one or more training runs, with a walltime derived from the
+# config's own step count, and an SBU estimate checked against the budget before sbatch.
 #
 # Usage:
 #   ./jobs/submit/train.sh configs/linear.yaml
 #   ./jobs/submit/train.sh configs/audio_cond.yaml train.num_epochs=20
+#   ./jobs/submit/train.sh configs/audio_cond.yaml seed=0 :: seed=1     # two runs, one GPU
 #   STEPS_PER_SEC=12 ./jobs/submit/train.sh configs/linear.yaml     # after measuring
 #   WALLTIME=02:00:00 ./jobs/submit/train.sh configs/linear.yaml    # skip the estimate
 #
-# Everything after the config is passed through to train.py as OmegaConf overrides.
+# Everything after the config is passed through to train.py as OmegaConf overrides. A
+# literal `::` starts the next run's overrides; the runs share the GPU (see
+# jobs/batch/train.sh). The walltime is sized off the first run.
+#
+# Budget (jobs/common/budget.sh): the expected cost is EXPECTED_S seconds when the caller
+# knows it (jobs/common/sweep.sh passes it), else the step-count estimate, else the whole
+# walltime. A direct submission is gated against the cap here; a sweep gates its total
+# once and passes BUDGET_GATED=1. Every job is appended to jobs/ledger.tsv.
 
 set -eo pipefail
 
-CONFIG="${1:?usage: $0 <config.yaml> [overrides...]}"
+CONFIG="${1:?usage: $0 <config.yaml> [overrides...] [:: overrides...]}"
 shift || true
-OVERRIDES="$*"
+RUNS=()
+current=""
+for arg in "$@"; do
+    if [[ "${arg}" == "::" ]]; then
+        RUNS+=("${current# }")
+        current=""
+    else
+        current="${current} ${arg}"
+    fi
+done
+RUNS+=("${current# }")
+OVERRIDES="${RUNS[0]}"
 
 # Throughput, measured on an A100 node (scripts/diagnostics/bench_train.py, batch 256 + 16 workers +
 # compile). Two regimes, 15x apart, and which one applies is decided by whether the data
@@ -35,6 +55,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$(dirname "${SCRIPT_DIR}")")"
 BATCH_DIR="${REPO_DIR}/jobs/batch"
 
+# shellcheck source=../common/budget.sh
+source "${REPO_DIR}/jobs/common/budget.sh"
+
 fmt_hms() { printf '%02d:%02d:%02d' $(($1 / 3600)) $((($1 % 3600) / 60)) $(($1 % 60)); }
 
 SIZING_ERR="$(mktemp)"
@@ -44,7 +67,8 @@ if [[ -z "${WALLTIME}" ]]; then
     # --print-steps builds the data and counts batches; no model, no GPU, so it runs
     # here on the login node. It needs the features to exist, which they must anyway.
     TOTAL_STEPS="$(cd "${REPO_DIR}" && python train.py --config "${CONFIG}" \
-        data.env=snellius ${OVERRIDES} --print-steps 2>"${SIZING_ERR}" \
+        --where snellius --run "${TRAIN_RUN:-full}" ${OVERRIDES} --print-steps \
+        2>"${SIZING_ERR}" \
         | awk '/^total_steps/ {print $2}' || true)"
 
     if [[ -z "${TOTAL_STEPS}" ]]; then
@@ -68,15 +92,49 @@ if [[ -z "${WALLTIME}" ]]; then
 fi
 
 echo "config    : ${CONFIG}"
-echo "overrides : ${OVERRIDES:-(none)}"
+for i in "${!RUNS[@]}"; do
+    echo "run ${i}     : ${RUNS[$i]:-(no overrides)}"
+done
+echo "profile   : --where snellius --run ${TRAIN_RUN:-full}"
 echo "walltime  : ${WALLTIME}"
+
+# What this job is expected to cost: the caller's figure, else the step-count estimate
+# (scaled for packing), else the whole walltime as the worst case.
+if [[ -n "${EXPECTED_S}" ]]; then
+    JOB_S="${EXPECTED_S}"
+elif [[ -n "${EST_S}" ]]; then
+    JOB_S="$(awk -v e="${EST_S}" -v n="${#RUNS[@]}" -v f="${PACK_SLOWDOWN}" -v o="${OVERHEAD_S}" \
+        'BEGIN { printf "%d", e * (n > 1 ? f : 1) + o }')"
+else
+    JOB_S="$(_slurm_seconds "${WALLTIME}")"
+fi
+JOB_SBU="$(seconds_to_sbu "${JOB_S}")"
+echo "expected  : $(fmt_hms "${JOB_S}") on 1 GPU = ${JOB_SBU} SBU for ${#RUNS[@]} run(s)"
+if [[ -z "${BUDGET_GATED}" ]]; then
+    budget_gate "${JOB_SBU}"
+fi
 
 # Through the environment rather than as `--export=ALL,KEY=value`: sbatch splits that list
 # on commas, so an override such as `sampling.log_methods=[interpolant,euler]` would reach
 # the job cut off at `[interpolant`.
 export TRAIN_CONFIG="${CONFIG}"
-export TRAIN_OVERRIDES="${OVERRIDES}"
-sbatch \
+export TRAIN_RUN="${TRAIN_RUN:-full}"
+export TRAIN_N="${#RUNS[@]}"
+for i in "${!RUNS[@]}"; do
+    export "TRAIN_OVERRIDES_${i}=${RUNS[$i]}"
+done
+JOBID="$(sbatch --parsable \
     --time="${WALLTIME}" \
     --export=ALL \
-    "${BATCH_DIR}/train.sh"
+    "${BATCH_DIR}/train.sh")"
+JOBID="${JOBID%%;*}"
+echo "submitted : job ${JOBID}"
+
+# `|| true`: a run without one of these keys is normal, and under `set -eo pipefail` a grep
+# that finds nothing would abort here — after sbatch, so the job runs but is never ledgered.
+names="$(for r in "${RUNS[@]}"; do echo "${r}" | grep -o 'logging.name=[^ ]*' | cut -d= -f2 || true; done | paste -sd, -)"
+project="$(echo "${RUNS[0]}" | grep -o 'logging.project=[^ ]*' | cut -d= -f2 || true)"
+epochs="$(echo "${RUNS[0]}" | grep -o 'train.num_epochs=[^ ]*' | cut -d= -f2 || true)"
+epochs="${epochs:-${EPOCHS}}"
+ledger_append "${JOBID}" "${project:-?}" "${TIER:-direct}" "${epochs:-?}" "${#RUNS[@]}" \
+    "${JOB_SBU}" "${names:-?}"

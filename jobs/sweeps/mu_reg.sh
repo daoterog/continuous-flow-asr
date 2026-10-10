@@ -6,14 +6,16 @@
 # epoch 90 under OneCycle — so it overfits while its LR is still rising. This sweeps the
 # two levers that act there, mu's peak LR and its dropout; the denoiser is untouched.
 #
+#   control        mu at 1e-3, no dropout, as in every run so far
 #   lr3e-4         train.audio_decoder_lr=3e-4
 #   do0.1          model.audio_decoder.dropout=0.1
 #   do0.3          model.audio_decoder.dropout=0.3
 #   lr3e-4-do0.1   both
 #   lr3e-4-do0.3   both
 #
-# The control is the existing flm-parity `control` run of the same seed (defaults are
-# unchanged), so no control is resubmitted here.
+# Runs on the standard tiers (jobs/common/sweep.sh): a 100-epoch screen by default, two
+# runs per GPU, then TIER=confirm on the winner. A screen carries its own control, since a
+# 100-epoch run is only comparable to another 100-epoch run.
 #
 # One seed is enough to read mu: across the two control seeds its val P_e was 0.496 vs
 # 0.499 and its val-CE minimum 0.396 at epoch 58 vs 0.396 at 59. Sampled WER is noisier
@@ -24,42 +26,39 @@
 # mu_perr/val_overall at the end, the train/val gap, then sampled_interpolant/wer.
 #
 # Usage:
-#   ./jobs/sweeps/mu_reg.sh                         # dry run
-#   SUBMIT=1 ./jobs/sweeps/mu_reg.sh                # submit
-#   ARMS="do0.3 lr3e-4-do0.3" SUBMIT=1 ./jobs/...   # trim
+#   ./jobs/sweeps/mu_reg.sh                                     # dry run: plan + SBU
+#   SUBMIT=1 ./jobs/sweeps/mu_reg.sh                            # screen, gated
+#   TIER=confirm ARMS="control do0.3" SUBMIT=1 ./jobs/sweeps/mu_reg.sh
 
 set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$(dirname "${SCRIPT_DIR}")")"
+# shellcheck source=../common/sweep.sh
+source "${REPO_DIR}/jobs/common/sweep.sh"
+tier_defaults
 
 CONFIG="${CONFIG:-configs/audio_cond.yaml}"
 PROJECT="${PROJECT:-flow-asr-mu-reg}"
-ARMS="${ARMS:-lr3e-4 do0.1 do0.3 lr3e-4-do0.1 lr3e-4-do0.3}"
-SEEDS="${SEEDS:-1}"
-EPOCHS="${EPOCHS:-300}"
+ARMS="${ARMS:-control lr3e-4 do0.1 do0.3 lr3e-4-do0.1 lr3e-4-do0.3}"
 BATCH="${BATCH:-128}"
-EVAL_BATCH="${EVAL_BATCH:-512}"
-PROBE_N="${PROBE_N:-8192}"
-# The flm-parity runs finished 300 epochs inside 12 h with both samplers on; this logs the
-# interpolant only, so it is a little faster still.
-export WALLTIME="${WALLTIME:-12:00:00}"
 
-# The flm-parity control's overrides, so its runs are this sweep's control.
+# The recipe: what makes `control` the flm-parity control. Everything that depends on
+# the machine or the run kind (eval batch, tau probe size, epochs) comes from
+# configs/profiles/ via --where snellius and the tier's --run.
 COMMON=(
     "data.subset_n.train=null"
     "data.batch_size=${BATCH}"
-    "data.eval_batch_size=${EVAL_BATCH}"
-    "schedule.probe_n_utts=${PROBE_N}"
     "schedule.refresh_curve_from=simulated"
     "schedule.refresh_every_n_epochs=5"
-    "train.num_epochs=${EPOCHS}"
     "train.denoiser_lr=0.002"
     "logging.project=${PROJECT}"
+    ${EPOCH_OVERRIDE}
 )
 
 arm_overrides() {
     case "$1" in
+        control)      echo "train.audio_decoder_lr=1e-3" ;;
         lr3e-4)       echo "train.audio_decoder_lr=3e-4" ;;
         do0.1)        echo "train.audio_decoder_lr=1e-3 model.audio_decoder.dropout=0.1" ;;
         do0.3)        echo "train.audio_decoder_lr=1e-3 model.audio_decoder.dropout=0.3" ;;
@@ -71,30 +70,10 @@ arm_overrides() {
 
 cd "${REPO_DIR}"
 
-n=0
 for arm in ${ARMS}; do
     for seed in ${SEEDS}; do
-        overrides=(
-            "seed=${seed}"
-            "${COMMON[@]}"
-            $(arm_overrides "${arm}")
-            "logging.group=${arm}"
-            "logging.name=${arm}-s${seed}"
-        )
-        n=$((n + 1))
-        echo "=== [${n}] ${arm}-s${seed}"
-        if [[ -n "${SUBMIT}" ]]; then
-            ./jobs/submit/train.sh "${CONFIG}" "${overrides[@]}"
-        else
-            echo "    ./jobs/submit/train.sh ${CONFIG} ${overrides[*]}"
-        fi
+        queue_run "${arm}-s${seed}" "seed=${seed}" "${COMMON[@]}" $(arm_overrides "${arm}") \
+            "logging.group=${TIER}${EPOCHS}/${arm}" "logging.name=${arm}-e${EPOCHS}-s${seed}"
     done
 done
-
-echo
-if [[ -n "${SUBMIT}" ]]; then
-    echo "submitted ${n} jobs to ${PROJECT}"
-else
-    echo "${n} jobs NOT submitted (dry run). SUBMIT=1 to send them."
-    echo "~7 h each, so ~$((n * 7)) GPU-hours."
-fi
+flush_runs

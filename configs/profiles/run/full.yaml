@@ -1,0 +1,7 @@
+# Run: a full run — a sweep's confirmation (TIER=confirm) or a final model. Picked by
+# `--run full`, which jobs/batch/train.sh uses unless told otherwise.
+train:
+  num_epochs: 300
+sampling:
+  every_n_epochs: 5
+  log_methods: null

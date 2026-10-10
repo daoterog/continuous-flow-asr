@@ -228,3 +228,6 @@ __marimo__/
 
 # Model Results
 results/
+
+# SBU ledger written by jobs/submit/train.sh, one row per submitted job
+jobs/ledger.tsv

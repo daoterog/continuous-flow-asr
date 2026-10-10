@@ -45,9 +45,10 @@ sampling:
   # Score both every sampling epoch, logged as sampled_<method>/wer. The pair is the point:
   # one step of a flow map against sixteen of an integrator is the whole question.
   log_methods: [interpolant, euler]
-  # Small and infrequent while the step is still being shaped; sampling integrates the whole
-  # canvas once per step and at 1 step it is cheap, at 16 it is not.
-  num_steps: 16
+  # A ladder, not a number. One step is what a flow map is for and sixteen is where the
+  # integrator it was distilled from already wins, so scoring only one of them would answer
+  # the wrong question. Logged as sampled_<method>_<n>/wer.
+  num_steps: [1, 2, 4, 16]
   n_utts: 64
   every_n_epochs: 5
 

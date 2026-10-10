@@ -1,0 +1,24 @@
+# Where: a Snellius gpu_a100 allocation (1 A100 40 GB, 18 CPUs, 160G). Picked by
+# `--where snellius`, or automatically inside a SLURM job. Every hour here bills 256 SBU
+# whether the GPU is busy or not, so this profile is about keeping it busy. Layered over
+# base.yaml and under the variant; see ../README.md.
+data:
+  env: snellius
+  # Measured on the node: 849 -> 952 -> 1058 utts/s at 4 -> 8 -> 16 workers. A packed job
+  # (jobs/batch/train.sh) splits these between its runs.
+  num_workers: 16
+  # Val, test and the tau probe run under no_grad: 0.645 ms/utt at 512 against 0.836 at 32.
+  eval_batch_size: 512
+schedule:
+  # Precision of the measured tau curve is 1/sqrt(n); 8192 halves the error of 2048 at t0.
+  probe_n_utts: 8192
+train:
+  # Pending the A100 benchmark (scripts/diagnostics/bench_train.py --suite prod): turn on
+  # only once it is measured to win on this card. Every run so far had it off.
+  compile: false
+  precision: null
+metrics:
+  # Off for train: decoding 2 x 128 transcripts and scoring WER on every step costs
+  # 68.6 ms of CPU against 0.5 ms without it, ~15 s of a ~77 s epoch with the GPU idle.
+  # The train/val gap is still read from *_perr/train and *_loss/train.
+  wer_bins: {train: 0, val: 10, test: 10}
