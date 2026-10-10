@@ -20,6 +20,7 @@ two runs can share it.
 """
 
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -127,10 +128,13 @@ class GpuSampler:
 
     def start(self) -> None:
         """Begin sampling; a machine without nvidia-smi just reports nothing."""
+        # nvidia-smi numbers GPUs physically and ignores CUDA_VISIBLE_DEVICES, so ask for the
+        # one this process was given — index 0 is someone else's GPU in a 2-GPU job.
+        device = os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0] or "0"
         try:
             self.proc = subprocess.Popen(
                 ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits",
-                 "-lms", "500", "-i", "0"],
+                 "-lms", "500", "-i", device],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
             )
         except FileNotFoundError:

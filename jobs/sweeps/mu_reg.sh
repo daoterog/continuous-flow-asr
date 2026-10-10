@@ -41,14 +41,12 @@ tier_defaults
 CONFIG="${CONFIG:-configs/audio_cond.yaml}"
 PROJECT="${PROJECT:-flow-asr-mu-reg}"
 ARMS="${ARMS:-control lr3e-4 do0.1 do0.3 lr3e-4-do0.1 lr3e-4-do0.3}"
-BATCH="${BATCH:-128}"
 
 # The recipe: what makes `control` the flm-parity control. Everything that depends on
 # the machine or the run kind (eval batch, tau probe size, epochs) comes from
 # configs/profiles/ via --where snellius and the tier's --run.
 COMMON=(
     "data.subset_n.train=null"
-    "data.batch_size=${BATCH}"
     "schedule.refresh_curve_from=simulated"
     "schedule.refresh_every_n_epochs=5"
     "train.denoiser_lr=0.002"

@@ -41,14 +41,12 @@ CONFIG="${CONFIG:-configs/audio_cond.yaml}"
 PROJECT="${PROJECT:-flow-asr-flm-parity}"
 ARMS="${ARMS:-control uniform-time}"
 KEEP="${KEEP:-}"
-BATCH="${BATCH:-128}"
 
 # Held at skilled-lake-22's values so the control is a real reproduction. Everything that
 # depends on the machine or the run kind (eval batch, tau probe size, epochs) comes from
 # configs/profiles/ via --where snellius and the tier's --run.
 COMMON=(
     "data.subset_n.train=null"
-    "data.batch_size=${BATCH}"
     "schedule.refresh_curve_from=simulated"
     "schedule.refresh_every_n_epochs=5"
     "train.denoiser_lr=0.002"

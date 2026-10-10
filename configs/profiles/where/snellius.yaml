@@ -4,6 +4,12 @@
 # base.yaml and under the variant; see ../README.md.
 data:
   env: snellius
+  # The knee of the A100 ladder (bench_train --suite gpu, job 27847723), compile + bf16:
+  #   batch  128 1895 utts/s | 256 2275 | 512 2348 | 1024 2350
+  # 256 is within 3% of the plateau, where the loader — not the GPU, at ~74% — is the limit.
+  # Larger batches would only halve the steps per epoch. Changing it moves the LR optimum;
+  # the sweep recipes no longer pin it, so this is what every Snellius run trains at.
+  batch_size: 256
   # Measured on the node: 849 -> 952 -> 1058 utts/s at 4 -> 8 -> 16 workers. A packed job
   # (jobs/batch/train.sh) splits these between its runs.
   num_workers: 16
