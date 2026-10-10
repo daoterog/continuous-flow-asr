@@ -116,8 +116,10 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         )
         load_teacher_weights(self.two_time_denoiser, self.denoiser.state_dict())
 
-        # The path is the teacher's, not this config's.
-        flow = OmegaConf.merge(cfg.flow, OmegaConf.create(manifest.flow))
+        # The geometry and the path are the teacher's, not this config's
+        cfg.model = OmegaConf.create(manifest.model)
+        cfg.flow = OmegaConf.merge(cfg.flow, OmegaConf.create(manifest.flow))
+        flow = cfg.flow
         self.alpha_fn = make_schedule(flow.get("alpha", "linear_down"))
         self.beta_fn = make_schedule(flow.get("beta", "linear_up"))
         self.gamma_fn = make_schedule(flow.get("gamma"))
@@ -174,6 +176,11 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         # comparable to each other. Until that is settled there is no metric bank, so every
         # call that iterates `self.metrics` is commented out rather than fed an empty one.
         # self.init_metrics(...)
+
+    @property
+    def components(self) -> tuple[str, ...]:
+        """Only the student is worth saving."""
+        return ("two_time_denoiser",)
 
     def train(self, mode: bool = True) -> "FlowMapping":
         """Keep the teacher in eval whatever Lightning does to the module.

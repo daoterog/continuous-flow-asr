@@ -6,9 +6,9 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 
 from src.flow.schedule import TimeReparametrization
-from src.models import build_audio_decoder, build_denoiser
+from src.models import build_audio_decoder, build_denoiser, build_two_time_denoiser
 
-from .layout import COMPONENTS, MANIFEST, TAU, VOCAB_MAP
+from .layout import BUILDERS, MANIFEST, TAU, VOCAB_MAP
 
 
 def load_manifest(run_dir: Path) -> DictConfig:
@@ -61,13 +61,11 @@ def load_components(
     built: dict[str, torch.nn.Module] = {}
 
     model_cfg = OmegaConf.create(manifest.model)
-    for name in COMPONENTS:
+    for name in BUILDERS:
         path = run_dir / f"{name}_{variant}.pth"
         if not path.exists():
             continue
-        if name == "denoiser":
-            model = build_denoiser(model_cfg.denoiser, manifest.vocab_size)
-        else:
+        if name == "mu_nn":
             if model_cfg.get("audio_decoder") is None:
                 raise ValueError(
                     f"{path.name} exists but the manifest has no model.audio_decoder"
@@ -75,6 +73,13 @@ def load_components(
             model = build_audio_decoder(
                 model_cfg.audio_decoder, manifest.vocab_size, manifest.canvas_len
             )
+        elif name == "two_time_denoiser":
+            # The same `model.denoiser` node as the one-time model: a two-time denoiser is
+            # that geometry plus one extra time embedder, which is what lets a teacher's
+            # weights transfer into it.
+            model = build_two_time_denoiser(model_cfg.denoiser, manifest.vocab_size)
+        else:
+            model = build_denoiser(model_cfg.denoiser, manifest.vocab_size)
         state = torch.load(path, map_location=map_location, weights_only=True)
         # strict: a silently partial load is the failure this whole format exists to
         # avoid, and it raises with the offending key names.

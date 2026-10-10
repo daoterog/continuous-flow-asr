@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
 from transformers import WhisperTokenizerFast
 
+from src.checkpointing.layout import COMPONENTS
 from src.data import VocabMap
 from src.flow import build_tau_scheduler
 from src.flow.coefficients import make_schedule, waypoint_strength
@@ -150,6 +151,11 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             wer_bins=OmegaConf.to_container(cfg.metrics.get("wer_bins", {})) or None,
             input_perr_bins=cfg.metrics.get("input_perr_bins", 10),
         )
+
+    @property
+    def components(self) -> tuple[str, ...]:
+        """What `save_components` writes: both trained models, `mu_nn` when there is one."""
+        return COMPONENTS
 
     def on_fit_start(self) -> None:
         """Declare the histogram panels' step metric before anything is logged."""

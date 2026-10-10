@@ -39,7 +39,7 @@ from src.checkpointing import ComponentCheckpoint, manifest_for
 from src.data import ROLES, AudioFeatureDataModule
 from src.flow.coefficients import make_schedule
 from src.flow.schedule import TimeReparametrization
-from src.flow_mapping import DISTILL_GROUPS
+from src.flow_mapping import DISTILL_GROUPS, FlowMapping
 from src.pl_module import FlowMatching
 
 # Used to parse OmegaConf dotlist assignments like
@@ -173,6 +173,32 @@ def validate_distill_split(cfg: DictConfig) -> None:
         raise ValueError(
             f"distill.split must be non-negative and sum to 1, got {parts} (sum {total:.6f})"
         )
+
+
+def build_model(
+    dm: AudioFeatureDataModule, cfg: DictConfig
+) -> "FlowMatching | FlowMapping":
+    """The module this config describes: a distillation run when it configures a teacher.
+
+    Keyed on `distill` rather than on a name of its own, because a config that names a
+    teacher *is* a distillation config and a second key could contradict the first.
+
+    The two do not take the same arguments, which is why this is a function and not a
+    name->class map: `FlowMatching` is handed the reparametrization built from its own
+    config, while `FlowMapping` refuses one and loads the teacher's, since sampling a
+    student on any other grid makes its WER incomparable to the model it came from.
+    """
+    common = dict(
+        vocab_size=dm.vocab_size,
+        pad_id=dm.pad_id,
+        canvas_len=cfg.data.canvas_len,
+        tokenizer=dm.tokenizer,
+        vocab_map=dm.vocab_map,
+    )
+    if cfg.get("distill") is not None:
+        print(f"distilling from {cfg.distill.teacher}")
+        return FlowMapping(cfg, **common)
+    return FlowMatching(cfg, time_reparam=build_time_reparam(dm, cfg), **common)
 
 
 def build_time_reparam(dm: AudioFeatureDataModule, cfg: DictConfig) -> TimeReparametrization:
@@ -342,16 +368,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     dm = build_datamodule(cfg)
     print(dm.summary())
 
-    time_reparam = build_time_reparam(dm, cfg)
-    model = FlowMatching(
-        cfg,
-        vocab_size=dm.vocab_size,
-        pad_id=dm.pad_id,
-        canvas_len=cfg.data.canvas_len,
-        tokenizer=dm.tokenizer,
-        vocab_map=dm.vocab_map,
-        time_reparam=time_reparam,
-    )
+    model = build_model(dm, cfg)
 
     logger = build_logger(cfg)
     extra: list[pl.Callback] = []

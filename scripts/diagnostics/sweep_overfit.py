@@ -38,6 +38,16 @@ LEARNING_RATES = [1e-3, 3e-3, 1e-2]
 SCHEDULES = {"tau": [True], "uniform": [False], "both": [True, False]}
 
 
+def sampled_key(method: str, steps: int) -> str:
+    """The metric a run logs for one integrator at one step count.
+
+    Every sampled metric is named in full — there is no bare `sampled/wer` standing for
+    whichever integrator happened to be configured first — so a watcher has to name the
+    cell it means, and this is the one place that spelling lives.
+    """
+    return f"sampled_{method}_{steps}"
+
+
 def build_grid(args: argparse.Namespace) -> list[dict]:
     """Every combination of the selected axes, as a list of override dicts."""
     grid = {
@@ -128,7 +138,11 @@ def base_overrides(args: argparse.Namespace, n_utts: int) -> list[str]:
         f"sampling.n_utts={min(n_utts, 128)}",
         *(
             [
-                f"train.early_stop_on={args.stop_on}",
+                # Defaults to this run's own sampled WER, which follows --sample-steps:
+                # the metric is named for the integrator and step count that produced it,
+                # so a fixed default would stop watching as soon as either changed.
+                f"train.early_stop_on="
+                f"{args.stop_on or sampled_key('interpolant', args.sample_steps)}/wer",
                 f"train.early_stop_threshold={args.stop_at}",
             ]
             if args.stop_at is not None
@@ -190,6 +204,12 @@ def train_one(config: str, overrides: list[str]) -> dict:
     trainer = T.build_trainer(cfg, logger)
     trainer.fit(model, datamodule=dm)
 
+    steps = cfg.sampling.num_steps
+    key = sampled_key(
+        str(cfg.sampling.get("method", "interpolant")),
+        int(steps if isinstance(steps, int) else steps[0]),
+    )
+
     def metric(name: str) -> float:
         value = trainer.callback_metrics.get(name)
         return float("nan") if value is None else float(value)
@@ -208,10 +228,10 @@ def train_one(config: str, overrides: list[str]) -> dict:
         "input_perr_low_t": metric("input_perr/train_low_t"),
         "denoiser_perr_low_t": metric("denoiser_perr/train_low_t"),
         "mu_wer": metric("mu_wer/val_overall"),
-        "sampled_wer": metric("sampled/wer"),
+        "sampled_wer": metric(f"{key}/wer"),
         "stopped_epoch": trainer.current_epoch,
         "stopped_step": int(trainer.global_step),
-        "sampled_perr": metric("sampled/perr"),
+        "sampled_perr": metric(f"{key}/perr"),
         "val_perr": metric("denoiser_perr/val_overall"),
         "wandb_url": getattr(logger.experiment, "url", ""),
     }
@@ -297,7 +317,10 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, l
              "still runs the full budget, so the sweep becomes 'steps to reach the "
              "target' rather than 'score at a fixed budget'.",
     )
-    p.add_argument("--stop-on", default="sampled/wer", help="metric --stop-at watches")
+    p.add_argument(
+        "--stop-on", default=None,
+        help="metric --stop-at watches; defaults to this run's own sampled WER",
+    )
     p.add_argument("--compile", action="store_true",
                    help="torch.compile both models; worth it whenever a job runs minutes")
     p.add_argument("--keep-checkpoints", action="store_true",

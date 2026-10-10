@@ -181,18 +181,13 @@ class MetricReporting:
             return
         if not self.sampling_probe.is_due(self.current_epoch):
             return
-        primary = str(self.sampling_probe.cfg.get("method", "interpolant"))
-        methods = self.sampling_probe.methods
-        if primary not in methods:
-            methods = [primary, *methods]
-        for method in methods:
-            wer, token_error, n_utts = self.sampling_probe.score(self, datamodule, method)
-            if method == primary:
-                self.log("sampled/wer", wer, batch_size=n_utts)
-                self.log("sampled/perr", token_error, batch_size=n_utts)
-            if len(methods) > 1:
-                self.log(f"sampled_{method}/wer", wer, batch_size=n_utts)
-                self.log(f"sampled_{method}/perr", token_error, batch_size=n_utts)
+        for method in self.sampling_probe.methods:
+            for n in self.sampling_probe.step_counts:
+                wer, token_error, n_utts = self.sampling_probe.score(
+                    self, datamodule, method, num_steps=n
+                )
+                self.log(f"sampled_{method}_{n}/wer", wer, batch_size=n_utts)
+                self.log(f"sampled_{method}_{n}/perr", token_error, batch_size=n_utts)
 
     def log_tau_shape(self, reparam: TimeReparametrization) -> None:
         """Record what a schedule actually draws, not just where it starts.

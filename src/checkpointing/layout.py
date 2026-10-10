@@ -3,8 +3,14 @@
 import shutil
 from pathlib import Path
 
-# The parts a student model might want, in the order they are reported.
+# What an ordinary flow-matching run saves, in the order they are reported. A module may
+# override this through its `components` property — a distillation run trains a
+# `two_time_denoiser` and holds `denoiser`/`mu_nn` as a frozen teacher, so saving this tuple
+# off it would write the teacher straight back out and drop the only weights that moved.
 COMPONENTS = ("denoiser", "mu_nn")
+# Every name any module may ask to have saved, and how to rebuild each one. Keyed here
+# rather than branched on inside `load_components` so adding a model is one entry.
+BUILDERS = ("denoiser", "mu_nn", "two_time_denoiser")
 MANIFEST = "manifest.yaml"
 VOCAB_MAP = "vocab_map.pt"
 TRAINING_STATE = "training_state.pt"

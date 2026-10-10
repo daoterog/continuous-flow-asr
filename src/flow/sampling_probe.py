@@ -72,11 +72,24 @@ class SamplingProbe:
             return [str(m) for m in listed]
         return [str(self.cfg.get("method", "interpolant"))]
 
+    @property
+    def step_counts(self) -> list[int]:
+        """The step counts scored each sampling epoch; `num_steps` may be one or a list.
+
+        A list is what makes a flow map legible: it is distilled to answer in one step, and
+        a single-valued probe pointed at 16 would only ever measure the regime where an
+        integrator is already strong.
+        """
+        want = self.cfg.get("num_steps", 16)
+        counts = [want] if isinstance(want, int | float | str) else list(want)
+        return [int(n) for n in counts]
+
     def score(
         self,
         model: "FlowMatching",
         datamodule: "AudioFeatureDataModule",
         method: str | None = None,
+        num_steps: int | None = None,
     ) -> tuple[float, float, int]:
         """(WER %, token error, utterances scored) for a full integration from noise.
 
@@ -93,7 +106,7 @@ class SamplingProbe:
         model.eval()
         try:
             chunk = int(self.cfg.get("batch_size") or self.train_batch_size)
-            num_steps = int(self.cfg.get("num_steps", 16))
+            num_steps = self.step_counts[0] if num_steps is None else int(num_steps)
             hard = bool(self.cfg.get("hard", False))
             tokens = batch["tokens"].to(model.device)
             generator = torch.Generator(device=model.device)

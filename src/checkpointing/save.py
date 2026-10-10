@@ -51,11 +51,18 @@ def manifest_for(
 def save_components(
     module: pl.LightningModule, out_dir: Path, variant: str = "final"
 ) -> list[Path]:
-    """Write each model's weights under `<name>_<variant>.pth`. Returns what was written."""
+    """Write each model's weights under `<name>_<variant>.pth`. Returns what was written.
+
+    Which models those are is the module's to say, through its `components` property. A
+    distillation run holds `denoiser` and `mu_nn` as a frozen teacher and trains a
+    `two_time_denoiser`, so saving a fixed tuple off it would write the teacher back out
+    unchanged and drop the only weights that moved — with no error, since the files would
+    still appear.
+    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     written = []
-    for name in COMPONENTS:
+    for name in getattr(module, "components", COMPONENTS):
         model = getattr(module, name, None)
         if model is None:  # mu_nn is absent on the linear variant
             continue
