@@ -12,6 +12,7 @@ learns only the dependence on where it is jumping to.
 """
 
 
+from pathlib import Path
 from typing import NamedTuple
 
 import lightning.pytorch as pl
@@ -123,7 +124,7 @@ class FlowMapping(MetricReporting, pl.LightningModule):
 
         distill = cfg.distill
         variant = distill.get("variant", "best")
-        manifest, teacher, teacher_tau = load_components(distill.teacher, variant=variant)
+        manifest, saved, saved_tau = load_components(distill.teacher, variant=variant)
         for key, want, got in (
             ("vocab_size", int(manifest.vocab_size), int(vocab_size)),
             ("canvas_len", int(manifest.canvas_len), int(canvas_len)),
@@ -134,8 +135,6 @@ class FlowMapping(MetricReporting, pl.LightningModule):
                     f"this run builds {key}={got}. Every token id would be read against a "
                     f"different vocabulary."
                 )
-        if "denoiser" not in teacher:
-            raise ValueError(f"no denoiser weights under {distill.teacher}")
         time_input = manifest.flow.get("time_input", "reparametrized")
         if time_input != "reparametrized":
             raise ValueError(
@@ -144,20 +143,33 @@ class FlowMapping(MetricReporting, pl.LightningModule):
                 f"the denoisers as flow time t"
             )
 
-        self.denoiser = teacher["denoiser"]
-        self.mu_nn = teacher.get("mu_nn")
+        self.denoiser = saved.get("denoiser")
+        self.mu_nn = saved.get("mu_nn")
         for model in (self.denoiser, self.mu_nn):
             if model is not None:
                 model.requires_grad_(False)
 
-        # Built from the teacher's own config node, so `load_teacher_weights` fits: the
-        # student is the teacher plus a zero-initialised second time embedder, which makes
-        # it *identical* to the teacher at init and lets distillation start from parity
-        # rather than from noise.
-        self.two_time_denoiser = build_two_time_denoiser(
-            manifest.model.denoiser, vocab_size
-        )
-        load_teacher_weights(self.two_time_denoiser, self.denoiser.state_dict())
+        # A directory that already holds a two-time denoiser is a *student*, not a teacher:
+        # its weights are taken as they are, there is nothing to initialise from, and there
+        # is no frozen one-time model to distil against. That is `for_scoring`'s path, and
+        # it can sample but not train — `map_step` says so.
+        #
+        # Otherwise the student is built from the teacher's own config node, so
+        # `load_teacher_weights` fits: the teacher plus a zero-initialised second time
+        # embedder, which makes it *identical* to the teacher at init and lets distillation
+        # start from parity rather than from noise.
+        self.two_time_denoiser = saved.get("two_time_denoiser")
+        if self.two_time_denoiser is None:
+            if self.denoiser is None:
+                raise ValueError(
+                    f"{distill.teacher} holds neither denoiser weights to distil from nor a "
+                    f"two_time_denoiser to score. Found "
+                    f"{sorted(saved) or 'nothing'} for variant {variant!r}."
+                )
+            self.two_time_denoiser = build_two_time_denoiser(
+                manifest.model.denoiser, vocab_size
+            )
+            load_teacher_weights(self.two_time_denoiser, self.denoiser.state_dict())
 
         # The geometry and the path are the teacher's, not this config's
         cfg.model = OmegaConf.create(manifest.model)
@@ -193,11 +205,13 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         self.sampling_probe = SamplingProbe(cfg.get("sampling"), cfg.data.batch_size)
 
         # Always the teacher's, never this run's. A run saves the curve its weights were
-        # trained against beside them, so when one is there it is used verbatim. Older
-        # checkpoints have none; theirs was the simulated curve, which is the closed form at
-        # the accuracy the manifest records, so it rebuilds exactly. Either way the student
-        # samples on the teacher's grid, which is what makes the two ladders comparable.
-        self.time_reparam = teacher_tau or TimeReparametrization.exact(
+        # trained against beside them, so when one is there it is used verbatim — which
+        # covers a student too, since a distillation run saves the teacher's curve beside
+        # the student. Older checkpoints have none; theirs was the simulated curve, which is
+        # the closed form at the accuracy the manifest records, so it rebuilds exactly.
+        # Either way the student samples on the teacher's grid, which is what makes the two
+        # ladders comparable.
+        self.time_reparam = saved_tau or TimeReparametrization.exact(
             vocab_size,
             alpha_fn=self.alpha_fn,
             beta_fn=self.beta_fn,
@@ -241,8 +255,18 @@ class FlowMapping(MetricReporting, pl.LightningModule):
 
     @property
     def components(self) -> tuple[str, ...]:
-        """Only the student is worth saving."""
-        return ("two_time_denoiser",)
+        """The student, plus the mu it cannot sample without.
+
+        `denoiser` is deliberately absent: the student supersedes it, so writing the frozen
+        teacher back out would be a stale 163 MB duplicate of weights that did not move.
+
+        `mu_nn` is here for the opposite reason. It is not a copy of something that trained
+        — it is a *dependency of inference*: on any path with a gamma term the interpolant
+        is `alpha(t) x0 + gamma(t) mu`, so without mu a saved student cannot build the field
+        it denoises and cannot be scored at all. 7 MB against the student's 163. With the
+        curve that `save_tau` already writes, that makes the directory self-contained.
+        """
+        return ("two_time_denoiser", "mu_nn")
 
     def train(self, mode: bool = True) -> "FlowMapping":
         """Keep the teacher in eval whatever Lightning does to the module.
@@ -252,12 +276,50 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         teacher's dropout back on. This teacher carries dropout 0.1, so its predictions would
         stop being a fixed function of the input, and a distillation target that changes under
         you is the one thing the frozen teacher exists to prevent.
+
+        Both are absent on `for_scoring`'s path, which has no teacher to hold down.
         """
         super().train(mode)
-        self.denoiser.eval()
-        if self.mu_nn is not None:
-            self.mu_nn.eval()
+        for model in (self.denoiser, self.mu_nn):
+            if model is not None:
+                model.eval()
         return self
+
+    @classmethod
+    def for_scoring(
+        cls,
+        components_dir: str | Path,
+        cfg: DictConfig,
+        *,
+        vocab_size: int,
+        pad_id: int,
+        canvas_len: int,
+        tokenizer: WhisperTokenizerFast,
+        vocab_map: VocabMap | None = None,
+        variant: str = "best",
+    ) -> "FlowMapping":
+        """A FlowMapping built from a saved student. It can `sample`, not train.
+
+        The saved weights are taken as they are, so there is no teacher: no frozen one-time
+        model for the diagonal target, which is why `map_step` refuses. Everything else — the
+        geometry, the probability path, the curve to sample on — comes out of the student's
+        own manifest and `tau_<variant>.npz`, which is what makes the directory enough.
+
+        `cfg` supplies the data pipeline only; `__init__` overwrites its `model` and `flow`
+        from the manifest exactly as it does when training.
+        """
+        cfg = cfg.copy()
+        cfg.distill = OmegaConf.merge(
+            cfg.distill, OmegaConf.create({"teacher": str(components_dir), "variant": variant})
+        )
+        return cls(
+            cfg,
+            vocab_size=vocab_size,
+            pad_id=pad_id,
+            canvas_len=canvas_len,
+            tokenizer=tokenizer,
+            vocab_map=vocab_map,
+        )
 
     def on_fit_start(self) -> None:
         """Declare the histogram panels' step metric before anything is logged."""
@@ -312,6 +374,14 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         a dense estimate of the headline number that the 64-utterance probe only reaches
         every few epochs.
         """
+        if self.denoiser is None:
+            raise RuntimeError(
+                "this FlowMapping was built from a saved student (`for_scoring`), so it "
+                "carries no frozen teacher and the diagonal term has no target. It can "
+                "sample but not train — point `distill.teacher` at a teacher's components "
+                "directory to train one."
+            )
+
         audio = batch["audio"].float()
         tokens = batch["tokens"]
         x1 = F.one_hot(tokens, self.vocab_size).float()

@@ -29,6 +29,7 @@ from src.checkpointing import (
     load_state_into,
 )
 from src.data import AudioFeatureDataModule
+from src.flow_mapping import MAP_SAMPLERS, FlowMapping
 from src.metrics import ids_to_text, score_samples
 from src.pl_module import FlowMatching
 
@@ -64,6 +65,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--role", choices=["train", "val", "test"], default="val")
     p.add_argument("--steps", type=int, nargs="+", default=[1, 2, 4, 8, 16, 32, 64])
+    p.add_argument(
+        "--method", nargs="+", default=None,
+        help="integrators to score. Default: both for a flow map, where one step against "
+             "sixteen is the whole question, and the run's own sampling.method otherwise",
+    )
     p.add_argument("--n-utts", type=int, default=None, help="cap the split (default: all)")
     p.add_argument(
         "--batch-size", type=int, default=None,
@@ -160,13 +166,26 @@ def _build(cfg: DictConfig, dm: AudioFeatureDataModule) -> FlowMatching:
 
 def _model_from_components(
     args: argparse.Namespace, cfg: DictConfig, dm: AudioFeatureDataModule
-) -> FlowMatching:
-    """A FlowMatching with the saved state_dicts loaded into its submodules."""
+) -> "FlowMatching | FlowMapping":
+    """The saved run, rebuilt with its state_dicts loaded into its submodules.
+
+    A distillation run gets a `FlowMapping` instead, keyed on `distill` in its own config
+    exactly as `train.build_model` keys on it — a config that names a teacher is a
+    distillation config, and a second marker could contradict the first.
+    """
     manifest, built, saved = load_components(args.components, variant=args.variant)
     if manifest.vocab_size != dm.vocab_size:
         raise SystemExit(
             f"the weights were saved for vocab {manifest.vocab_size} but this data gives "
             f"{dm.vocab_size}; check data.compact_vocab and the splits"
+        )
+    if cfg.get("distill") is not None:
+        # `for_scoring` loads the weights and the curve itself, out of this same directory,
+        # so there is nothing left to copy in afterwards.
+        return FlowMapping.for_scoring(
+            args.components, cfg, vocab_size=dm.vocab_size, pad_id=dm.pad_id,
+            canvas_len=cfg.data.canvas_len, tokenizer=dm.tokenizer,
+            vocab_map=dm.vocab_map, variant=args.variant,
         )
     # Geometry and probability path come from the manifest, never from --config: the
     # config supplies the data pipeline, and its model node is whatever that YAML happens
@@ -189,6 +208,23 @@ def _model_from_components(
         print("warning: no saved tau for a time_input=uniform model; the u fed to the "
               "denoiser follows the rebuilt curve, not the one it trained against")
     return model
+
+
+def _methods(
+    args: argparse.Namespace, cfg: DictConfig, model: "FlowMatching | FlowMapping"
+) -> list[str]:
+    """Which integrators to score, every table labelled with the one that produced it.
+
+    A flow map defaults to both. One step of it against sixteen of the integrator it was
+    distilled from is the question the whole exercise asks, and the two do not agree above
+    two steps — so scoring whichever name the config happened to carry would answer half of
+    it without saying which half.
+    """
+    if args.method:
+        return [str(m) for m in args.method]
+    if isinstance(model, FlowMapping):
+        return list(MAP_SAMPLERS)
+    return [str(cfg.get("sampling", {}).get("method", "interpolant"))]
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -246,23 +282,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"{source}\n  variant {cfg.get('variant')}  role {args.role}  "
           f"{n_utts:,} utterances  vocab {dm.vocab_size:,}\n")
 
-    print(f"{'steps':>6} {'WER %':>9} {'token err':>10}")
     best = None
-    for num_steps in args.steps:
-        preds, refs = [], []
-        for batch in batches:
-            preds.append(model.sample(batch["audio"], num_steps, hard=args.hard))
-            refs.append(batch["tokens"])
-        pred, ref = torch.cat(preds), torch.cat(refs)
-        wer, token_error = score_samples(
-            pred, ref, dm.tokenizer, dm.pad_id, dm.vocab_map
-        )
-        print(f"{num_steps:>6} {wer:9.2f} {token_error:10.4f}")
-        if best is None or wer < best[1]:
-            best = (num_steps, wer, pred, ref)
+    for method in _methods(args, cfg, model):
+        print(f"########## method={method} ##########")
+        print(f"{'steps':>6} {'WER %':>9} {'token err':>10}")
+        for num_steps in args.steps:
+            preds, refs = [], []
+            for batch in batches:
+                preds.append(
+                    model.sample(batch["audio"], num_steps, hard=args.hard, method=method)
+                )
+                refs.append(batch["tokens"])
+            pred, ref = torch.cat(preds), torch.cat(refs)
+            wer, token_error = score_samples(
+                pred, ref, dm.tokenizer, dm.pad_id, dm.vocab_map
+            )
+            print(f"{num_steps:>6} {wer:9.2f} {token_error:10.4f}")
+            if best is None or wer < best[2]:
+                best = (method, num_steps, wer, pred, ref)
+        print()
 
-    steps, wer, pred, ref = best
-    print(f"\nbest: {steps} steps, WER {wer:.2f}%")
+    method, steps, wer, pred, ref = best
+    print(f"best: {method}, {steps} steps, WER {wer:.2f}%")
     if args.show:
         hyps = ids_to_text(pred[: args.show], dm.tokenizer, dm.pad_id, dm.vocab_map)
         gold = ids_to_text(ref[: args.show], dm.tokenizer, dm.pad_id, dm.vocab_map)

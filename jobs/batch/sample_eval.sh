@@ -34,6 +34,9 @@
 #   EVAL_HARD     — set to 1 to feed back a one-hot argmax between steps instead of the
 #                   softmax. That is what training showed the model: the interpolant is
 #                   built from F.one_hot(tokens), a vertex, never an interior point.
+#   EVAL_METHOD   — integrators to score, space separated ("interpolant euler"). Unset
+#                   scores both for a distilled flow map, where one step against sixteen is
+#                   the question, and the run's own sampling.method for a one-time model.
 #   EVAL_OVERRIDES— extra dotlist overrides. The default forces the whole split: a run's
 #                   own config may carry data.subset_n.val from when it trained, and
 #                   scoring two runs on different amounts is what makes them incomparable.
@@ -56,6 +59,7 @@ EVAL_ROLE="${EVAL_ROLE:-val}"
 EVAL_STEPS="${EVAL_STEPS:-1 2 4 8 16 32 64 128}"
 EVAL_VARIANT="${EVAL_VARIANT:-best}"
 EVAL_BATCH="${EVAL_BATCH:-}"
+EVAL_METHOD="${EVAL_METHOD:-}"
 EVAL_OVERRIDES="${EVAL_OVERRIDES:-data.subset_n.val=null}"
 # Tested by value, not by emptiness: ${EVAL_HARD:+--hard} expands for ANY non-empty
 # string, so EVAL_HARD=0 would still pass the flag while the log said otherwise.
@@ -75,7 +79,7 @@ else
     echo "checkpoint: ${CKPT}"
 fi
 echo "role      : ${EVAL_ROLE}   overrides ${EVAL_OVERRIDES}"
-echo "steps     : ${EVAL_STEPS}   hard ${EVAL_HARD:-0}"
+echo "steps     : ${EVAL_STEPS}   hard ${EVAL_HARD:-0}   method ${EVAL_METHOD:-default}"
 echo "node      : $(hostname)"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
@@ -86,4 +90,5 @@ srun python -m scripts.evaluation.sample_eval \
     ${EVAL_BATCH:+--batch-size "${EVAL_BATCH}"} \
     "${HARD_ARGS[@]}" \
     --steps ${EVAL_STEPS} \
+    ${EVAL_METHOD:+--method ${EVAL_METHOD}} \
     data.env=snellius ${EVAL_OVERRIDES}
