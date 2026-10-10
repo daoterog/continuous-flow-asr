@@ -31,7 +31,7 @@ from src.checkpointing import (
 from src.data import AudioFeatureDataModule
 from src.flow_mapping import MAP_SAMPLERS, FlowMapping
 from src.metrics import ids_to_text, score_samples
-from src.pl_module import FlowMatching
+from src.flow_matching import FlowMatching
 
 # The config this machine is configured for, to override a checkpoint's own data.env.
 

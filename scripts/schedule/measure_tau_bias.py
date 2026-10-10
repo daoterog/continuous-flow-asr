@@ -38,7 +38,7 @@ import train as T
 from src.checkpointing import load_components, load_manifest
 from src.flow.schedule import TimeReparametrization
 from src.flow.tau_measured import MeasuredTau
-from src.pl_module import FlowMatching
+from src.flow_matching import FlowMatching
 
 ESTIMATORS = ("schedule", "training", "sweep")
 

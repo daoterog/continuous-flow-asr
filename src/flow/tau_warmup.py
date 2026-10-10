@@ -39,7 +39,7 @@ from src.flow.tau_simulated import SimulatedTau
 
 if TYPE_CHECKING:
     from src.data import AudioFeatureDataModule
-    from src.pl_module import FlowMatching
+    from src.flow_matching import FlowMatching
 
 
 class WarmupTau(TauScheduler):

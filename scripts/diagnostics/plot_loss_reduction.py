@@ -34,7 +34,7 @@ from transformers import WhisperTokenizerFast
 
 from src.constants import data_root_for
 from src.data import AudioFeatureDataModule
-from src.pl_module import token_weights
+from src.flow_matching import token_weights
 
 # Categorical slots 1-3 of the validated palette, in fixed order, one per pad setting.
 # The reduction is the second encoding: solid for `sequence`, dashed for `token`.

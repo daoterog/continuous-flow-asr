@@ -62,7 +62,7 @@ class StubModel:
 
     def make_interpolant(self, x1: torch.Tensor, t: torch.Tensor,
                          mu: torch.Tensor | None = None) -> torch.Tensor:
-        """I_t = alpha(t) x0 + beta(t) x1 [+ gamma(t) mu], as `pl_module` builds it."""
+        """I_t = alpha(t) x0 + beta(t) x1 [+ gamma(t) mu], as `flow_matching` builds it."""
         x0 = torch.randn_like(x1)
         out = self.alpha_fn(t)[:, None, None] * x0 + self.beta_fn(t)[:, None, None] * x1
         if self.gamma_fn is not None and mu is not None:

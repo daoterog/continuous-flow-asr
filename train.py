@@ -41,7 +41,7 @@ from src.data import ROLES, AudioFeatureDataModule
 from src.flow.coefficients import make_schedule
 from src.flow.schedule import TimeReparametrization
 from src.flow_mapping import DISTILL_GROUPS, FlowMapping
-from src.pl_module import FlowMatching
+from src.flow_matching import FlowMatching
 
 # Used to parse OmegaConf dotlist assignments like
 # `train.num_epochs=10`, `data.subset_n.train=64`

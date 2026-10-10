@@ -9,7 +9,7 @@ from src.metrics import score_samples
 
 if TYPE_CHECKING:
     from src.data import AudioFeatureDataModule
-    from src.pl_module import FlowMatching
+    from src.flow_matching import FlowMatching
 
 
 class SamplingProbe:

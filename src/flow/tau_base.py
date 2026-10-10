@@ -10,7 +10,7 @@ from src.flow.schedule import TimeReparametrization
 
 if TYPE_CHECKING:
     from src.data import AudioFeatureDataModule
-    from src.pl_module import FlowMatching
+    from src.flow_matching import FlowMatching
 
 
 class TauScheduler:

@@ -134,7 +134,7 @@ def sample_tokens(
 
     `waypoint` is unused — this integrator never forms the drift, it rebuilds the
     interpolant from gamma_fn directly — and is accepted only so the two samplers share one
-    signature behind `pl_module.SAMPLERS`.
+    signature behind `flow_matching.SAMPLERS`.
     """
     batch = audio.size(0)
     x0 = torch.randn(

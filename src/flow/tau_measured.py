@@ -13,7 +13,7 @@ from src.flow.tau_base import TauScheduler
 
 if TYPE_CHECKING:
     from src.data import AudioFeatureDataModule
-    from src.pl_module import FlowMatching
+    from src.flow_matching import FlowMatching
 
 
 class MeasuredTau(TauScheduler):
