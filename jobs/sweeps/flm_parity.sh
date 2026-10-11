@@ -1,33 +1,34 @@
 #!/bin/bash
 
-# Where FLM (src/models/fmlm/algo.py) does something we don't, one knob at a time. Each
-# step pits the stack adopted so far against the stack plus one new knob:
+# Where FLM (src/models/fmlm/algo.py) does something we don't, each tested as an independent
+# arm against one shared control on the cluster recipe (configs/recipes/fulldata.yaml:
+# denoiser small + mu micro, full latents, batch 128, stratified t, token-level loss).
 #
-#   1. uniform-time   flow.time_input=uniform    the denoiser sees the draw u, not t = tau^-1(u)
-#   2. strat          flow.stratified_t=true     one t draw per 1/B slice of the batch
-#   3. (reduction / padding arms, once the plot from
-#       scripts/diagnostics/plot_loss_reduction.py has said which are worth running)
+#   control         the recipe as is (pad_loss_weight 1.0)
+#   uniform-time    flow.time_input=uniform           the denoiser sees the draw u, not t
+#   pad0.1          flow.pad_loss_weight=0.1           less weight on padding, first pad too
+#   pad0.1-decay8   ... + flow.pad_decay=8             first pad (the stop decision) kept
+#                                                      at full weight, the tail decays to 0.1
 #
-# A knob that beats the control by more than the control pair's own seed spread goes into
-# KEEP, and the next step runs on top of it — the control included:
+# The pad arms rely on the recipe's token-level reduction: under `sequence` a short
+# utterance's tokens would count up to ~6x more once pads are down-weighted, which is what
+# confounded the earlier pad-decay run (21.1 vs 16.8).
 #
-#   ARMS="control uniform-time" ./jobs/sweeps/flm_parity.sh                          # step 1
-#   KEEP="flow.time_input=uniform" ARMS="control strat" ./jobs/sweeps/flm_parity.sh  # step 2
+# Read each arm against the control at epoch 100 (sampled WER, 16 steps, full val):
+# >= 2 points better adopts it, >= 2 worse drops it — seed noise on small + micro is ~1-2.
+# For the pad arms, also check samples still stop at the right length (WER vs
+# denoiser_perr): an under-learnt stop token shows up as insertions.
 #
-# The control is `sim-e5` from schedule_fulldata.sh, the skilled-lake-22 reproduction, so
-# each step's control also checks that the pipeline still lands where it did.
+# Earlier rounds of this sweep ran on the tiny denoiser at stride 4 and are not comparable:
+# there, uniform time split by seed (-2.2 / +1.3), stratified t was flat (now a recipe
+# default), and Euler sampled ~1.5 points worse than the interpolant.
 #
-# Step 1 is done (flm-parity, 300 epochs x 2 seeds): no arm beat the control's seed
-# spread, and Euler sampled ~1.5 points worse than the interpolant in all 8 runs, so only
-# the interpolant is scored now.
-#
-# Runs on the standard tiers (jobs/common/sweep.sh): a 100-epoch screen by default, two
-# runs per GPU; TIER=confirm for 300 epochs x 2 seeds.
+# KEEP adds adopted knobs to every arm, the control included, for a next stage.
 #
 # Usage:
 #   ./jobs/sweeps/flm_parity.sh                     # dry run: plan + SBU, submit nothing
 #   SUBMIT=1 ./jobs/sweeps/flm_parity.sh            # screen, gated
-#   TIER=confirm ARMS="control strat" SUBMIT=1 ./jobs/sweeps/flm_parity.sh
+#   KEEP="flow.time_input=uniform" ARMS="control ..." SUBMIT=1 ./jobs/sweeps/flm_parity.sh
 
 set -eo pipefail
 
@@ -39,7 +40,7 @@ tier_defaults
 
 CONFIG="${CONFIG:-configs/recipes/fulldata.yaml}"
 PROJECT="${PROJECT:-flow-asr-flm-parity}"
-ARMS="${ARMS:-control uniform-time}"
+ARMS="${ARMS:-control uniform-time pad0.1 pad0.1-decay8}"
 KEEP="${KEEP:-}"
 
 # Everything that defines the run lives in the recipe ($CONFIG): model, data, LRs,
@@ -54,8 +55,8 @@ arm_overrides() {
     case "$1" in
         control)       echo "" ;;
         uniform-time)  echo "flow.time_input=uniform" ;;
-        strat)         echo "flow.stratified_t=true" ;;
-        strat-uniform) echo "flow.time_input=uniform flow.stratified_t=true" ;;
+        pad0.1)        echo "flow.pad_loss_weight=0.1" ;;
+        pad0.1-decay8) echo "flow.pad_loss_weight=0.1 flow.pad_decay=8" ;;
         *) echo "unknown arm: $1" >&2; exit 1 ;;
     esac
 }
