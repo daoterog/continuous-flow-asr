@@ -10,7 +10,7 @@ import torch
 from torch.utils.data import ConcatDataset, DataLoader, Subset
 from transformers import WhisperTokenizerFast
 
-from .collate import collate, make_loader
+from .collate import CudaPrefetcher, collate, make_loader
 from .features import AudioFeatureDataset
 from .spec import resolve_role
 from .vocab import VocabMap
@@ -42,6 +42,7 @@ class AudioFeatureDataModule(pl.LightningDataModule):
         seed: int = 0,
         pin_memory: bool = False,
         steps_per_epoch: int | None = None,
+        gpu_prefetch: bool = False,
     ) -> None:
         """Record the configuration; nothing is read off disk until `setup()`.
 
@@ -67,6 +68,8 @@ class AudioFeatureDataModule(pl.LightningDataModule):
         self.seed = seed
         self.pin_memory = pin_memory
         self.steps_per_epoch = steps_per_epoch
+        # Copy the next batch to the GPU while the current one trains (CudaPrefetcher).
+        self.gpu_prefetch = gpu_prefetch and pin_memory and torch.cuda.is_available()
 
         self.datasets: dict[str, Subset] = {}
         self.dirs: dict[str, list[Path]] = {}
@@ -172,10 +175,10 @@ class AudioFeatureDataModule(pl.LightningDataModule):
             vocab_map=self.vocab_map,
         )
 
-    def _loader(self, role: str, shuffle: bool) -> DataLoader:
+    def _loader(self, role: str, shuffle: bool) -> DataLoader | CudaPrefetcher:
         if not self._is_set_up:
             self.setup()
-        return make_loader(
+        loader = make_loader(
             self.datasets[role],
             batch_size=self.batch_size if role == "train" else self.eval_batch_size,
             shuffle=shuffle,
@@ -185,6 +188,7 @@ class AudioFeatureDataModule(pl.LightningDataModule):
             # Only the training loader: val and test must cover their split exactly once.
             steps_per_epoch=self.steps_per_epoch if role == "train" else None,
         )
+        return CudaPrefetcher(loader) if self.gpu_prefetch else loader
 
     def train_dataloader(self) -> DataLoader:
         """Shuffled, with drop_last so the LR schedule's step count is exact."""

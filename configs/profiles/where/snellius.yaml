@@ -9,8 +9,12 @@ data:
   # by accident. Stride changes the audio sequence length, not audio_dim, so a model trained
   # at one stride still loads at the other and silently sees a different input.
   audio_stride: 1
-  # data.batch_size is deliberately absent until the A100 ladder is re-run for small + micro
-  # at stride 1 (the stride-4 knee was 256). Until then base.yaml's applies.
+  # The knee for the fulldata recipe (small + micro, full latents, compile + bf16), A100
+  # ladder 2026-10-11: batch 32 457 utts/s | 64 500 | 128 525 | 256 545 | 512 OOM.
+  # 128 is 96% of the best, and it is the batch skilled-lake-22 validated lr 2e-3 at, so the
+  # LR carries over. Replaying one on-GPU batch reached 742 utts/s at 128: the remaining
+  # ~30% goes to moving ~490 MB of latents per step, not to the GPU.
+  batch_size: 128
   # Measured on the node: 849 -> 952 -> 1058 utts/s at 4 -> 8 -> 16 workers. A packed job
   # (jobs/batch/train.sh) splits these between its runs.
   num_workers: 16

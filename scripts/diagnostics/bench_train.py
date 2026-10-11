@@ -135,7 +135,11 @@ def gpu_trials(at_batch: int, batches: Sequence[int]) -> list[tuple[str, list[st
     # a fixed one (per-step overhead).
     replay = [(f"replay {b}", [f"data.batch_size={b}", REPLAY])
               for b in sorted({max(at_batch // 2, 1), at_batch})]
-    return [*ladder, *replay]
+    # The same ladder with the next batch copied to the GPU while the current one trains
+    # (data.gpu_prefetch, CudaPrefetcher): how much of the real-vs-replay gap it recovers.
+    prefetch = [(f"prefetch {b}", [f"data.batch_size={b}", "data.gpu_prefetch=true"])
+                for b in batches]
+    return [*ladder, *replay, *prefetch]
 
 
 SUITES = {

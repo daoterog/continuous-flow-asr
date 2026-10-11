@@ -25,11 +25,10 @@ SBU_PER_GPU_HOUR="${SBU_PER_GPU_HOUR:-128}"
 CPUS_PER_RUN=18
 MEM_PER_RUN_G=120
 MEM_MIN_G=160
-# Deliberately conservative until the stride-1 benchmark for the fulldata recipe (small +
-# micro, full latents) measures it. The 25 s measured earlier was for the tiny denoiser on
-# stride-4 pooled latents, which cluster runs no longer train; small at stride 1 is several
-# times the work per step, and under-pricing would let the gate pass a sweep it should stop.
-SEC_PER_EPOCH="${SEC_PER_EPOCH:-80}"
+# The fulldata recipe (small + micro, full latents) at batch 128 on the A100: 28.5k utts at
+# 525 utts/s is ~54 s of training, plus ~3.3 s of evaluation amortised at every-10-epoch
+# validation and probing (10.7 s + 22.2 s, A100 benchmark 2026-10-11).
+SEC_PER_EPOCH="${SEC_PER_EPOCH:-58}"
 # Startup, the tau build, compile's warmup, the cold first epochs off GPFS.
 JOB_OVERHEAD_S="${JOB_OVERHEAD_S:-600}"
 
