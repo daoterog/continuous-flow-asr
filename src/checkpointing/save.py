@@ -67,8 +67,16 @@ def save_components(
         if model is None:  # mu_nn is absent on the linear variant
             continue
         path = out_dir / f"{name}_{variant}.pth"
-        torch.save(_unwrap(model).state_dict(), path)
+        # A module keeping an EMA saves the averaged weights here (what it evaluated) and
+        # the live ones beside them; any other module saves its weights as they are.
+        state_dicts = getattr(module, "component_state_dicts", None)
+        state, live = state_dicts(name) if state_dicts else (_unwrap(model).state_dict(), None)
+        torch.save(state, path)
         written.append(path)
+        if live is not None:
+            live_path = out_dir / f"{name}_{variant}_live.pth"
+            torch.save(live, live_path)
+            written.append(live_path)
     tau_path = save_tau(module, out_dir, variant)
     if tau_path is not None:
         written.append(tau_path)

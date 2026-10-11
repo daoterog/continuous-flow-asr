@@ -276,6 +276,11 @@ class Transformer(nn.Module):
             cond_dim=config.cond_dim,
         )
 
+        # Soft-cap the logits to (-cap, cap) with cap * tanh(x / cap), as FLM does before its
+        # log_softmax (src/models/fmlm/algo.py, _process_model_output). Bounded logits keep
+        # the CE from being driven by a few runaway entries. None leaves them uncapped.
+        self.logit_cap = config.get("logit_cap")
+
     def forward(
         self,
         x_t: Tensor,
@@ -431,5 +436,7 @@ class Transformer(nn.Module):
         # Apply final layer with full precision
         with torch.amp.autocast("cuda", dtype=torch.float32):
             x = self.output_layer(x=x, c=c)
+            if self.logit_cap:
+                x = self.logit_cap * torch.tanh(x / self.logit_cap)
 
         return x
