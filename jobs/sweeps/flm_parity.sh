@@ -10,6 +10,14 @@
 #   pad0.1-decay8   ... + flow.pad_decay=8             first pad (the stop decision) kept
 #                                                      at full weight, the tail decays to 0.1
 #
+# Stage 2 (stacked on stage 1's winners through KEEP; not in the default ARMS):
+#
+#   ema             train.ema_decay=0.999            validate, sample and save an EMA of the
+#                                                    weights, as FLM does; half-life ~700
+#                                                    steps, ~3 epochs at 222 steps/epoch
+#   softcap         model.denoiser.logit_cap=30      logits soft-capped to (-30, 30) by
+#                                                    30*tanh(x/30), FLM's _process_model_output
+#
 # The pad arms rely on the recipe's token-level reduction: under `sequence` a short
 # utterance's tokens would count up to ~6x more once pads are down-weighted, which is what
 # confounded the earlier pad-decay run (21.1 vs 16.8).
@@ -57,6 +65,8 @@ arm_overrides() {
         uniform-time)  echo "flow.time_input=uniform" ;;
         pad0.1)        echo "flow.pad_loss_weight=0.1" ;;
         pad0.1-decay8) echo "flow.pad_loss_weight=0.1 flow.pad_decay=8" ;;
+        ema)           echo "train.ema_decay=0.999" ;;
+        softcap)       echo "model.denoiser.logit_cap=30" ;;
         *) echo "unknown arm: $1" >&2; exit 1 ;;
     esac
 }
