@@ -30,9 +30,25 @@ LOSS_REDUCTIONS = ("sequence", "token")
 def token_weights(
     tokens: torch.Tensor, pad_id: int, floor: float, decay: float
 ) -> torch.Tensor | None:
-    """(B, L) loss weights for `FlowMatching.token_weights`, which documents the formula.
+    """(B, L) loss weights, or None when every position counts the same.
 
-    A free function so the diagnostics can draw the exact weights training uses.
+    Real tokens weigh 1; a pad at distance d into the run weighs
+
+        floor + (1 - floor) * exp(-(d - 1) / decay)
+
+    so the first pad keeps full weight and the tail decays to `floor`
+    (`flow.pad_loss_weight`); a `decay` of 0 or null gives that floor flat. The first pad is
+    the whole length decision — a model that never stops scores over 100% WER on insertions
+    — while a pad 150 positions out is free.
+
+    Lowering the floor also shrinks the weighted mean's denominator, scaling each real token
+    by up to canvas_len / n_real ~ 3.3, so part of any gain is an effective learning-rate
+    rise and a sweep over this has to vary the learning rate too.
+
+    Padding is assumed to be a contiguous suffix, which is what `collate` produces.
+
+    A free function rather than a method: both `FlowMatching` and `FlowMapping` weigh their
+    tokens the same way, and the diagnostics draw the exact weights training uses.
     """
     if floor == 1.0:
         return None

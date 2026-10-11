@@ -29,9 +29,10 @@ from src.checkpointing import (
     load_state_into,
 )
 from src.data import AudioFeatureDataModule
+from src.flow.schedule import TimeReparametrization
 from src.flow_mapping import MAP_SAMPLERS, FlowMapping
-from src.metrics import ids_to_text, score_samples
 from src.flow_matching import FlowMatching
+from src.metrics import ids_to_text, score_samples
 
 # The config this machine is configured for, to override a checkpoint's own data.env.
 
@@ -164,6 +165,60 @@ def _build(cfg: DictConfig, dm: AudioFeatureDataModule) -> FlowMatching:
     )
 
 
+class StudentScorer(FlowMapping):
+    """A `FlowMapping` whose weights are a trained student's. It samples; it cannot train.
+
+    `FlowMapping` normally loads a teacher and initialises a student from it, which is what
+    distillation needs and what `distill.teacher` means everywhere else. Scoring is the one
+    case that wants the opposite: the weights are taken as they are, and there is no frozen
+    one-time model, so the diagonal term has no target and `map_step` refuses.
+
+    That difference is confined to `load_models`, and it lives here rather than in the class
+    because this is the only place that needs it. Everything else — the geometry, the
+    probability path, the curve to sample on — comes out of the student's own manifest and
+    `tau_<variant>.npz`, which is what makes the directory enough on its own: no teacher has
+    to be fetched alongside it.
+    """
+
+    def load_models(self) -> tuple[DictConfig, TimeReparametrization | None]:
+        """The saved student and its mu, in place of a teacher and a fresh student."""
+        distill = self.cfg.distill
+        manifest, saved, saved_tau = load_components(
+            distill.teacher, variant=distill.get("variant", "best")
+        )
+        self.check_manifest(manifest)
+        if "two_time_denoiser" not in saved:
+            raise SystemExit(
+                f"{distill.teacher} holds no two_time_denoiser to score; found "
+                f"{sorted(saved) or 'nothing'} for variant "
+                f"{distill.get('variant', 'best')!r}"
+            )
+        # No teacher: nothing to distil against, and nothing to freeze.
+        self.denoiser = None
+        self.mu_nn = saved.get("mu_nn")
+        self.two_time_denoiser = saved["two_time_denoiser"]
+        return manifest, saved_tau
+
+
+def _student_from_components(
+    args: argparse.Namespace, cfg: DictConfig, dm: AudioFeatureDataModule
+) -> StudentScorer:
+    """Point `distill.teacher` at the student's own directory and build the scorer."""
+    cfg = cfg.copy()
+    cfg.distill = OmegaConf.merge(
+        cfg.distill,
+        OmegaConf.create({"teacher": str(args.components), "variant": args.variant}),
+    )
+    return StudentScorer(
+        cfg,
+        vocab_size=dm.vocab_size,
+        pad_id=dm.pad_id,
+        canvas_len=cfg.data.canvas_len,
+        tokenizer=dm.tokenizer,
+        vocab_map=dm.vocab_map,
+    )
+
+
 def _model_from_components(
     args: argparse.Namespace, cfg: DictConfig, dm: AudioFeatureDataModule
 ) -> "FlowMatching | FlowMapping":
@@ -180,13 +235,9 @@ def _model_from_components(
             f"{dm.vocab_size}; check data.compact_vocab and the splits"
         )
     if cfg.get("distill") is not None:
-        # `for_scoring` loads the weights and the curve itself, out of this same directory,
-        # so there is nothing left to copy in afterwards.
-        return FlowMapping.for_scoring(
-            args.components, cfg, vocab_size=dm.vocab_size, pad_id=dm.pad_id,
-            canvas_len=cfg.data.canvas_len, tokenizer=dm.tokenizer,
-            vocab_map=dm.vocab_map, variant=args.variant,
-        )
+        # `StudentScorer.load_models` reads the weights and the curve out of this same
+        # directory, so there is nothing left to copy in afterwards.
+        return _student_from_components(args, cfg, dm)
     # Geometry and probability path come from the manifest, never from --config: the
     # config supplies the data pipeline, and its model node is whatever that YAML happens
     # to say rather than what these weights were trained as. Taking it from --config means

@@ -2,7 +2,7 @@
 
 `flow.loss_reduction` and `flow.pad_loss_weight`/`pad_decay` decide together how the
 batch's per-token cross-entropy becomes one number. This draws, on real train.100
-transcripts and the weights `pl_module.token_weights` actually produces:
+transcripts and the weights `src.flow_matching.token_weights` actually produces:
 
   (a) the weight of a position against its distance from the end of the transcript —
       what `pad_decay` does to the pads.
