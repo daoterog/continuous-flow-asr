@@ -109,6 +109,30 @@ elif [[ -n "${EST_S}" ]]; then
 else
     JOB_S="$(_slurm_seconds "${WALLTIME}")"
 fi
+# An explicit WALLTIME is checked against how long the runs actually are: their epoch count
+# is an explicit train.num_epochs override, else the --run profile's. A hand-written
+# submission once forgot TRAIN_RUN=sweep, got the 300-epoch `full` profile under a 3 h
+# walltime, and was killed at epoch 201 — paid for, and with no usable result.
+if [[ -n "${WALLTIME}" && -z "${WALLTIME_OK}" ]]; then
+    epochs_run="$(echo "${RUNS[0]}" | grep -o 'train.num_epochs=[0-9]*' | cut -d= -f2 || true)"
+    if [[ -z "${epochs_run}" ]]; then
+        epochs_run="$(awk '$1 == "num_epochs:" {print $2}' \
+            "${REPO_DIR}/configs/profiles/run/${TRAIN_RUN:-full}.yaml" || true)"
+    fi
+    if [[ -n "${epochs_run}" ]]; then
+        need_s="$(est_job_seconds "${epochs_run}")"
+        wall_s="$(_slurm_seconds "${WALLTIME}")"
+        echo "epochs    : ${epochs_run} (--run ${TRAIN_RUN:-full}), expected $(fmt_hms "${need_s}")"
+        if ((wall_s < need_s)); then
+            echo "ERROR: WALLTIME ${WALLTIME} is shorter than the expected $(fmt_hms "${need_s}")" >&2
+            echo "       for ${epochs_run} epochs under --run ${TRAIN_RUN:-full}; the run would be cut" >&2
+            echo "       off before it finishes. Raise WALLTIME, set TRAIN_RUN=sweep for a 100-epoch" >&2
+            echo "       screen, or pass WALLTIME_OK=1 if the cut is deliberate." >&2
+            exit 1
+        fi
+    fi
+fi
+
 read -r GPUS CPUS MEM_G <<< "$(job_resources "${#RUNS[@]}")"
 JOB_SBU="$(job_sbu "${JOB_S}" "${#RUNS[@]}")"
 echo "resources : ${GPUS} GPU, ${CPUS} CPUs, ${MEM_G}G -> charged as $(charged_gpus "${#RUNS[@]}") GPUs"

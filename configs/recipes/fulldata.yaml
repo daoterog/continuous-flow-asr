@@ -56,6 +56,13 @@ flow:
   # every real token at the same weight whatever its utterance's length, matching the
   # corpus-level WER the runs are scored on.
   loss_reduction: token
+  # Stage-1 screen (flow-asr-flm-parity, 100 epochs, seed 1): control 17.99 sampled WER,
+  # uniform time 15.17, pad 0.1 14.94. Both adopted.
+  # The denoiser sees the uniform draw u rather than t = tau^-1(u), as FLM and FMLM do.
+  time_input: uniform
+  # Down-weight padding to 0.1 (the stop token's run included); under the token-level
+  # reduction above, every real token keeps the same weight whatever the utterance length.
+  pad_loss_weight: 0.1
 
 train:
   denoiser_lr: 2.0e-3

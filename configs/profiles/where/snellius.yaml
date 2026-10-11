@@ -23,6 +23,11 @@ data:
   # main process's core. A100, batch 128 + prefetch, 2026-10-11: 16 workers 711 utts/s,
   # 17 workers 798 (+12%); a deeper prefetch_factor (4) changed nothing (712).
   num_workers: 17
+  # One ready batch per worker instead of DataLoader's 2. At full latents a batch is ~490 MB,
+  # so 17 workers x 2 kept ~17 GB in flight per run, and with two runs plus the feature cache
+  # a job outgrew its 240G (a stage-1 run was OOM-killed). Speed is unchanged: depth 4 vs 2
+  # measured 712 vs 711 utts/s.
+  prefetch_factor: 1
   # Val, test and the tau probe run under no_grad: 0.645 ms/utt at 512 against 0.836 at 32.
   eval_batch_size: 512
 schedule:
