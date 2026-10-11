@@ -142,12 +142,23 @@ def gpu_trials(at_batch: int, batches: Sequence[int]) -> list[tuple[str, list[st
     return [*ladder, *replay, *prefetch]
 
 
+# The last knobs left after prefetch, each one change from the profile's production setting
+# (batch 128, gpu_prefetch): TF32 for the fp32 tail (the output projection runs outside
+# autocast), and deeper or wider loading against the remaining gap to the on-GPU ceiling.
+TUNE_TRIALS: list[tuple[str, list[str]]] = [
+    ("tune: as is", []),
+    ("tune: matmul high", ["train.matmul_precision=high"]),
+    ("tune: prefetch_factor 4", ["data.prefetch_factor=4"]),
+    ("tune: workers 17", ["data.num_workers=17"]),
+]
+
 SUITES = {
     "laptop": (TRIALS, "configs/linear.yaml"),
     # The recipe, not configs/audio_cond.yaml: it is what cluster runs train (small + micro)
     # and what passes the recipe guard under `--env snellius`.
     "prod": (PROD_TRIALS, "configs/recipes/fulldata.yaml"),
-    "gpu": (None, "configs/recipes/fulldata.yaml"),  # built by gpu_trials(--at-batch, --batches)
+    "gpu": (None, "configs/recipes/fulldata.yaml"),
+    "tune": (TUNE_TRIALS, "configs/recipes/fulldata.yaml"),  # built by gpu_trials(--at-batch, --batches)
     # The recipe, not configs/flow_mapping.yaml directly: `--env snellius` goes through the
     # recipe guard in build_config, and the recipe adds nothing but its own name.
     "distill": (DISTILL_TRIALS, "configs/recipes/distill.yaml"),

@@ -43,6 +43,7 @@ class AudioFeatureDataModule(pl.LightningDataModule):
         pin_memory: bool = False,
         steps_per_epoch: int | None = None,
         gpu_prefetch: bool = False,
+        prefetch_factor: int | None = None,
     ) -> None:
         """Record the configuration; nothing is read off disk until `setup()`.
 
@@ -70,6 +71,7 @@ class AudioFeatureDataModule(pl.LightningDataModule):
         self.steps_per_epoch = steps_per_epoch
         # Copy the next batch to the GPU while the current one trains (CudaPrefetcher).
         self.gpu_prefetch = gpu_prefetch and pin_memory and torch.cuda.is_available()
+        self.prefetch_factor = prefetch_factor
 
         self.datasets: dict[str, Subset] = {}
         self.dirs: dict[str, list[Path]] = {}
@@ -187,6 +189,7 @@ class AudioFeatureDataModule(pl.LightningDataModule):
             pin_memory=self.pin_memory,
             # Only the training loader: val and test must cover their split exactly once.
             steps_per_epoch=self.steps_per_epoch if role == "train" else None,
+            prefetch_factor=self.prefetch_factor,
         )
         return CudaPrefetcher(loader) if self.gpu_prefetch else loader
 

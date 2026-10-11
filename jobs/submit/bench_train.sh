@@ -4,6 +4,7 @@
 #
 #   ./jobs/submit/bench_train.sh                          # submit, if the budget allows
 #   SUITE=prefetch ./jobs/submit/bench_train.sh           # data.gpu_prefetch vs plain, ~15 min
+#   SUITE=tune ./jobs/submit/bench_train.sh               # matmul high, prefetch_factor, workers
 #
 # Expected ~30 min on 2 GPUs: the batch ladder on one, the compute knobs and the eval
 # timing on the other. 2 GPUs is what any job needing 160G is billed for anyway.
@@ -16,7 +17,7 @@ REPO_DIR="$(dirname "$(dirname "${SCRIPT_DIR}")")"
 source "${REPO_DIR}/jobs/common/budget.sh"
 
 # SUITE=prefetch is two trials per GPU, ~15 min; the default gpu suite ~30.
-if [[ "${SUITE:-gpu}" == "prefetch" ]]; then
+if [[ "${SUITE:-gpu}" == "prefetch" || "${SUITE:-gpu}" == "tune" ]]; then
     EXPECTED_S="${EXPECTED_S:-1200}"
 else
     EXPECTED_S="${EXPECTED_S:-1800}"

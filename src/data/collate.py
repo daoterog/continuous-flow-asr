@@ -47,6 +47,7 @@ def make_loader(
     num_workers: int = 4,
     pin_memory: bool = False,
     steps_per_epoch: int | None = None,
+    prefetch_factor: int | None = None,
 ) -> DataLoader:
     """One DataLoader, with the settings shared by every split.
 
@@ -71,6 +72,8 @@ def make_loader(
         collate_fn=collate_fn,
         pin_memory=pin_memory,
         persistent_workers=num_workers > 0,
+        # Batches each worker keeps ready; None is DataLoader's own default (2).
+        prefetch_factor=prefetch_factor if num_workers > 0 else None,
         drop_last=shuffle,  # keeps the step count exact for the scheduler
     )
 

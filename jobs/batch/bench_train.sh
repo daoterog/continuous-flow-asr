@@ -44,6 +44,29 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 # SUITE=prefetch: does copying the next batch while the current one trains
 # (data.gpu_prefetch) close the real-vs-replay gap? GPU 0 times batch 128 with and without
 # it, GPU 1 the on-GPU ceiling at 128 and prefetch at 256 (whether the best batch moves).
+# SUITE=tune: the last knobs, each against the production setting (batch 128 + prefetch).
+if [[ "${SUITE:-gpu}" == "tune" ]]; then
+    IFS=',' read -ra GPU_IDS <<< "${CUDA_VISIBLE_DEVICES:-0,1}"
+    OUT0="bench_gpu_${SLURM_JOB_ID:-local}_0.out"
+    OUT1="bench_gpu_${SLURM_JOB_ID:-local}_1.out"
+    CUDA_VISIBLE_DEVICES="${GPU_IDS[0]}" python -m scripts.diagnostics.bench_train \
+        --suite tune --env snellius --steps "${STEPS}" --n-utts "${N_UTTS}" \
+        --only "tune: as is" "tune: matmul high" > "${OUT0}" 2>&1 &
+    PID0=$!
+    CUDA_VISIBLE_DEVICES="${GPU_IDS[1]:-${GPU_IDS[0]}}" python -m scripts.diagnostics.bench_train \
+        --suite tune --env snellius --steps "${STEPS}" --n-utts "${N_UTTS}" \
+        --only "tune: prefetch_factor 4" "tune: workers 17" > "${OUT1}" 2>&1 &
+    PID1=$!
+    failed=0
+    wait "${PID0}" || failed=1
+    wait "${PID1}" || failed=1
+    for f in "${OUT0}" "${OUT1}"; do
+        echo; echo "=== ${f}"
+        grep -E '^(device|trial|tune:)' "${f}" || tail -20 "${f}"
+    done
+    exit "${failed}"
+fi
+
 if [[ "${SUITE:-gpu}" == "prefetch" ]]; then
     IFS=',' read -ra GPU_IDS <<< "${CUDA_VISIBLE_DEVICES:-0,1}"
     OUT0="bench_gpu_${SLURM_JOB_ID:-local}_0.out"

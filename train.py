@@ -346,6 +346,7 @@ def build_datamodule(cfg: DictConfig) -> AudioFeatureDataModule:
         pin_memory=torch.cuda.is_available(),
         steps_per_epoch=cfg.data.get("steps_per_epoch"),
         gpu_prefetch=bool(cfg.data.get("gpu_prefetch", False)),
+        prefetch_factor=cfg.data.get("prefetch_factor"),
     ).prepare()
 
 
