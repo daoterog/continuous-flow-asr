@@ -11,8 +11,8 @@ from omegaconf import DictConfig, OmegaConf
 from transformers import WhisperTokenizerFast
 
 from src.checkpointing.layout import COMPONENTS
-from src.checkpointing.state_dict import _unwrap
 from src.data import VocabMap
+from src.ema import EMAWeights
 from src.flow import build_tau_scheduler
 from src.flow.coefficients import make_schedule, waypoint_strength
 from src.flow.sampler import sample_tokens, sample_tokens_euler
@@ -22,12 +22,8 @@ from src.metrics.utils import is_binned
 from src.models import build_audio_decoder, build_denoiser
 from src.reporting import MetricReporting
 
-# `sampling.method` selects one of these.
 SAMPLERS = {"interpolant": sample_tokens, "euler": sample_tokens_euler}
-# `flow.time_input` selects what the denoiser's time embedding is fed: the flow time t the
-# interpolant is built at, or the uniform draw u that t = tau^-1(u) came from.
 TIME_INPUTS = ("reparametrized", "uniform")
-# `flow.loss_reduction` selects how per-token cross-entropy becomes the batch objective.
 LOSS_REDUCTIONS = ("sequence", "token")
 
 
@@ -51,7 +47,7 @@ def token_weights(
     return torch.where(is_pad, decayed, torch.ones_like(decayed))
 
 
-class FlowMatching(MetricReporting, pl.LightningModule):
+class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
     """Continuous flow matching over the token simplex, conditioned on Whisper latents.
 
     Everything stays continuous: x1 is the one-hot target read as a point on the simplex,
@@ -141,14 +137,8 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             if self.mu_nn is not None:
                 self.mu_nn = torch.compile(self.mu_nn, mode=mode)
 
-        # An exponential moving average of the weights, which FLM evaluates and samples
-        # with instead of the live ones. None trains and evaluates the live weights only.
-        self.ema_decay = cfg.train.get("ema_decay")
-        if self.ema_decay is not None and not 0.0 < float(self.ema_decay) < 1.0:
-            raise ValueError(f"train.ema_decay must be in (0, 1) or null, got {self.ema_decay}")
-        self._ema: list[torch.Tensor] | None = None  # float32 shadows, one per parameter
-        self._ema_steps = 0
-        self._ema_in_place = False  # True while the shadows are swapped into the model
+        # Validate, sample and save an average of the weights (src/ema.py); None keeps none.
+        self.init_ema(cfg.train.get("ema_decay"))
 
         self.init_metrics(
             ("denoiser", "mu") if self.mu_nn is not None else ("denoiser",),
@@ -268,7 +258,12 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         per_token = F.cross_entropy(
             logits.reshape(-1, vocab_size), tokens.reshape(-1), reduction="none"
         ).view(b, -1)
-        weights = self.token_weights(tokens)
+        weights = token_weights(
+            tokens,
+            self.pad_id,
+            float(self.pad_loss_weight),
+            float(self.cfg.flow.get("pad_decay", 0.0) or 0.0),
+        )
         if weights is None:
             per_seq = per_token.mean(dim=1)
             return per_seq.mean(), per_seq
@@ -277,25 +272,6 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         if self.loss_reduction == "token":
             return weighted.sum() / weights.sum().clamp(min=1e-8), per_seq
         return per_seq.mean(), per_seq
-
-    def token_weights(self, tokens: torch.Tensor) -> torch.Tensor | None:
-        """(B, L) loss weights, or None when every position counts the same.
-
-        Real tokens weigh 1; a pad at distance d into the run weighs
-
-            floor + (1 - floor) * exp(-(d - 1) / pad_decay)
-
-        so the first pad keeps full weight and the tail decays to `flow.pad_loss_weight`
-        (`pad_decay` 0 or null gives that floor flat). The first pad is the whole length
-        decision — a model that never stops scores over 100% WER on insertions — while a
-        pad 150 positions out is free.
-        """
-        return token_weights(
-            tokens,
-            self.pad_id,
-            float(self.pad_loss_weight),
-            float(self.cfg.flow.get("pad_decay", 0.0) or 0.0),
-        )
 
     def draw_u(self, n: int) -> torch.Tensor:
         """(n,) uniform draws, one per row, before tau^-1 turns them into flow times.
@@ -309,7 +285,6 @@ class FlowMatching(MetricReporting, pl.LightningModule):
             return u
         u = (u + torch.arange(n, device=self.device)) / n
         return u[torch.randperm(n, device=self.device)]
-
 
     def make_interpolant(
         self, x1: torch.Tensor, t: torch.Tensor, mu: torch.Tensor | None = None
@@ -334,94 +309,20 @@ class FlowMatching(MetricReporting, pl.LightningModule):
         self.tau_scheduler.observe_mu(self.metrics)
         self.log_mu_accuracy()
 
-    def on_train_batch_end(self, outputs, batch: dict, batch_idx: int) -> None:
-        """Fold the weights the optimizer just stepped into the EMA, when one is kept.
-
-        The decay ramps up as (1 + n) / (10 + n) until it reaches `train.ema_decay`, so the
-        average is not anchored to the random initialisation for its first thousand steps.
-        """
-        super().on_train_batch_end(outputs, batch, batch_idx)
-        if self.ema_decay is None:
-            return
-        live = [p.detach().float() for p in self._ema_params()]
-        if self._ema is None:
-            self._ema = [p.clone() for p in live]
-        self._ema_steps += 1
-        decay = min(float(self.ema_decay), (1 + self._ema_steps) / (10 + self._ema_steps))
-        torch._foreach_lerp_(self._ema, live, 1.0 - decay)
-
-    def _ema_params(self) -> list[torch.nn.Parameter]:
-        """The parameters the EMA tracks: every trained model's, in a fixed order.
-
-        Read off the unwrapped modules: a compiled module shares its parameters with the
-        one it wraps, so this is the same set either way.
-        """
-        models = [m for m in (self.denoiser, self.mu_nn) if m is not None]
-        return [p for m in models for p in _unwrap(m).parameters()]
-
-    def _swap_ema(self) -> None:
-        """Exchange the live weights and the EMA shadows in place; applying it twice undoes it."""
-        with torch.no_grad():
-            for param, shadow in zip(self._ema_params(), self._ema, strict=True):
-                live = param.detach().clone()
-                param.copy_(shadow.to(param.dtype))
-                shadow.copy_(live.float())
-        self._ema_in_place = not self._ema_in_place
-
-    def component_state_dicts(self, name: str) -> tuple[dict, dict | None]:
-        """(weights to save as `name`, the live weights when they differ, else None).
-
-        With an EMA the saved component is the averaged model — the one validation and
-        sampling measured — and the live weights go alongside, for continuing training.
-        Correct whichever way round the weights are at the moment of saving.
-        """
-        model = _unwrap(getattr(self, name))
-        current = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-        if self._ema is None:
-            return current, None
-        index = {id(p): i for i, p in enumerate(self._ema_params())}
-        other = dict(current)
-        for key, param in model.named_parameters():
-            other[key] = self._ema[index[id(param)]].to(param.dtype).cpu().clone()
-        # `current` is whatever sits in the model now; `other` is what the shadows hold.
-        return (current, other) if self._ema_in_place else (other, current)
-
-    def on_save_checkpoint(self, checkpoint: dict) -> None:
-        """Keep the EMA in a Lightning checkpoint, so a resumed run continues the average."""
-        if self._ema is not None:
-            checkpoint["ema"] = {
-                "shadows": [t.cpu() for t in self._ema],
-                "steps": self._ema_steps,
-                "in_place": self._ema_in_place,
-            }
-
-    def on_load_checkpoint(self, checkpoint: dict) -> None:
-        """Restore the EMA a checkpoint carried; the shadows move to the model's device."""
-        ema = checkpoint.get("ema")
-        if ema is not None:
-            device = self._ema_params()[0].device
-            self._ema = [t.to(device) for t in ema["shadows"]]
-            self._ema_steps = int(ema["steps"])
-            self._ema_in_place = bool(ema["in_place"])
-
     def on_validation_epoch_start(self) -> None:
-        """Clear the val accumulators, and evaluate the EMA weights when one is kept."""
+        """Clear the val accumulators before the pass fills them."""
         super().on_validation_epoch_start()
         self.reset_metrics("val")
-        if self._ema is not None and not self._ema_in_place:
-            self._swap_ema()
 
     def validation_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
         """One validation batch."""
         return self._step(batch, "val")
 
     def on_validation_epoch_end(self) -> None:
-        """Flush the val metrics, sample from noise, then put the live weights back."""
+        """Flush the val metrics, then sample from noise."""
         super().on_validation_epoch_end()
         self.log_metrics("val")
         self.log_sampled()
-        if self._ema_in_place:
-            self._swap_ema()
 
     def on_test_start(self) -> None:
         """Same, for a `trainer.test()` that did not go through `fit`."""
