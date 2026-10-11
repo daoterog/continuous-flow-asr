@@ -19,9 +19,10 @@ data:
   # CudaPrefetcher). A100, batch 128, 2026-10-11: plain 643 utts/s, prefetch 736 (1.14x),
   # the same batch held on the GPU 916. Batches are bit-identical either way.
   gpu_prefetch: true
-  # Measured on the node: 849 -> 952 -> 1058 utts/s at 4 -> 8 -> 16 workers. A packed job
-  # (jobs/batch/train.sh) splits these between its runs.
-  num_workers: 16
+  # Every run has its own 18 cores (jobs/batch/train.sh), so 17 workers leaves exactly the
+  # main process's core. A100, batch 128 + prefetch, 2026-10-11: 16 workers 711 utts/s,
+  # 17 workers 798 (+12%); a deeper prefetch_factor (4) changed nothing (712).
+  num_workers: 17
   # Val, test and the tau probe run under no_grad: 0.645 ms/utt at 512 against 0.836 at 32.
   eval_batch_size: 512
 schedule:
@@ -35,6 +36,10 @@ train:
   # bf16 runs only with bf16 runs.
   compile: true
   precision: bf16-mixed
+  # TF32 for the matmuls autocast leaves in fp32 — mainly the output projection, which DRAX
+  # keeps out of autocast. Same benchmark: highest 711 utts/s, high 755 (+6%). TF32 only
+  # shortens the matmul inputs' mantissa; the accumulation and the outputs stay fp32.
+  matmul_precision: high
 metrics:
   # Off for train: decoding 2 x 128 transcripts and scoring WER on every step costs
   # 68.6 ms of CPU against 0.5 ms without it, ~15 s of a ~77 s epoch with the GPU idle.

@@ -12,15 +12,16 @@ GPUs**. Jobs therefore carry two runs, each on its own GPU, for the price of one
 
 Cluster runs train `configs/recipes/fulldata.yaml` (denoiser small + mu micro, full
 1500-frame latents) under the snellius profile: compile + bf16, batch 128, the next batch
-prefetched to the GPU, validation and probing every 10 epochs. Measured on the A100
-(2026-10-11) that is ~600–736 utts/s, ~48 s per epoch on a slow node.
+prefetched to the GPU, 17 loader workers, TF32 matmuls, validation and probing every 10
+epochs. Measured on the A100 (2026-10-11) that is ~710–840 utts/s, ~45 s per epoch on a
+slow node.
 
 | tier | epochs | seeds | runs per job (one GPU each) | expected per job | use |
 |---|---|---|---|---|---|
-| `screen` | 100 | 1 | 2 | ~384 SBU | the default: rank the arms |
-| `confirm` | 300 | 2 | 2 (the seeds share a job) | ~1,067 SBU | only the screen's winner(s) |
+| `screen` | 100 | 1 | 2 | ~363 SBU | the default: rank the arms |
+| `confirm` | 300 | 2 | 2 (the seeds share a job) | ~1,003 SBU | only the screen's winner(s) |
 
-These rest on `SEC_PER_EPOCH=48` in `common/budget.sh`. Re-set it from a screen's real
+These rest on `SEC_PER_EPOCH=45` in `common/budget.sh`. Re-set it from a screen's real
 epoch times if they differ.
 
 A screen carries its own control: a 100-epoch run is only comparable to another one.

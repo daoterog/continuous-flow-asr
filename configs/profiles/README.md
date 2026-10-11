@@ -27,7 +27,8 @@ beats everything.
 | `data.audio_stride` | 4 | 1 | full 1500-frame latents on the cluster, always; pooling is a laptop-only shortcut |
 | `data.batch_size` | base's 32 | 128 | the knee of the stride-1 ladder for small + micro (96% of the best), and skilled-lake-22's batch, so lr 2e-3 carries over |
 | `data.gpu_prefetch` | (off) | true | copy the next ~490 MB batch while the current one trains: 643 → 736 utts/s |
-| `data.num_workers` | 4 | 16 | 6-core laptop vs 18-CPU allocation (a packed job splits them) |
+| `data.num_workers` | 4 | 17 | 6-core laptop vs 18 cores per run; the 17th worker measured +12% |
+| `train.matmul_precision` | highest | high | TF32 for the fp32 output projection: +6% on the A100 |
 | `data.eval_batch_size` | null | 512 | 6 GB vs 40 GB card |
 | `schedule.probe_n_utts` | 2048 | 8192 | probe cost vs precision |
 | `train.compile` | false | true | 129.9 → 98.7 ms/step on the A100; warmup wasted on short local runs |
