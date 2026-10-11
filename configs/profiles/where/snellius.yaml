@@ -15,6 +15,10 @@ data:
   # LR carries over. Replaying one on-GPU batch reached 742 utts/s at 128: the remaining
   # ~30% goes to moving ~490 MB of latents per step, not to the GPU.
   batch_size: 128
+  # Copy the next batch to the GPU while the current one trains (src/data/collate.py,
+  # CudaPrefetcher). A100, batch 128, 2026-10-11: plain 643 utts/s, prefetch 736 (1.14x),
+  # the same batch held on the GPU 916. Batches are bit-identical either way.
+  gpu_prefetch: true
   # Measured on the node: 849 -> 952 -> 1058 utts/s at 4 -> 8 -> 16 workers. A packed job
   # (jobs/batch/train.sh) splits these between its runs.
   num_workers: 16

@@ -47,6 +47,16 @@ model:
     n_blocks: 1
     dropout: 0.0
 
+flow:
+  # One t draw per 1/B slice of the batch instead of B independent ones: same expected
+  # objective, lower variance, no cost (FLM's "antithetic" sampling, which is stratified).
+  stratified_t: true
+  # One weighted mean over every token in the batch. Identical to `sequence` at
+  # pad_loss_weight 1.0 (every row is canvas_len long); once pads are down-weighted it keeps
+  # every real token at the same weight whatever its utterance's length, matching the
+  # corpus-level WER the runs are scored on.
+  loss_reduction: token
+
 train:
   denoiser_lr: 2.0e-3
   audio_decoder_lr: 1.0e-3

@@ -25,7 +25,8 @@ beats everything.
 |---|---|---|---|
 | `data.env` | local | snellius | data root |
 | `data.audio_stride` | 4 | 1 | full 1500-frame latents on the cluster, always; pooling is a laptop-only shortcut |
-| `data.batch_size` | base's 32 | base's 32, until the stride-1 ladder for small + micro sets it | the stride-4 knee (256) does not carry over |
+| `data.batch_size` | base's 32 | 128 | the knee of the stride-1 ladder for small + micro (96% of the best), and skilled-lake-22's batch, so lr 2e-3 carries over |
+| `data.gpu_prefetch` | (off) | true | copy the next ~490 MB batch while the current one trains: 643 → 736 utts/s |
 | `data.num_workers` | 4 | 16 | 6-core laptop vs 18-CPU allocation (a packed job splits them) |
 | `data.eval_batch_size` | null | 512 | 6 GB vs 40 GB card |
 | `schedule.probe_n_utts` | 2048 | 8192 | probe cost vs precision |

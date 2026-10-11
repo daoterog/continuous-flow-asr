@@ -25,10 +25,11 @@ SBU_PER_GPU_HOUR="${SBU_PER_GPU_HOUR:-128}"
 CPUS_PER_RUN=18
 MEM_PER_RUN_G=120
 MEM_MIN_G=160
-# The fulldata recipe (small + micro, full latents) at batch 128 on the A100: 28.5k utts at
-# 525 utts/s is ~54 s of training, plus ~3.3 s of evaluation amortised at every-10-epoch
-# validation and probing (10.7 s + 22.2 s, A100 benchmark 2026-10-11).
-SEC_PER_EPOCH="${SEC_PER_EPOCH:-58}"
+# The fulldata recipe (small + micro, full latents) at batch 128 with gpu_prefetch on the
+# A100: 736 utts/s on one node, but the plain loader ran 643 there against 525 on another,
+# so this assumes the slower node (~600 utts/s, ~48 s of training per 28.5k-utterance epoch)
+# plus ~3.3 s of evaluation amortised at every-10-epoch validation and probing.
+SEC_PER_EPOCH="${SEC_PER_EPOCH:-48}"
 # Startup, the tau build, compile's warmup, the cold first epochs off GPFS.
 JOB_OVERHEAD_S="${JOB_OVERHEAD_S:-600}"
 
