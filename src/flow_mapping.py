@@ -3,12 +3,7 @@
 The one-time model answers "given the state at t, what is the endpoint" and has to be
 integrated over many steps. A two-time model answers "given the state at s, what is the
 endpoint if I jump straight to t", so in principle one evaluation replaces the whole
-integration. On the teacher measured in stage 0 that is a 51.75 -> 18.16 WER gap between one
-step and sixteen, and closing it is the entire point of this module.
-
-Follows FMLM's PSD formulation (`src/models/fmlm/algo.py`, the `FMLM` class). The student is
-the teacher plus one extra time embedder, zero-initialised, so it *starts* as the teacher and
-learns only the dependence on where it is jumping to.
+integration.
 """
 
 
@@ -92,6 +87,8 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         self.mu_nn: torch.nn.Module | None = None
         self.two_time_denoiser: torch.nn.Module | None = None
         self.time_reparam: TimeReparametrization | None = None
+        self.stratified_t = bool(cfg.flow.get("stratified_t", False))
+
         manifest, saved_tau = self.load_models()
         distill = cfg.distill
 
@@ -240,7 +237,6 @@ class FlowMapping(MetricReporting, pl.LightningModule):
 
     def map_step(self, batch: dict) -> tuple[torch.Tensor, dict]:
         """One PSD distillation step."""
-
         audio = batch["audio"].float()
         tokens = batch["tokens"]
         x1 = F.one_hot(tokens, self.vocab_size).float()
@@ -363,11 +359,11 @@ class FlowMapping(MetricReporting, pl.LightningModule):
         """Draw an interval in uniform space, then map its three points to flow time."""
         groups = self.assign_groups(batch_size)
 
-        gap = torch.rand(batch_size, device=self.device)
-        u_start = torch.rand(batch_size, device=self.device) * (1.0 - gap)
+        gap = self.draw_u(batch_size)
+        u_start = self.draw_u(batch_size) * (1.0 - gap)
         u_end = u_start + gap
 
-        u_diagonal = torch.rand(batch_size, device=self.device)
+        u_diagonal = self.draw_u(batch_size)
         u_start = torch.where(groups == 0, u_diagonal, u_start)
         u_end = torch.where(groups == 0, u_diagonal, u_end)
         u_start = torch.where(groups == 1, torch.zeros_like(u_start), u_start)
@@ -412,6 +408,19 @@ class FlowMapping(MetricReporting, pl.LightningModule):
             torch.tensor(counts, device=self.device),
         )
         return groups[torch.randperm(batch_size, device=self.device)]
+
+    def draw_u(self, n: int) -> torch.Tensor:
+        """(n,) uniform draws in [0, 1), one per row, before tau^-1 maps them to flow time.
+
+        `flow.stratified_t` puts exactly one draw in each slice [i/n, (i+1)/n), shuffled
+        across rows — FMLM's `antithetic_sampling` (algo.py:866), which is stratified
+        sampling rather than antithetic: antithetic would pair u with 1-u.
+        """
+        u = torch.rand(n, device=self.device)
+        if not self.stratified_t:
+            return u
+        u = (u + torch.arange(n, device=self.device)) / n
+        return u[torch.randperm(n, device=self.device)]
 
     def make_interpolant(
         self, x1: torch.Tensor, t: torch.Tensor, mu: torch.Tensor | None = None
