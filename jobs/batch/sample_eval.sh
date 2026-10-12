@@ -23,8 +23,10 @@
 # under the schedule it was actually trained with.
 #
 # Optional env vars:
-#   EVAL_CONFIG   — YAML for the data pipeline (default configs/audio_cond.yaml). Only the
-#                   data side is used: geometry and the flow come from the run's manifest.
+#   EVAL_CONFIG   — YAML for the data pipeline (default configs/recipes/fulldata.yaml).
+#                   Only the data side is used: geometry and the flow come from the run's
+#                   manifest. A recipe, because train.build_config refuses anything else
+#                   once data.env=snellius.
 #   EVAL_ROLE     — train | val | test        (default val)
 #   EVAL_STEPS    — step counts to try        (default "1 2 4 8 16 32 64 128")
 #   EVAL_VARIANT  — best | final              (default best)
@@ -54,7 +56,7 @@ if [[ -n "${COMPONENTS}" && -n "${CKPT}" ]]; then
     echo "ERROR: set COMPONENTS or CKPT, not both" >&2
     exit 1
 fi
-EVAL_CONFIG="${EVAL_CONFIG:-configs/audio_cond.yaml}"
+EVAL_CONFIG="${EVAL_CONFIG:-configs/recipes/fulldata.yaml}"
 EVAL_ROLE="${EVAL_ROLE:-val}"
 EVAL_STEPS="${EVAL_STEPS:-1 2 4 8 16 32 64 128}"
 EVAL_VARIANT="${EVAL_VARIANT:-best}"

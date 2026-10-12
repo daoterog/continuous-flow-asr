@@ -324,10 +324,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "val": dm.val_dataloader,
         "test": dm.test_dataloader,
     }[args.role]()
-    batches = [
-        {"audio": b["audio"].to(device).float(), "tokens": b["tokens"].to(device)}
-        for b in loader
-    ]
+    # Held on the host and moved one batch at a time: at full latents the val split is
+    # ~10 GB in fp16, twice that once cast up, which alone would fill a MIG slice.
+    batches = [{"audio": b["audio"], "tokens": b["tokens"]} for b in loader]
     n_utts = sum(b["tokens"].size(0) for b in batches)
     source = args.components or args.ckpt
     print(f"{source}\n  variant {cfg.get('variant')}  role {args.role}  "
@@ -340,10 +339,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         for num_steps in args.steps:
             preds, refs = [], []
             for batch in batches:
-                preds.append(
-                    model.sample(batch["audio"], num_steps, hard=args.hard, method=method)
-                )
-                refs.append(batch["tokens"])
+                audio = batch["audio"].to(device).float()
+                preds.append(model.sample(audio, num_steps, hard=args.hard, method=method))
+                refs.append(batch["tokens"].to(device))
             pred, ref = torch.cat(preds), torch.cat(refs)
             wer, token_error = score_samples(
                 pred, ref, dm.tokenizer, dm.pad_id, dm.vocab_map
