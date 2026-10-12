@@ -359,51 +359,22 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
         """Clear the val accumulators before the pass fills them."""
         super().on_validation_epoch_start()
         self.reset_metrics("val")
-        self._audio_only = torch.zeros(3, device=self.device)
+        if self.mu_nn is not None:
+            self.reset_audio_only()
 
     def validation_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
         """One validation batch, plus the denoiser's audio-only read of it."""
         loss = self._step(batch, "val")
-        self._audio_only += self.audio_only_hits(batch)
+        if self.mu_nn is not None:
+            self.update_audio_only(batch)
         return loss
-
-    @torch.no_grad()
-    def audio_only_hits(self, batch: dict) -> torch.Tensor:
-        """(hits with mu, hits with mu replaced by 1/V, real tokens) at t = 0.
-
-        At t=0 the field holds no data term at all, so whatever the denoiser recovers it
-        read off the audio: through its own cross-attention, plus whatever mu's softmax
-        shows through the noise. The binned metrics cannot isolate this — their lowest bin
-        spans up to t~0.5, where x_t already carries some of the target. Swapping mu for
-        the uniform vector takes mu's share out, which leaves the cross-attention alone.
-        """
-        audio, tokens = batch["audio"].float(), batch["tokens"]
-        real = tokens != self.pad_id
-        t = torch.zeros(tokens.size(0), device=self.device)
-        time = self.time_reparam.u_of(t) if self.time_input == "uniform" else t
-        noise = self.alpha_fn(t)[:, None, None] * torch.randn(
-            *tokens.shape, self.vocab_size, device=self.device
-        )
-        priors = [torch.full_like(noise, 1.0 / self.vocab_size)]
-        if self.mu_nn is not None and self.gamma_fn is not None:
-            priors.insert(0, F.softmax(self.mu_nn(audio), dim=-1))
-        hits = []
-        for prior in priors:
-            x_t = noise + self.gamma_fn(t)[:, None, None] * prior if self.gamma_fn else noise
-            pred = self.denoiser(x_t=x_t, time=time, audio_embeddings=audio).argmax(-1)
-            hits.append(((pred == tokens) & real).sum())
-        if len(hits) == 1:  # no mu in this run: the two readings are one
-            hits.insert(0, hits[0])
-        return torch.stack([*hits, real.sum()]).float()
 
     def on_validation_epoch_end(self) -> None:
         """Flush the val metrics, then sample from noise."""
         super().on_validation_epoch_end()
         self.log_metrics("val")
-        with_mu, without_mu, reals = self._audio_only.tolist()
-        if reals > 0:
-            self.log("audio_only/val_recovery", with_mu / reals)
-            self.log("audio_only/val_recovery_no_mu", without_mu / reals)
+        if self.mu_nn is not None:
+            self.log_audio_only()
         self.log_sampled()
 
     def on_test_start(self) -> None:

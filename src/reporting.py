@@ -12,6 +12,7 @@ reach for a `SamplingProbe` or the `TauScheduler` while the metrics package may 
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import wandb
 from lightning.pytorch.loggers import WandbLogger
 from torch import nn
@@ -211,6 +212,48 @@ class MetricReporting:
                     key = f"sampled_{method}_{n}" + ("" if grid == "live" else f"_{grid}")
                     self.log(f"{key}/wer", wer, batch_size=n_utts)
                     self.log(f"{key}/perr", token_error, batch_size=n_utts)
+
+    def reset_audio_only(self) -> None:
+        """Clear the audio-only tally: (hits with mu, hits with a uniform prior, real tokens)."""
+        self._audio_only = torch.zeros(3, device=self.device)
+
+    @torch.no_grad()
+    def update_audio_only(self, batch: dict) -> None:
+        """Add one batch to the denoiser's audio-only tally at t = 0.
+
+        At t=0 the field holds no data term at all, so whatever the denoiser recovers it
+        read off the audio: through its own cross-attention, plus whatever mu's softmax
+        shows through the noise. The binned metrics cannot isolate this — their lowest bin
+        spans up to t~0.5, where x_t already carries some of the target. Swapping mu for
+        the uniform vector takes mu's share out, which leaves the cross-attention alone.
+
+        The time input is 0 under either `flow.time_input`: every curve a run holds has
+        u(0) = 0, since `exact` and `MeasuredTau` normalise tau by the error at t=0.
+        """
+        audio, tokens = batch["audio"].float(), batch["tokens"]
+        real = tokens != self.pad_id
+
+        t0 = torch.zeros(tokens.size(0), device=self.device)
+        noise = self.alpha_fn(t0)[:, None, None] * torch.randn(
+            *tokens.shape, self.vocab_size, device=self.device
+        )
+        # A mu that knows nothing: the field at t=0 then carries no hint at all.
+        uniform = torch.full_like(noise, 1.0 / self.vocab_size)
+        mu = F.softmax(self.mu_nn(audio), dim=-1)
+
+        hits = []
+        for prior in (mu, uniform):
+            x_0 = noise + self.gamma_fn(t0)[:, None, None] * prior
+            pred = self.denoiser(x_t=x_0, time=t0, audio_embeddings=audio).argmax(-1)
+            hits.append(((pred == tokens) & real).sum())
+        self._audio_only += torch.stack([*hits, real.sum()]).float()
+
+    def log_audio_only(self) -> None:
+        """Log the tally as `audio_only/val_recovery` and `.../val_recovery_no_mu`."""
+        with_mu, without_mu, reals = self._audio_only.tolist()
+        if reals > 0:
+            self.log("audio_only/val_recovery", with_mu / reals)
+            self.log("audio_only/val_recovery_no_mu", without_mu / reals)
 
     def log_tau_shape(self, reparam: TimeReparametrization) -> None:
         """Record what a schedule actually draws, not just where it starts.
