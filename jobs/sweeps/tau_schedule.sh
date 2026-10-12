@@ -27,6 +27,11 @@
 #                                           uniform prior in mu's place), so they must be
 #                                           solved from the field: text modelling
 #   adroplin<p>                             the same at p * t: more often nearer the text
+#   draft<p>   train.draft_corruption       a share p of real tokens in the field swapped
+#                                           for random ones, the loss still on the truth:
+#                                           the denoiser learns to correct the field
+#   draftmu<p>                              the same, swapped for samples from mu: the
+#                                           acoustically plausible errors a draft makes
 #
 # Arms join knobs with `+` (sigma0.5+floor0.1); `control` is the recipe as is.
 #
@@ -84,6 +89,8 @@ knob_override() {
         sigma*)  echo "flow.alpha={\"type\":\"linear_down\",\"scale\":${1#sigma}}" ;;
         drop*)   echo "model.denoiser.dropout=${1#drop}" ;;
         wd*)     echo "train.weight_decay=${1#wd}" ;;
+        draftmu*) echo "train.draft_corruption={\"p\":${1#draftmu},\"source\":\"mu\"}" ;;
+        draft*)  echo "train.draft_corruption={\"p\":${1#draft},\"source\":\"uniform\"}" ;;
         adroplin*) echo "train.audio_dropout={\"p\":${1#adroplin},\"schedule\":\"linear\"}" ;;
         adrop*)  echo "train.audio_dropout={\"p\":${1#adrop},\"schedule\":\"constant\"}" ;;
         mask)    echo "train.audio_mask={\"time_masks\":2,\"time_width\":0.1,\"feature_masks\":2,\"feature_width\":0.1}" ;;

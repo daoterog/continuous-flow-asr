@@ -15,7 +15,7 @@ from transformers import WhisperTokenizerFast
 
 from src.checkpointing.layout import COMPONENTS
 from src.data import VocabMap
-from src.data.augment import audio_drop, mask_latents
+from src.data.augment import audio_drop, corrupt_draft, mask_latents
 from src.ema import EMAWeights
 from src.flow import build_tau_scheduler
 from src.flow.coefficients import make_schedule, waypoint_strength
@@ -274,13 +274,24 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
         t = self.time_reparam.t_of(u)
 
         heard, prior = audio, mu
-        dropped = audio_drop(t, self.cfg.train.get("audio_dropout")) if self.training else None
-        if dropped is not None:
+        audio_dropout = self.cfg.train.get("audio_dropout") or {}
+        if self.training and audio_dropout.get("p", 0.0) > 0.0:
+            dropped = audio_drop(t, self.cfg.train.get("audio_dropout"))
             heard = audio * (~dropped)[:, None, None]
             if mu is not None:
                 uniform = torch.full_like(mu, 1.0 / self.vocab_size)
                 prior = torch.where(dropped[:, None, None], uniform, mu)
-        i_t = self.make_interpolant(x1=x1, t=t, mu=prior)
+
+        field_x1 = x1
+        if self.training:
+            field_x1 = corrupt_draft(
+                x1,
+                t,
+                tokens != self.pad_id,
+                self.cfg.train.get("draft_corruption"),
+                mu_logits=mu_logits if self.mu_nn is not None else None,
+            )
+        i_t = self.make_interpolant(x1=field_x1, t=t, mu=prior)
 
         # `uniform` hands the denoiser the draw itself, as FLM does: at large V the t that
         # matters sits in a narrow band near 1, where a sinusoidal embedding barely moves.

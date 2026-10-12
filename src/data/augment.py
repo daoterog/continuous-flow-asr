@@ -1,6 +1,7 @@
 """Training-time augmentation of the audio latents."""
 
 import torch
+import torch.nn.functional as F
 from omegaconf import DictConfig
 
 
@@ -35,6 +36,60 @@ def mask_latents(audio: torch.Tensor, spec: DictConfig | dict | None) -> torch.T
             span = (pos >= start) & (pos < start + w)  # (b, size)
             keep &= ~(span[:, :, None] if axis == 1 else span[:, None, :])
     return audio * keep
+
+
+def corrupt_draft(
+    x1: torch.Tensor,
+    t: torch.Tensor,
+    real: torch.Tensor,
+    spec: DictConfig | dict | None,
+    mu_logits: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """The one-hot transcript the field is built from, some real tokens swapped for wrong ones.
+
+    `train.draft_corruption`, e.g. {p: 0.1, source: mu}: each real token is replaced with
+    probability p, or p * (1 - t) under `schedule: decreasing`, since a draft is worse the
+    earlier it is. Only the field sees the swap; the loss still targets the true transcript.
+
+    In training the field only ever holds the true transcript plus Gaussian noise, while at
+    sampling time it holds the model's own draft, errors included. So the denoiser never
+    learns to doubt the field, or to correct it from the audio and the words around it,
+    which is what the late steps are for. The wrong tokens come from:
+
+      uniform   any token. Easy to spot: a random token out of ~1,200 rarely fits the
+                audio or its neighbours.
+      mu        a sample from mu's softmax. mu reads the same audio, so its wrong guesses
+                are the plausible confusions for this utterance — similar-sounding words,
+                another subword split — the kind a draft makes, at no extra forward pass.
+                A sample can land on the true token, so the rate of actual errors is below
+                p, by mu's probability on the target (~0.35).
+    """
+    if not spec or float(spec.get("p", 0.0)) <= 0.0:
+        return x1
+    p = float(spec["p"])
+    schedule = str(spec.get("schedule", "constant"))
+    if schedule == "constant":
+        prob = torch.full_like(t, p)
+    elif schedule == "decreasing":
+        prob = p * (1.0 - t)
+    else:
+        raise ValueError(
+            f"train.draft_corruption.schedule must be constant or decreasing, got {schedule!r}"
+        )
+    hit = (torch.rand(real.shape, device=real.device) < prob[:, None]) & real
+
+    source = str(spec.get("source", "uniform"))
+    if source == "uniform":
+        wrong = F.one_hot(
+            torch.randint(0, x1.size(-1), real.shape, device=real.device), x1.size(-1)
+        ).to(x1.dtype)
+    elif source == "mu":
+        if mu_logits is None:
+            raise ValueError("train.draft_corruption.source=mu needs a run with mu")
+        wrong = F.gumbel_softmax(mu_logits.detach().float(), hard=True).to(x1.dtype)
+    else:
+        raise ValueError(f"train.draft_corruption.source must be uniform or mu, got {source!r}")
+    return torch.where(hit[..., None], wrong, x1)
 
 
 def audio_drop(t: torch.Tensor, spec: DictConfig | dict | None) -> torch.Tensor | None:
