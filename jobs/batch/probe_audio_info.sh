@@ -20,6 +20,8 @@
 #   PROBE_N_UTTS     — utterances per role               (default 4096)
 #   PROBE_ROLES      — roles to probe                    (default "train val")
 #   PROBE_VARIANT    — best | final                      (default best)
+#   PROBE_BATCH      — utterances per forward pass       (default 64; 16 on a gpu_mig
+#                      slice, whose ~20 GB does not hold 64 of full latents in fp32)
 #   PROBE_OUT        — output dir   (default figures/audio_info/<run id>)
 #   PROBE_OVERRIDES  — dotlist overrides on top of the run's own config
 
@@ -37,11 +39,12 @@ RUN_ID="$(basename "$(dirname "${COMPONENTS}")")"
 PROBE_N_UTTS="${PROBE_N_UTTS:-4096}"
 PROBE_ROLES="${PROBE_ROLES:-train val}"
 PROBE_VARIANT="${PROBE_VARIANT:-best}"
+PROBE_BATCH="${PROBE_BATCH:-64}"
 PROBE_OUT="${PROBE_OUT:-figures/audio_info/${RUN_ID}}"
 PROBE_OVERRIDES="${PROBE_OVERRIDES:-}"
 
 echo "components: ${COMPONENTS}   variant ${PROBE_VARIANT}"
-echo "roles     : ${PROBE_ROLES}   ${PROBE_N_UTTS} utterances each"
+echo "roles     : ${PROBE_ROLES}   ${PROBE_N_UTTS} utterances each, batch ${PROBE_BATCH}"
 echo "out       : ${PROBE_OUT}"
 echo "node      : $(hostname)"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
@@ -52,5 +55,6 @@ srun python -m scripts.diagnostics.probe_audio_info \
     --variant "${PROBE_VARIANT}" \
     --roles ${PROBE_ROLES} \
     --n-utts "${PROBE_N_UTTS}" \
+    --batch-size "${PROBE_BATCH}" \
     --out "${PROBE_OUT}" \
     data.env=snellius ${PROBE_OVERRIDES}

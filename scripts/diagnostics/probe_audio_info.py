@@ -10,6 +10,18 @@ taken apart one at a time:
   field             argmax of x_t itself, with the real mu: what a closed-form tau assumes
   mu                mu's own argmax, and how peaked its softmax is
 
+and two that take the audio away from the denoiser, at every t, keeping the real mu:
+
+  denoiser, wrong audio   another utterance's latents (the batch rolled by one): the same
+                          kind of input, in distribution, carrying the wrong words
+  gap fill                recovery only on the positions the field's own argmax gets wrong,
+                          with the real audio and with the wrong one
+
+At high t the field alone recovers nearly everything, so the audio mattering less there
+says nothing about the model. The gaps are what it has to supply itself: if the wrong audio
+wrecks them, it fills them from the audio; if they survive, from the transcript around
+them — the language-model behaviour the late steps of sampling are meant to rely on.
+
 The last block answers a question the closed form cannot: `TimeReparametrization.exact`
 treats mu as one-hot, a full +1 on its predicted token, while the real mu is a softmax.
 `field @ sigma` reads x_0 = mu + sigma * eps with the real mu for a few sigma, which is
@@ -85,6 +97,7 @@ def probe(model: FlowMatching, loader: Iterable[dict], n_utts: int, seed: int) -
     peak, on_target = 0.0, 0.0
     copies: dict[float, float] = {}
     copies_den = 0.0
+    gaps: dict[str, float] = {}
     gen = torch.Generator(device=model.device).manual_seed(seed)
     seen = 0
     for batch in loader:
@@ -128,12 +141,30 @@ def probe(model: FlowMatching, loader: Iterable[dict], n_utts: int, seed: int) -
                     copies[t] = copies.get(t, 0.0) + float(
                         ((pred == wrong.argmax(-1)) & misleading).sum()
                     )
-            tally.add(f"field t={t}", (a * eps + b * x1 + g * mu).argmax(-1), tokens, real)
+            field = (a * eps + b * x1 + g * mu).argmax(-1)
+            tally.add(f"field t={t}", field, tokens, real)
+
+            x_t = a * eps + b * x1 + g * mu
+            gap = real & (field != tokens)
+            gaps[f"gap t={t}"] = gaps.get(f"gap t={t}", 0.0) + float(gap.sum())
+            for name, heard in (("real audio", audio), ("wrong audio", audio.roll(1, dims=0))):
+                pred = model.denoiser(x_t=x_t, time=time, audio_embeddings=heard).argmax(-1)
+                if name == "wrong audio":
+                    tally.add(f"denoiser wrong audio t={t}", pred, tokens, real)
+                key = f"gap fill {name} t={t}"
+                gaps[key] = gaps.get(key, 0.0) + float(((pred == tokens) & gap).sum())
     out = tally.recovery()
     out["mu peak prob"] = peak / tally.reals
     out["mu prob on target"] = on_target / tally.reals
     for t, n in copies.items():
         out[f"copies wrong mu t={t}"] = n / max(copies_den, 1.0)
+    for t in TS:
+        for name in ("real audio", "wrong audio"):
+            # nan where the field left no gaps at all, rather than a 0 that reads as a result.
+            n_gaps = gaps[f"gap t={t}"]
+            out[f"gap fill {name} t={t}"] = (
+                gaps[f"gap fill {name} t={t}"] / n_gaps if n_gaps else float("nan")
+            )
     return out
 
 
@@ -152,6 +183,9 @@ def report(results: dict[str, dict[str, float]], out: Path) -> None:
                 "denoiser no mu",
                 "denoiser wrong mu",
                 "copies wrong mu",
+                "denoiser wrong audio",
+                "gap fill real audio",
+                "gap fill wrong audio",
                 "field",
             )
             for r in roles
@@ -167,6 +201,9 @@ def report(results: dict[str, dict[str, float]], out: Path) -> None:
                     "denoiser no mu",
                     "denoiser wrong mu",
                     "copies wrong mu",
+                    "denoiser wrong audio",
+                    "gap fill real audio",
+                    "gap fill wrong audio",
                     "field",
                 )
                 for r in roles
@@ -181,7 +218,12 @@ def report(results: dict[str, dict[str, float]], out: Path) -> None:
 
     fig, ax = plt.subplots(figsize=(7, 4.5))
     for r, ls in zip(roles, ("-", "--", ":"), strict=False):
-        for name, color in (("denoiser", "C0"), ("denoiser no mu", "C1"), ("field", "C2")):
+        for name, color in (
+            ("denoiser", "C0"),
+            ("denoiser no mu", "C1"),
+            ("denoiser wrong audio", "C4"),
+            ("field", "C2"),
+        ):
             ax.plot(
                 TS,
                 [results[r][f"{name} t={t}"] for t in TS],
