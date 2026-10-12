@@ -83,6 +83,8 @@ def probe(model: FlowMatching, loader: Iterable[dict], n_utts: int, seed: int) -
     """Every reading at every t in `TS`, over the first `n_utts` utterances of `loader`."""
     tally = Tally()
     peak, on_target = 0.0, 0.0
+    copies: dict[float, float] = {}
+    copies_den = 0.0
     gen = torch.Generator(device=model.device).manual_seed(seed)
     seen = 0
     for batch in loader:
@@ -100,6 +102,10 @@ def probe(model: FlowMatching, loader: Iterable[dict], n_utts: int, seed: int) -
         peak += float(mu.max(-1).values[real].sum())
         on_target += float(mu.gather(-1, tokens[..., None]).squeeze(-1)[real].sum())
         flat = torch.full_like(mu, 1.0 / model.vocab_size)
+        # Another utterance's mu: as confident as the real one, and wrong.
+        wrong = mu.roll(1, dims=0)
+        misleading = real & (wrong.argmax(-1) != tokens)
+        copies_den += float(misleading.sum())
 
         eps = torch.randn(x1.shape, device=x1.device, generator=gen)
         for sigma in SIGMAS:
@@ -110,14 +116,24 @@ def probe(model: FlowMatching, loader: Iterable[dict], n_utts: int, seed: int) -
             time = model.time_reparam.u_of(tt) if model.time_input == "uniform" else tt
             a, b = model.alpha_fn(t), model.beta_fn(t)
             g = model.gamma_fn(t) if model.gamma_fn is not None else 0.0
-            for name, prior in (("denoiser", mu), ("denoiser no mu", flat)):
+            for name, prior in (
+                ("denoiser", mu),
+                ("denoiser no mu", flat),
+                ("denoiser wrong mu", wrong),
+            ):
                 x_t = a * eps + b * x1 + g * prior
                 pred = model.denoiser(x_t=x_t, time=time, audio_embeddings=audio).argmax(-1)
                 tally.add(f"{name} t={t}", pred, tokens, real)
+                if prior is wrong:
+                    copies[t] = copies.get(t, 0.0) + float(
+                        ((pred == wrong.argmax(-1)) & misleading).sum()
+                    )
             tally.add(f"field t={t}", (a * eps + b * x1 + g * mu).argmax(-1), tokens, real)
     out = tally.recovery()
     out["mu peak prob"] = peak / tally.reals
     out["mu prob on target"] = on_target / tally.reals
+    for t, n in copies.items():
+        out[f"copies wrong mu t={t}"] = n / max(copies_den, 1.0)
     return out
 
 
@@ -131,7 +147,13 @@ def report(results: dict[str, dict[str, float]], out: Path) -> None:
         f"\n{'t':>5s}"
         + "".join(
             f"{f'{name} ({r})':>24s}"
-            for name in ("denoiser", "denoiser no mu", "field")
+            for name in (
+                "denoiser",
+                "denoiser no mu",
+                "denoiser wrong mu",
+                "copies wrong mu",
+                "field",
+            )
             for r in roles
         )
     )
@@ -140,7 +162,13 @@ def report(results: dict[str, dict[str, float]], out: Path) -> None:
             f"{t:5.2f}"
             + "".join(
                 f"{results[r][f'{name} t={t}']:24.3f}"
-                for name in ("denoiser", "denoiser no mu", "field")
+                for name in (
+                    "denoiser",
+                    "denoiser no mu",
+                    "denoiser wrong mu",
+                    "copies wrong mu",
+                    "field",
+                )
                 for r in roles
             )
         )

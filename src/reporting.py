@@ -214,8 +214,8 @@ class MetricReporting:
                     self.log(f"{key}/perr", token_error, batch_size=n_utts)
 
     def reset_audio_only(self) -> None:
-        """Clear the audio-only tally: (hits with mu, hits with a uniform prior, real tokens)."""
-        self._audio_only = torch.zeros(3, device=self.device)
+        """Clear the audio-only tally; `update_audio_only` says what each slot counts."""
+        self._audio_only = torch.zeros(6, device=self.device)
 
     @torch.no_grad()
     def update_audio_only(self, batch: dict) -> None:
@@ -224,8 +224,18 @@ class MetricReporting:
         At t=0 the field holds no data term at all, so whatever the denoiser recovers it
         read off the audio: through its own cross-attention, plus whatever mu's softmax
         shows through the noise. The binned metrics cannot isolate this — their lowest bin
-        spans up to t~0.5, where x_t already carries some of the target. Swapping mu for
-        the uniform vector takes mu's share out, which leaves the cross-attention alone.
+        spans up to t~0.5, where x_t already carries some of the target. Three priors:
+
+          * mu, as trained.
+          * the uniform vector: mu's share taken out. Out of distribution for a model that
+            always saw mu clearly (low sigma), so a drop there is partly that shift.
+          * another utterance's mu (the batch rolled by one): the same shape and confidence
+            as the real one, but wrong. In distribution, so how often the denoiser copies
+            its argmax, where that argmax is not the target, is how far it takes mu on
+            trust rather than checking it against the audio.
+
+        Slots: hits under each prior, copies of the wrong mu, positions where the wrong
+        mu's argmax differs from the target, real tokens.
 
         The time input is 0 under either `flow.time_input`: every curve a run holds has
         u(0) = 0, since `exact` and `MeasuredTau` normalise tau by the error at t=0.
@@ -237,23 +247,34 @@ class MetricReporting:
         noise = self.alpha_fn(t0)[:, None, None] * torch.randn(
             *tokens.shape, self.vocab_size, device=self.device
         )
+        mu = F.softmax(self.mu_nn(audio), dim=-1)
         # A mu that knows nothing: the field at t=0 then carries no hint at all.
         uniform = torch.full_like(noise, 1.0 / self.vocab_size)
-        mu = F.softmax(self.mu_nn(audio), dim=-1)
+        wrong = mu.roll(1, dims=0)
 
-        hits = []
-        for prior in (mu, uniform):
+        preds = []
+        for prior in (mu, uniform, wrong):
             x_0 = noise + self.gamma_fn(t0)[:, None, None] * prior
-            pred = self.denoiser(x_t=x_0, time=t0, audio_embeddings=audio).argmax(-1)
-            hits.append(((pred == tokens) & real).sum())
-        self._audio_only += torch.stack([*hits, real.sum()]).float()
+            preds.append(self.denoiser(x_t=x_0, time=t0, audio_embeddings=audio).argmax(-1))
+        misleading = real & (wrong.argmax(-1) != tokens)
+        self._audio_only += torch.stack(
+            [
+                *[((pred == tokens) & real).sum() for pred in preds],
+                ((preds[2] == wrong.argmax(-1)) & misleading).sum(),
+                misleading.sum(),
+                real.sum(),
+            ]
+        ).float()
 
     def log_audio_only(self) -> None:
-        """Log the tally as `audio_only/val_recovery` and `.../val_recovery_no_mu`."""
-        with_mu, without_mu, reals = self._audio_only.tolist()
+        """Log the tally under `audio_only/`: recovery per prior, and the copy rate."""
+        with_mu, uniform, wrong, copies, misleading, reals = self._audio_only.tolist()
         if reals > 0:
             self.log("audio_only/val_recovery", with_mu / reals)
-            self.log("audio_only/val_recovery_no_mu", without_mu / reals)
+            self.log("audio_only/val_recovery_no_mu", uniform / reals)
+            self.log("audio_only/val_recovery_wrong_mu", wrong / reals)
+        if misleading > 0:
+            self.log("audio_only/val_copies_wrong_mu", copies / misleading)
 
     def log_tau_shape(self, reparam: TimeReparametrization) -> None:
         """Record what a schedule actually draws, not just where it starts.

@@ -15,18 +15,30 @@
 #                                           earlier, so the curve moves left as mu learns —
 #                                           the shift toward the audio, made by the path.
 #
+# And the regularisers, since every round-1 arm memorises train.100 at the transition
+# (train loss ~0.001 against ~0.1 on val):
+#
+#   drop<x>    model.denoiser.dropout=x     the recipe's 0.1, raised
+#   wd<x>      train.weight_decay=x         the recipe's 0.01, raised
+#   mask       train.audio_mask=...         SpecAugment on the Whisper latents: 2 time and
+#                                           2 channel masks per utterance, each up to 10% of
+#                                           the axis (src/data/augment.py)
+#
 # Arms join knobs with `+` (sigma0.5+floor0.1); `control` is the recipe as is.
 #
 # Round 1, each knob alone (6 runs, 3 jobs):
 #   control floor0.3 floor0.4 sigma0.7 sigma0.5 sigma0.4
+# Regularisation screen:
+#   ROUND=reg1 ARMS="control drop0.2 wd0.05 mask mask+drop0.2 floor0.3+mask" SUBMIT=1 ...
 # Round 2, the winners combined, e.g. with sigma 0.5 and floor 0.3 winning:
 #   ROUND=round2 ARMS="control sigma0.5 sigma0.5+floor0.1 sigma0.5+floor0.3" SUBMIT=1 ...
 #
 # Every arm samples on its own grid and on the control's (sampling.grids): a floor or a
 # sigma moves the sampler's steps as well as the training draw, and the `_reference` WER
-# is what separates the two. Every arm also logs audio_only/val_recovery[_no_mu], the
-# denoiser's recovery at t=0 with and without mu: whether the knob made the model read
-# the audio, not just whether WER moved.
+# is what separates the two. Every arm also logs audio_only/val_recovery[_no_mu|_wrong_mu]
+# and val_copies_wrong_mu, the denoiser's recovery at t=0 under mu, no mu, and another
+# utterance's mu: whether the knob made the model read the audio, not just whether WER
+# moved.
 #
 # Read each arm against the control at epoch 100 (sampled WER, 16 steps, full val):
 # >= 2 points better is a winner — seed noise on small + micro is ~1-2.
@@ -66,6 +78,9 @@ knob_override() {
         control) echo "" ;;
         floor*)  echo "schedule.uniform_floor=${1#floor}" ;;
         sigma*)  echo "flow.alpha={\"type\":\"linear_down\",\"scale\":${1#sigma}}" ;;
+        drop*)   echo "model.denoiser.dropout=${1#drop}" ;;
+        wd*)     echo "train.weight_decay=${1#wd}" ;;
+        mask)    echo "train.audio_mask={\"time_masks\":2,\"time_width\":0.1,\"feature_masks\":2,\"feature_width\":0.1}" ;;
         *) echo "unknown knob: $1" >&2; exit 1 ;;
     esac
 }

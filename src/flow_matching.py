@@ -15,6 +15,7 @@ from transformers import WhisperTokenizerFast
 
 from src.checkpointing.layout import COMPONENTS
 from src.data import VocabMap
+from src.data.augment import mask_latents
 from src.ema import EMAWeights
 from src.flow import build_tau_scheduler
 from src.flow.coefficients import make_schedule, waypoint_strength
@@ -251,6 +252,9 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
     def flow_step(self, batch: dict) -> tuple[torch.Tensor, dict, torch.Tensor]:
         """One forward pass: the objective, the per-model records, and the t that drew it."""
         audio = batch["audio"].float()
+        if self.training:
+            # mu sees the masked audio too: the mask is part of the data, not of the model.
+            audio = mask_latents(audio, self.cfg.train.get("audio_mask"))
         tokens = batch["tokens"]
         x1 = F.one_hot(tokens, self.vocab_size).float()
 
