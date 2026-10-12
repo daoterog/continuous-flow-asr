@@ -81,3 +81,8 @@ schedule:
   # Row 17: read mu's accuracy on train, where the field is actually built from.
   refresh_split: train
   mu_accuracy: 0.0
+  # Stated here because base.yaml says 0.8, which every stage screen inherited unawares.
+  # Row 16 preferred 0.0 (16.25 vs 23.90) on the old tiny/stride-4 model; on this stack
+  # the replay in scripts/schedule/project_tau.py finds 0.0 and 0.8 within 0.01 of each
+  # other in every quantile, so it is the cheaper choice rather than a measured win.
+  mu_accuracy_momentum: 0.0

@@ -4,7 +4,10 @@ Everything that reports numbers to a logger lives in `src.reporting`, and the me
 it owns is built by `src.metrics.utils`.
 """
 
+from pathlib import Path
+
 import lightning.pytorch as pl
+import numpy as np
 import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
@@ -196,16 +199,43 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
             # says which curve is driving, and under `warmup` that is the answer.
             self.log_tau_source()
             if new is not None:
+                new = new.with_uniform_floor(
+                    float(self.cfg.schedule.get("uniform_floor", 0.0))
+                )
                 self.time_reparam = new
                 for metric in self.metrics.values():
                     if is_binned(metric):
                         metric.set_edges(new.bin_edges(metric.num_bins))
                 self.log("tau/t0", new.t_start)
                 self.log_tau_shape(new)
+                self.save_refresh(new)
                 self.print(f"tau refreshed for epoch {self.current_epoch}: {new!r}")
                 if self.tau_scheduler.mu_accuracy is not None:
                     self.print(f"mu accuracy EMA {self.tau_scheduler.mu_accuracy:.4f}")
         self.reset_metrics("train")
+
+    def save_refresh(self, curve: TimeReparametrization) -> Path:
+        """Write a refreshed curve to `<save_dir>/<run_id>/tau_refresh/e<epoch>.npz`.
+
+        The logged quantiles say where a curve sits but not its shape, and only the last
+        curve travels with the weights. One file per refresh is what lets
+        scripts/schedule/project_tau.py draw how a run's schedule actually moved, against
+        what it projected. Each holds the knots, the source and mu's accuracy then.
+        """
+        experiment = getattr(self.logger, "experiment", None)
+        run_id = getattr(experiment, "id", None) or "local"
+        out = Path(self.cfg.logging.save_dir) / str(run_id) / "tau_refresh"
+        out.mkdir(parents=True, exist_ok=True)
+        path = out / f"e{self.current_epoch:03d}.npz"
+        accuracy = self.tau_scheduler.mu_accuracy
+        np.savez(
+            path,
+            t_knots=curve.t_knots,
+            u_knots=curve.u_knots,
+            source=curve.source,
+            mu_accuracy=np.nan if accuracy is None else accuracy,
+        )
+        return path
 
     def training_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
         """One optimizer step."""
@@ -329,15 +359,51 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
         """Clear the val accumulators before the pass fills them."""
         super().on_validation_epoch_start()
         self.reset_metrics("val")
+        self._audio_only = torch.zeros(3, device=self.device)
 
     def validation_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
-        """One validation batch."""
-        return self._step(batch, "val")
+        """One validation batch, plus the denoiser's audio-only read of it."""
+        loss = self._step(batch, "val")
+        self._audio_only += self.audio_only_hits(batch)
+        return loss
+
+    @torch.no_grad()
+    def audio_only_hits(self, batch: dict) -> torch.Tensor:
+        """(hits with mu, hits with mu replaced by 1/V, real tokens) at t = 0.
+
+        At t=0 the field holds no data term at all, so whatever the denoiser recovers it
+        read off the audio: through its own cross-attention, plus whatever mu's softmax
+        shows through the noise. The binned metrics cannot isolate this — their lowest bin
+        spans up to t~0.5, where x_t already carries some of the target. Swapping mu for
+        the uniform vector takes mu's share out, which leaves the cross-attention alone.
+        """
+        audio, tokens = batch["audio"].float(), batch["tokens"]
+        real = tokens != self.pad_id
+        t = torch.zeros(tokens.size(0), device=self.device)
+        time = self.time_reparam.u_of(t) if self.time_input == "uniform" else t
+        noise = self.alpha_fn(t)[:, None, None] * torch.randn(
+            *tokens.shape, self.vocab_size, device=self.device
+        )
+        priors = [torch.full_like(noise, 1.0 / self.vocab_size)]
+        if self.mu_nn is not None and self.gamma_fn is not None:
+            priors.insert(0, F.softmax(self.mu_nn(audio), dim=-1))
+        hits = []
+        for prior in priors:
+            x_t = noise + self.gamma_fn(t)[:, None, None] * prior if self.gamma_fn else noise
+            pred = self.denoiser(x_t=x_t, time=time, audio_embeddings=audio).argmax(-1)
+            hits.append(((pred == tokens) & real).sum())
+        if len(hits) == 1:  # no mu in this run: the two readings are one
+            hits.insert(0, hits[0])
+        return torch.stack([*hits, real.sum()]).float()
 
     def on_validation_epoch_end(self) -> None:
         """Flush the val metrics, then sample from noise."""
         super().on_validation_epoch_end()
         self.log_metrics("val")
+        with_mu, without_mu, reals = self._audio_only.tolist()
+        if reals > 0:
+            self.log("audio_only/val_recovery", with_mu / reals)
+            self.log("audio_only/val_recovery_no_mu", without_mu / reals)
         self.log_sampled()
 
     def on_test_start(self) -> None:
@@ -383,6 +449,7 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
         init_from_mu: bool | None = None,
         method: str | None = None,
         generator: torch.Generator | None = None,
+        grid: str = "live",
     ) -> torch.Tensor:
         """Integrate from noise to (B, canvas_len) token ids for this batch of audio.
 
@@ -392,6 +459,10 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
 
         `method` overrides `sampling.method`. `generator` draws x0, so two methods given
         generators seeded alike start from the same noise.
+
+        `grid` picks the flow times walked: `live`, the curve training draws from, or
+        `reference`, the control's (`reference_reparam`). Either way a `uniform` denoiser
+        is fed u off the live curve at those times, the label it was trained against.
         """
         mu = None
         if self.mu_nn is not None:
@@ -399,7 +470,13 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
         if init_from_mu is None:
             init_from_mu = bool(self.cfg.get("sampling", {}).get("init_from_mu", False))
 
-        gen_grid, u_grid = self.time_reparam.sampling_grid(num_steps)
+        if grid == "live":
+            gen_grid, u_grid = self.time_reparam.sampling_grid(num_steps)
+        elif grid == "reference":
+            gen_grid, _ = self.reference_reparam().sampling_grid(num_steps)
+            u_grid = np.asarray(self.time_reparam.u_of(gen_grid))
+        else:
+            raise ValueError(f"sampling grid must be live or reference, got {grid!r}")
 
         # Algorithm 6 of the paper, or the equivalent-for-affine-gamma rebuild. They agree
         # exactly on linear and audio_cond and differ at O(h^2) on three_term.
@@ -424,6 +501,25 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
             generator=generator,
             waypoint=self.waypoint,
             time_grid=u_grid if self.time_input == "uniform" else None,
+        )
+
+    def reference_reparam(self) -> TimeReparametrization:
+        """The control's curve: the exact one at unit noise, no floor, mu as it stands now.
+
+        What this run would be drawing from under the recipe's defaults, so a run that
+        changed `flow.alpha.scale` or `schedule.uniform_floor` can also be sampled on the
+        grid the control samples on. Rebuilt per call; it takes milliseconds and is only
+        asked for on sampling epochs.
+        """
+        accuracy = self.tau_scheduler.mu_accuracy
+        if accuracy is None:
+            accuracy = float(self.cfg.schedule.get("mu_accuracy", 0.0))
+        return TimeReparametrization.exact(
+            self.vocab_size,
+            alpha_fn=make_schedule("linear_down"),
+            beta_fn=self.beta_fn,
+            gamma_fn=self.gamma_fn,
+            mu_accuracy=accuracy,
         )
 
     def configure_optimizers(self) -> dict:

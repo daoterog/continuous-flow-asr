@@ -86,12 +86,24 @@ class SamplingProbe:
         counts = [want] if isinstance(want, int | float | str) else list(want)
         return [int(n) for n in counts]
 
+    @property
+    def grids(self) -> list[str]:
+        """The sampling grids scored each sampling epoch: `grids`, or just the live curve's.
+
+        `reference` walks the control's grid instead (`FlowMatching.reference_reparam`).
+        A run whose curve differs from the control's — a uniform floor, a rescaled noise —
+        samples on a different grid as well as training on a different draw, and scoring
+        it on both is what separates the two.
+        """
+        return [str(g) for g in (self.cfg.get("grids") or ["live"])]
+
     def score(
         self,
         model: "FlowMatching",
         datamodule: "AudioFeatureDataModule",
         method: str | None = None,
         num_steps: int | None = None,
+        grid: str = "live",
     ) -> tuple[float, float, int]:
         """(WER %, token error, utterances scored) for a full integration from noise.
 
@@ -123,6 +135,7 @@ class SamplingProbe:
                         hard=hard,
                         method=method,
                         generator=generator,
+                        grid=grid,
                     )
                 )
                 targets.append(batch["tokens"].to(model.device))

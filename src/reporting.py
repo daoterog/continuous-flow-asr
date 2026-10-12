@@ -204,11 +204,13 @@ class MetricReporting:
             return
         for method in self.sampling_probe.methods:
             for n in self.sampling_probe.step_counts:
-                wer, token_error, n_utts = self.sampling_probe.score(
-                    self, datamodule, method, num_steps=n
-                )
-                self.log(f"sampled_{method}_{n}/wer", wer, batch_size=n_utts)
-                self.log(f"sampled_{method}_{n}/perr", token_error, batch_size=n_utts)
+                for grid in self.sampling_probe.grids:
+                    wer, token_error, n_utts = self.sampling_probe.score(
+                        self, datamodule, method, num_steps=n, grid=grid
+                    )
+                    key = f"sampled_{method}_{n}" + ("" if grid == "live" else f"_{grid}")
+                    self.log(f"{key}/wer", wer, batch_size=n_utts)
+                    self.log(f"{key}/perr", token_error, batch_size=n_utts)
 
     def log_tau_shape(self, reparam: TimeReparametrization) -> None:
         """Record what a schedule actually draws, not just where it starts.

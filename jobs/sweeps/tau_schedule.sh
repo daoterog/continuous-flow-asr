@@ -1,0 +1,93 @@
+#!/bin/bash
+
+# How much of the batch, and of the sampler, to spend away from the transition: two knobs,
+# bracketed one at a time against one control on the cluster recipe
+# (configs/recipes/fulldata.yaml), then combined.
+#
+# The knobs (scripts/schedule/project_tau.py draws every arm below before it is paid for):
+#
+#   floor<x>   schedule.uniform_floor=x     a share x of every batch drawn uniformly on
+#                                           [0, 1], under the simulated curve's shape. The
+#                                           control puts ~5% of a batch below t=0.5 and ~1%
+#                                           above 0.85; floor 0.3 puts 19% and 5%.
+#   sigma<x>   flow.alpha.scale=x           noise at x(1-t), so x_0 ~ N(mu, x^2 I). mu shows
+#                                           through the noise and the field carries data
+#                                           earlier, so the curve moves left as mu learns —
+#                                           the shift toward the audio, made by the path.
+#
+# Arms join knobs with `+` (sigma0.5+floor0.1); `control` is the recipe as is.
+#
+# Round 1, each knob alone (6 runs, 3 jobs):
+#   control floor0.3 floor0.4 sigma0.7 sigma0.5 sigma0.4
+# Round 2, the winners combined, e.g. with sigma 0.5 and floor 0.3 winning:
+#   ROUND=round2 ARMS="control sigma0.5 sigma0.5+floor0.1 sigma0.5+floor0.3" SUBMIT=1 ...
+#
+# Every arm samples on its own grid and on the control's (sampling.grids): a floor or a
+# sigma moves the sampler's steps as well as the training draw, and the `_reference` WER
+# is what separates the two. Every arm also logs audio_only/val_recovery[_no_mu], the
+# denoiser's recovery at t=0 with and without mu: whether the knob made the model read
+# the audio, not just whether WER moved.
+#
+# Read each arm against the control at epoch 100 (sampled WER, 16 steps, full val):
+# >= 2 points better is a winner — seed noise on small + micro is ~1-2.
+#
+# KEEP adds adopted knobs to every arm, the control included (train.ema_decay=0.999 if
+# stage 3 adopts the EMA).
+#
+# Usage:
+#   ./jobs/sweeps/tau_schedule.sh                   # dry run: plan + SBU, submit nothing
+#   SUBMIT=1 ./jobs/sweeps/tau_schedule.sh          # round 1, gated
+
+set -eo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(dirname "$(dirname "${SCRIPT_DIR}")")"
+# shellcheck source=../common/sweep.sh
+source "${REPO_DIR}/jobs/common/sweep.sh"
+tier_defaults
+
+CONFIG="${CONFIG:-configs/recipes/fulldata.yaml}"
+PROJECT="${PROJECT:-flow-asr-tau-schedule}"
+ARMS="${ARMS:-control floor0.3 floor0.4 sigma0.7 sigma0.5 sigma0.4}"
+ROUND="${ROUND:-round1}"
+KEEP="${KEEP:-}"
+
+COMMON=(
+    "logging.project=${PROJECT}"
+    "sampling.grids=[live,reference]"
+    ${EPOCH_OVERRIDE}
+)
+
+# One knob's override. sigma rewrites the whole alpha node: base.yaml holds it as the
+# string `linear_down`, which a dotted `flow.alpha.scale=` cannot be set under. JSON, so
+# the override has no spaces and survives the batch script's word splitting.
+knob_override() {
+    case "$1" in
+        control) echo "" ;;
+        floor*)  echo "schedule.uniform_floor=${1#floor}" ;;
+        sigma*)  echo "flow.alpha={\"type\":\"linear_down\",\"scale\":${1#sigma}}" ;;
+        *) echo "unknown knob: $1" >&2; exit 1 ;;
+    esac
+}
+
+arm_overrides() {
+    local knob
+    for knob in ${1//+/ }; do
+        knob_override "${knob}"
+    done
+}
+
+cd "${REPO_DIR}"
+
+stack="${ROUND}"
+[[ -n "${KEEP}" ]] && stack="${stack}+$(echo "${KEEP}" | tr ' =' '+-' | sed 's/train\.//g')"
+
+for arm in ${ARMS}; do
+    arm_overrides "${arm}" >/dev/null  # fail on an unknown knob before anything is queued
+    for seed in ${SEEDS}; do
+        queue_run "${stack}/${arm}-s${seed}" "seed=${seed}" "${COMMON[@]}" ${KEEP} \
+            $(arm_overrides "${arm}") "logging.group=${TIER}${EPOCHS}/${stack}/${arm}" \
+            "logging.name=${stack}-${arm}-e${EPOCHS}-s${seed}"
+    done
+done
+flush_runs

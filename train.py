@@ -299,7 +299,9 @@ def validate_distill_teacher(dm: AudioFeatureDataModule, cfg: DictConfig) -> Non
 def build_time_reparam(dm: AudioFeatureDataModule, cfg: DictConfig) -> TimeReparametrization:
     """The prior tau: what the interpolant alone leaves recoverable, with no model.
 
-    The identity when `schedule.enabled` is false, so t is drawn uniformly.
+    The identity when `schedule.enabled` is false, so t is drawn uniformly. Under
+    `schedule.uniform_floor` the curve carries the floor from the first step, as every
+    refreshed curve does after it.
     """
     if not cfg.schedule.enabled:
         return TimeReparametrization.identity()
@@ -310,7 +312,7 @@ def build_time_reparam(dm: AudioFeatureDataModule, cfg: DictConfig) -> TimeRepar
         beta_fn=make_schedule(cfg.flow.get("beta", "linear_up")),
         gamma_fn=gamma_fn,
         mu_accuracy=float(cfg.schedule.get("mu_accuracy", 0.0)),
-    )
+    ).with_uniform_floor(float(cfg.schedule.get("uniform_floor", 0.0)))
     path = "with mu" if gamma_fn is not None else "linear"
     print(f"tau: exact curve on the {path} path over {dm.vocab_size:,} tokens: {reparam!r}")
     return reparam

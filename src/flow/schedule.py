@@ -274,6 +274,46 @@ class TimeReparametrization:
             source="simulated",
         )
 
+    def mixed_with(
+        self,
+        other: "TimeReparametrization",
+        weight: float,
+        source: str | None = None,
+        points: int = EXACT_GRID_POINTS,
+    ) -> "TimeReparametrization":
+        """The draw that takes `other`'s t with probability `weight`, and this one's otherwise.
+
+        u is a CDF over t, so a mixture of two draws is the same mixture of their CDFs:
+        u(t) = (1 - w) * self.u_of(t) + w * other.u_of(t). Both are read on a dense t grid
+        and the result is inverted like any other curve. Mixed with the identity this is a
+        uniform floor — a fraction w of every batch lands uniformly on [0, 1] whatever the
+        curve does — and mixed with another curve it is a gradual handover between the two.
+        """
+        if not 0.0 <= weight <= 1.0:
+            raise ValueError(f"mixture weight must be in [0, 1], got {weight}")
+        if weight == 0.0:
+            return self
+        if weight == 1.0:
+            return other
+        ts = np.linspace(0.0, 1.0, points)
+        u = (1.0 - weight) * np.asarray(self.u_of(ts)) + weight * np.asarray(other.u_of(ts))
+        u = np.clip(np.maximum.accumulate(u), 0.0, 1.0)
+        keep = np.concatenate([np.diff(u) > 0, [True]])  # last index of every flat run
+        return type(self)(
+            ts[keep], u[keep], source=source or self.source, curve_t=ts, curve_u=u
+        )
+
+    def with_uniform_floor(self, floor: float) -> "TimeReparametrization":
+        """This curve with a fraction `floor` of every batch drawn uniformly on [0, 1].
+
+        `schedule.uniform_floor`. Every curve concentrates its draw where the field's
+        recovery climbs, which leaves the audio-only region below the dead-zone edge and
+        the saturated region above it with almost nothing: under the simulated curve ~5%
+        of a batch lands below t=0.5 and ~1% above 0.85. A floor keeps the curve's shape
+        and puts a fixed share back everywhere. 0 returns this curve unchanged.
+        """
+        return self.mixed_with(TimeReparametrization.identity(), floor, source=self.source)
+
     @classmethod
     def load(cls, path: str | Path) -> "TimeReparametrization":
         """Rebuild a curve written by `save`, exactly, whatever it was built from."""

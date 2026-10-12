@@ -98,10 +98,8 @@ class MeasuredTau(TauScheduler):
         # tokens and t — which nothing reads since the self-check was dropped. Kept because
         # it is the one quantity the closed form predicts exactly, so it is what a probe
         # self-check would hold itself against; the cost is one argmax per chunk.
-        t, hits, _input_hits, reals = self._sweep(
-            model,
-            self._draw_batch(datamodule),
-            chunk=getattr(datamodule, "eval_batch_size", 32),
+        t, hits, _input_hits, reals = self._sweep_split(
+            model, datamodule, chunk=getattr(datamodule, "eval_batch_size", 32)
         )
         self._refreshes += 1
 
@@ -130,17 +128,43 @@ class MeasuredTau(TauScheduler):
             )
         return reparam, None
 
-    def _draw_batch(self, datamodule: "AudioFeatureDataModule") -> dict:
-        """A fresh random subset, different on every refresh."""
-        subset = datamodule.datasets[self.refresh_split]
+    def _draw_indices(self, datamodule: "AudioFeatureDataModule") -> np.ndarray:
+        """A fresh random subset of the refresh split, different on every refresh."""
+        n_split = len(datamodule.datasets[self.refresh_split])
         rng = np.random.default_rng([self.seed, self._refreshes])
-        n = min(self.n_utts, len(subset))
-        idx = rng.choice(len(subset), size=n, replace=False)
-        return datamodule.collate_fn([subset[int(i)] for i in idx])
+        return rng.choice(n_split, size=min(self.n_utts, n_split), replace=False)
+
+    def _draw_batch(self, datamodule: "AudioFeatureDataModule") -> dict:
+        """The same subset collated whole, for scripts that want it in memory at once."""
+        subset = datamodule.datasets[self.refresh_split]
+        return datamodule.collate_fn([subset[int(i)] for i in self._draw_indices(datamodule)])
+
+    def _sweep_split(
+        self, model: "FlowMatching", datamodule: "AudioFeatureDataModule", chunk: int
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """`_sweep` over a fresh subset, collated one chunk at a time.
+
+        Collating the whole subset first is what `_draw_batch` does, and at full latents
+        8,192 utterances of audio is ~31 GB of host memory per run. The t for every
+        utterance is drawn up front, so the readings match a whole-subset sweep exactly.
+        """
+        subset = datamodule.datasets[self.refresh_split]
+        idx = self._draw_indices(datamodule)
+        gen = torch.Generator(device="cpu").manual_seed(self.seed + self._refreshes)
+        t_all = torch.rand(len(idx), generator=gen)
+        parts = []
+        for i in range(0, len(idx), chunk):
+            batch = datamodule.collate_fn([subset[int(j)] for j in idx[i : i + chunk]])
+            parts.append(self._sweep(model, batch, chunk=chunk, t=t_all[i : i + chunk]))
+        return tuple(np.concatenate(p) for p in zip(*parts, strict=True))
 
     @torch.no_grad()
     def _sweep(
-        self, model: "FlowMatching", batch: dict, chunk: int = 32
+        self,
+        model: "FlowMatching",
+        batch: dict,
+        chunk: int = 32,
+        t: torch.Tensor | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """(t, denoiser hits, interpolant hits, real tokens) per utterance, at t ~ U[0, 1].
 
@@ -151,11 +175,16 @@ class MeasuredTau(TauScheduler):
 
         It is a transfer size as much as a batch size: moving the whole probe to the device
         at once cost 3.66 GiB against 0.32 GiB streamed, which is what the chunking is for.
+
+        `t` gives each utterance its flow time; drawn here, from this refresh's seed, when
+        it is not.
         """
         audio_all = batch["audio"]
         tokens_all = batch["tokens"]
-        gen = torch.Generator(device="cpu").manual_seed(self.seed + self._refreshes)
-        t_all = torch.rand(tokens_all.size(0), generator=gen)
+        if t is None:
+            gen = torch.Generator(device="cpu").manual_seed(self.seed + self._refreshes)
+            t = torch.rand(tokens_all.size(0), generator=gen)
+        t_all = t
 
         was_training = model.training
         model.eval()
