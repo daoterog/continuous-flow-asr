@@ -35,3 +35,31 @@ def mask_latents(audio: torch.Tensor, spec: DictConfig | dict | None) -> torch.T
             span = (pos >= start) & (pos < start + w)  # (b, size)
             keep &= ~(span[:, :, None] if axis == 1 else span[:, None, :])
     return audio * keep
+
+
+def audio_drop(t: torch.Tensor, spec: DictConfig | dict | None) -> torch.Tensor | None:
+    """(B,) which rows train with the audio taken away, or None when nothing is dropped.
+
+    `train.audio_dropout`, e.g. {p: 0.2, schedule: constant} or {p: 0.4, schedule: linear}:
+    each row is dropped with probability p, or p * t under `linear`, so the nearer the
+    transcript the field is, the more often it has to be solved from the field alone.
+
+    In training the field at high t is built from the true transcript, and the audio is
+    the true audio: the two always agree, so nothing rewards reading the text, and every
+    round-1 checkpoint probed leans on the audio even where the field is nearly clean. A
+    dropped row has only the field, which is language modelling — the coherence the late
+    sampling steps are meant to supply.
+    """
+    if not spec or float(spec.get("p", 0.0)) <= 0.0:
+        return None
+    p = float(spec["p"])
+    schedule = str(spec.get("schedule", "constant"))
+    if schedule == "constant":
+        prob = torch.full_like(t, p)
+    elif schedule == "linear":
+        prob = p * t
+    else:
+        raise ValueError(
+            f"train.audio_dropout.schedule must be constant or linear, got {schedule!r}"
+        )
+    return torch.rand_like(t) < prob

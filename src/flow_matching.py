@@ -15,7 +15,7 @@ from transformers import WhisperTokenizerFast
 
 from src.checkpointing.layout import COMPONENTS
 from src.data import VocabMap
-from src.data.augment import mask_latents
+from src.data.augment import audio_drop, mask_latents
 from src.ema import EMAWeights
 from src.flow import build_tau_scheduler
 from src.flow.coefficients import make_schedule, waypoint_strength
@@ -272,12 +272,20 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
 
         u = self.draw_u(tokens.size(0))
         t = self.time_reparam.t_of(u)
-        i_t = self.make_interpolant(x1=x1, t=t, mu=mu)
+
+        heard, prior = audio, mu
+        dropped = audio_drop(t, self.cfg.train.get("audio_dropout")) if self.training else None
+        if dropped is not None:
+            heard = audio * (~dropped)[:, None, None]
+            if mu is not None:
+                uniform = torch.full_like(mu, 1.0 / self.vocab_size)
+                prior = torch.where(dropped[:, None, None], uniform, mu)
+        i_t = self.make_interpolant(x1=x1, t=t, mu=prior)
 
         # `uniform` hands the denoiser the draw itself, as FLM does: at large V the t that
         # matters sits in a narrow band near 1, where a sinusoidal embedding barely moves.
         time = u if self.time_input == "uniform" else t
-        logits = self.denoiser(x_t=i_t, time=time, audio_embeddings=audio)
+        logits = self.denoiser(x_t=i_t, time=time, audio_embeddings=heard)
         d_loss, d_loss_per_seq = self.sequence_ce(logits, tokens)
         out["denoiser"] = {
             "loss": d_loss,

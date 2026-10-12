@@ -23,13 +23,17 @@
 #   mask       train.audio_mask=...         SpecAugment on the Whisper latents: 2 time and
 #                                           2 channel masks per utterance, each up to 10% of
 #                                           the axis (src/data/augment.py)
+#   adrop<p>   train.audio_dropout          a share p of rows train with no audio (and a
+#                                           uniform prior in mu's place), so they must be
+#                                           solved from the field: text modelling
+#   adroplin<p>                             the same at p * t: more often nearer the text
 #
 # Arms join knobs with `+` (sigma0.5+floor0.1); `control` is the recipe as is.
 #
 # Round 1, each knob alone (6 runs, 3 jobs):
 #   control floor0.3 floor0.4 sigma0.7 sigma0.5 sigma0.4
 # Regularisation screen:
-#   ROUND=reg1 ARMS="control drop0.2 wd0.05 mask mask+drop0.2 floor0.3+mask" SUBMIT=1 ...
+#   ROUND=reg1 ARMS="control drop0.2 mask mask+drop0.2 adrop0.2 adroplin0.4" SUBMIT=1 ...
 # Round 2, the winners combined, e.g. with sigma 0.5 and floor 0.3 winning:
 #   ROUND=round2 ARMS="control sigma0.5 sigma0.5+floor0.1 sigma0.5+floor0.3" SUBMIT=1 ...
 #
@@ -80,6 +84,8 @@ knob_override() {
         sigma*)  echo "flow.alpha={\"type\":\"linear_down\",\"scale\":${1#sigma}}" ;;
         drop*)   echo "model.denoiser.dropout=${1#drop}" ;;
         wd*)     echo "train.weight_decay=${1#wd}" ;;
+        adroplin*) echo "train.audio_dropout={\"p\":${1#adroplin},\"schedule\":\"linear\"}" ;;
+        adrop*)  echo "train.audio_dropout={\"p\":${1#adrop},\"schedule\":\"constant\"}" ;;
         mask)    echo "train.audio_mask={\"time_masks\":2,\"time_width\":0.1,\"feature_masks\":2,\"feature_width\":0.1}" ;;
         *) echo "unknown knob: $1" >&2; exit 1 ;;
     esac
