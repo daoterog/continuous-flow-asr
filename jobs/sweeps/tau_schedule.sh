@@ -27,6 +27,10 @@
 #                                           uniform prior in mu's place), so they must be
 #                                           solved from the field: text modelling
 #   adroplin<p>                             the same at p * t: more often nearer the text
+#   meas<k>    schedule.refresh_curve_from  measured tau, re-read every k epochs: the draw
+#                                           follows the denoiser's own error rather than the
+#                                           field's (scripts/diagnostics/probe_audio_info.py
+#                                           puts it at t~0-0.6, where simulated draws ~5%)
 #   draft<p>   train.draft_corruption       a share p of real tokens in the field swapped
 #                                           for random ones, the loss still on the truth:
 #                                           the denoiser learns to correct the field
@@ -89,6 +93,7 @@ knob_override() {
         sigma*)  echo "flow.alpha={\"type\":\"linear_down\",\"scale\":${1#sigma}}" ;;
         drop*)   echo "model.denoiser.dropout=${1#drop}" ;;
         wd*)     echo "train.weight_decay=${1#wd}" ;;
+        meas*)   echo "schedule.refresh_curve_from=measured schedule.refresh_every_n_epochs=${1#meas}" ;;
         draftmu*) echo "train.draft_corruption={\"p\":${1#draftmu},\"source\":\"mu\"}" ;;
         draft*)  echo "train.draft_corruption={\"p\":${1#draft},\"source\":\"uniform\"}" ;;
         adroplin*) echo "train.audio_dropout={\"p\":${1#adroplin},\"schedule\":\"linear\"}" ;;

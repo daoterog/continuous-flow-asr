@@ -37,6 +37,7 @@ model:
     cond_dim: 128
     n_heads: 8
     n_blocks: 8
+    # 0.2 lost in the reg1 screen: 17.0 sampled WER against 15.3, behind at every epoch.
     dropout: 0.1
     # Logits soft-capped by 30*tanh(x/30), as FLM does. Stage 2 (flow-asr-flm-parity):
     # 15.29 sampled WER against the stack's 15.49 — neutral, kept because it is free and
@@ -71,7 +72,11 @@ flow:
 train:
   denoiser_lr: 2.0e-3
   audio_decoder_lr: 1.0e-3
-  weight_decay: 0.01
+  # reg1 screen (flow-asr-tau-schedule, 100 epochs, seed 1): 14.2 sampled WER against the
+  # control's 15.3 at 0.01, ahead at every sampling epoch. The one regulariser that helped:
+  # every arm nearly memorises train.100 at the transition, and dropout 0.2 and latent
+  # masking both lost (17.0, 32.5).
+  weight_decay: 0.05
   grad_clip: 1.0
   # Validate, sample and save an EMA of the weights, as FLM does (half-life ~700 steps).
   # Stage 3 (flow-asr-flm-parity, 100 epochs, seed 1): 14.77 sampled WER against the
