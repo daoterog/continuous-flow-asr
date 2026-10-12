@@ -217,7 +217,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     fig.tight_layout()
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(args.out, dpi=150)
+    fig.savefig(args.out, dpi=300)
     print(f"\nwrote {args.out}")
     return 0
 

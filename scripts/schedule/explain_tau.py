@@ -173,7 +173,7 @@ def plot(ts: np.ndarray, recovery: np.ndarray, vocab_size: int, out: Path) -> No
 
     fig.tight_layout()
     out.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out, dpi=150)
+    fig.savefig(out, dpi=300)
     print(f"wrote {out}")
 
 

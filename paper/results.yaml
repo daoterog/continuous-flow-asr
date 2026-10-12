@@ -1,0 +1,215 @@
+# The paper's results, in story order. One entry per table, figure or note.
+#
+#   python -m scripts.paper.fetch            # wandb -> paper/data/*.csv (needs wandb)
+#   python -m scripts.paper.build            # data -> tables/*.tex, figures/*.png, RESULTS.md
+#
+# Everything here is the TUNING phase: compact vocabulary (V=1,193) and train.100, unless an
+# entry says otherwise. The final model (phase 6) trains on train.960 with the full Whisper
+# vocabulary.
+#
+# kind:
+#   ablation   table of a reference and the changes tried against it. From wandb (`groups`
+#              with `reference` / `ablations` runs) or typed (`data/<id>.csv`, `source: typed`).
+#   curves     sampled WER against epoch for wandb runs, one panel per group.
+#   figure     made by a builder in scripts/paper/build.py (`builder:`), or by an existing
+#              script: `command:` writes `produces:` (a repo path), which is copied in. The
+#              command only runs when `produces` is missing or `build --rerun` is given.
+#   table      a typed table, data/<id>.csv rendered as is.
+#   note       prose only: notes/<id>.md.
+# status: done | running | planned. Planned and running entries render as placeholders.
+# outcome (per ablation): adopt | reject | neutral | kept (the reference stays).
+
+entity: cont-flow-asr-
+metric: sampled_interpolant_16/wer
+budget:
+  # The Snellius accounting total since the cap was set, from `accuse` (jobs/common/budget.sh).
+  # Update by hand; the compute table compares the per-run estimate against it.
+  cap_sbu: 100000
+  spent_sbu: 61000
+  as_of: 2026-10-12
+
+phases:
+  - {id: 0, title: "Method and setup"}
+  - {id: 1, title: "Viability: can the model learn at all?", setup: "overfit harness: 64-256 utterances, val = train, canvas 96, dropout and weight decay off"}
+  - {id: 2, title: "The time reparametrization", setup: "real learning task: 4,096 utterances of train.100, held-out val, 30 epochs, tiny denoiser, stride-4 latents, sampled WER on a fixed 512-utterance slice"}
+  - {id: 3, title: "Scaling to all of train.100", setup: "full train.100, stride-4 latents; sampled WER on a 512-utterance slice unless marked full val"}
+  - {id: 4, title: "The training recipe", setup: "small denoiser (40.7M) + micro mu (1.8M), full latents, train.100, 100 epochs, seed 1, sampled WER at 16 steps on all 2,703 val utterances"}
+  - {id: 5, title: "The schedule, revisited", setup: "the phase-4 recipe"}
+  - {id: 6, title: "The final model", setup: "train.960, full Whisper vocabulary"}
+  - {id: 9, title: "Across the project"}
+
+entries:
+  # -- 0 ----------------------------------------------------------------------------------
+  - id: method
+    phase: 0
+    kind: note
+    status: done
+    question: What is being trained?
+
+  - id: tau_explained
+    phase: 0
+    kind: figure
+    status: done
+    question: How is the time reparametrization built from a recovery curve?
+    command: python -m scripts.schedule.explain_tau
+    produces: figures/tau_explained.png
+
+  # -- 1 ----------------------------------------------------------------------------------
+  - id: phase1
+    phase: 1
+    kind: ablation
+    source: typed
+    status: done
+    question: Which defaults let the model memorise a small set at all?
+
+  # -- 2 ----------------------------------------------------------------------------------
+  - id: tau_construction
+    phase: 2
+    kind: note
+    status: done
+    question: How is the schedule constructed, and why this way?
+
+  - id: phase2
+    phase: 2
+    kind: ablation
+    source: typed
+    status: done
+    question: Does the time reparametrization pay for itself, and which form of it?
+
+  - id: field_recovery
+    phase: 2
+    kind: figure
+    status: done
+    question: How much of the transcript does the interpolant alone carry, by t?
+    builder: field_recovery
+
+  # -- 3 ----------------------------------------------------------------------------------
+  - id: phase3
+    phase: 3
+    kind: ablation
+    source: typed
+    status: done
+    question: What carries over to the full training set, and how large should mu be?
+
+  # -- 4 ----------------------------------------------------------------------------------
+  - id: phase4
+    phase: 4
+    kind: ablation
+    status: done
+    question: Which training changes improve the recipe?
+    note: phase4
+    experiments_rows: [36, 37, 38]
+    groups:
+      - name: "Stage 1"
+        reference: {run: flow-asr-flm-parity/juinr9wh, label: "control (phase-3 recipe)"}
+        ablations:
+          - {run: flow-asr-flm-parity/xsjeh7zr, label: "denoiser fed u, not t", outcome: adopt}
+          - {run: flow-asr-flm-parity/cirjfdti, label: "padding loss weight 0.1", outcome: adopt}
+      - name: "Stage 2"
+        reference: {run: flow-asr-flm-parity/olc06gip, label: "control (+ both stage-1 changes)"}
+        ablations:
+          - {run: flow-asr-flm-parity/fej0bs8j, label: "logit soft-cap 30", outcome: adopt}
+          - {run: flow-asr-flm-parity/hugwhtib, label: "denoiser LR 1e-3 (from 2e-3)", outcome: reject}
+          - {run: flow-asr-flm-parity/5g4qaijz, label: "denoiser LR 4e-3", outcome: reject}
+          - {run: flow-asr-flm-parity/357zcstc, label: "stop token at full weight (pad decay 8)", outcome: reject}
+      - name: "Stage 3"
+        reference: {run: flow-asr-flm-parity/kdd1pbdh, label: "control (+ soft-cap)"}
+        ablations:
+          - {run: flow-asr-flm-parity/5v9lar7i, label: "EMA of the weights (0.999)", outcome: adopt}
+
+  - id: phase4_curves
+    phase: 4
+    kind: curves
+    status: done
+    question: Do the adopted changes help throughout training, or only at the end?
+    of: phase4
+
+  # -- 5 ----------------------------------------------------------------------------------
+  - id: tau_revisited
+    phase: 5
+    kind: note
+    status: done
+    question: Where is the remaining error, and does the schedule train there?
+
+  - id: audio_info
+    phase: 5
+    kind: figure
+    status: done
+    question: How much of the transcript does each input carry at each t, and where does the schedule draw?
+    builder: audio_info
+
+  - id: tau_strategies
+    phase: 5
+    kind: figure
+    status: done
+    question: What does each candidate schedule change, before any of them is trained?
+    command: python -m scripts.schedule.project_tau --run flow-asr-flm-parity/olc06gip
+    produces: figures/tau_projection/screen.png
+
+  - id: phase5
+    phase: 5
+    kind: ablation
+    status: running
+    question: Does moving training mass to low t help, and is a floor or a rescaled noise the better way?
+    groups:
+      - name: "Round 1"
+        reference: {label: "control (phase-4 recipe, simulated tau)"}
+        ablations:
+          - {label: "uniform floor 0.3"}
+          - {label: "uniform floor 0.4"}
+          - {label: "noise scale sigma 0.7"}
+          - {label: "noise scale sigma 0.5"}
+          - {label: "noise scale sigma 0.4"}
+
+  # -- 6 ----------------------------------------------------------------------------------
+  - id: main_result
+    phase: 6
+    kind: table
+    status: planned
+    question: How does the final model compare with established ASR systems?
+
+  - id: steps
+    phase: 6
+    kind: table
+    status: planned
+    question: How many integration steps does the final model need?
+
+  # -- across the project -----------------------------------------------------------------
+  - id: ladder
+    phase: 9
+    kind: figure
+    status: done
+    question: Which changes built the final recipe, and what did each buy?
+    builder: ladder
+
+  - id: iteration_speed
+    phase: 9
+    kind: table
+    status: done
+    question: What made an experiment fast and cheap enough to run this many?
+
+  - id: compute
+    phase: 9
+    kind: figure
+    status: done
+    question: How much compute did the tuning phase use, and where did it go?
+    builder: compute
+    # wandb's _runtime is corrupt for some runs; hours recorded elsewhere win.
+    runtime_overrides_h:
+      q5bsvywz: 3.6   # skilled-lake-22, EXPERIMENTS.md "Real runs"
+    # wandb project -> phase, for the compute breakdown. Unlisted projects count as "other".
+    project_phase:
+      flow-asr-overfit: 1
+      flow-asr-bisect: 1
+      flow-asr-canvas: 1
+      local-tests: 1
+      flow-asr-schedule-arms: 2
+      flow-asr-refresh: 2
+      flow-asr-fixed: 2
+      continuous-flow-asr: 3
+      flow-asr-fulldata-schedule: 3
+      flow-asr-mu-reg: 3
+      flow-asr-timing: 9
+      flow-asr-probe-chunk: 9
+      flow-asr-flm-parity: 4
+      flow-asr-tau-schedule: 5

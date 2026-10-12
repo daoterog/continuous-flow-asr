@@ -166,7 +166,7 @@ def report(results: dict[str, dict[str, float]], out: Path) -> None:
     ax.set_ylabel("token recovery")
     ax.legend(fontsize=7)
     fig.tight_layout()
-    fig.savefig(out / "audio_info.png", dpi=120)
+    fig.savefig(out / "audio_info.png", dpi=300)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

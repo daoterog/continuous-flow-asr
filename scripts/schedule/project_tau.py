@@ -341,7 +341,7 @@ def plot_screen(arms: dict, steps: int, out: Path) -> None:
     for ax in axes[-1]:
         ax.set_xlabel("t")
     fig.tight_layout()
-    fig.savefig(out / "screen.png", dpi=110)
+    fig.savefig(out / "screen.png", dpi=300)
 
 
 def density(curve: TimeReparametrization) -> np.ndarray:
