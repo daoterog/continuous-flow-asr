@@ -21,7 +21,7 @@ slow node.
 | `screen` | 100 | 1 | 2 | ~363 SBU | the default: rank the arms |
 | `confirm` | 300 | 2 | 2 (the seeds share a job) | ~1,003 SBU | only the screen's winner(s) |
 
-These rest on `SEC_PER_EPOCH=45` in `common/budget.sh`. Re-set it from a screen's real
+These rest on `SEC_PER_EPOCH=55` in `common/budget.sh`. Re-set it from a screen's real
 epoch times if they differ.
 
 A screen carries its own control: a 100-epoch run is only comparable to another one.

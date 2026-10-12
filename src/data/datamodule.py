@@ -44,6 +44,7 @@ class AudioFeatureDataModule(pl.LightningDataModule):
         steps_per_epoch: int | None = None,
         gpu_prefetch: bool = False,
         prefetch_factor: int | None = None,
+        eval_num_workers: int | None = None,
     ) -> None:
         """Record the configuration; nothing is read off disk until `setup()`.
 
@@ -72,6 +73,9 @@ class AudioFeatureDataModule(pl.LightningDataModule):
         # Copy the next batch to the GPU while the current one trains (CudaPrefetcher).
         self.gpu_prefetch = gpu_prefetch and pin_memory and torch.cuda.is_available()
         self.prefetch_factor = prefetch_factor
+        # Val and test run every few epochs and keep their workers alive in between, so they
+        # need far fewer than training; None gives them training's count.
+        self.eval_num_workers = num_workers if eval_num_workers is None else eval_num_workers
 
         self.datasets: dict[str, Subset] = {}
         self.dirs: dict[str, list[Path]] = {}
@@ -185,7 +189,7 @@ class AudioFeatureDataModule(pl.LightningDataModule):
             batch_size=self.batch_size if role == "train" else self.eval_batch_size,
             shuffle=shuffle,
             collate_fn=self.collate_fn,
-            num_workers=self.num_workers,
+            num_workers=self.num_workers if role == "train" else self.eval_num_workers,
             pin_memory=self.pin_memory,
             # Only the training loader: val and test must cover their split exactly once.
             steps_per_epoch=self.steps_per_epoch if role == "train" else None,

@@ -32,7 +32,7 @@ class SamplingProbe:
         """`cfg` is the `sampling` config node; the batch size is the chunking fallback."""
         self.cfg = cfg
         self.train_batch_size = train_batch_size
-        self._batch: dict | None = None
+        self._indices: list[int] | None = None
 
     @property
     def enabled(self) -> bool:
@@ -51,18 +51,20 @@ class SamplingProbe:
         every = int(self.cfg.get("every_n_epochs", 5))
         return every > 0 and (epoch + 1) % every == 0
 
-    def batch(self, datamodule: "AudioFeatureDataModule") -> dict:
-        """The val utterances to sample, collated once and cached.
+    def selection(self, datamodule: "AudioFeatureDataModule") -> list[int]:
+        """The val utterances to sample, as indices into the split, chosen once and cached.
 
         `n_utts` unset means the whole split, which is what makes two runs comparable —
         a WER over a different subset each time is not a number you can put side by side.
+        Only the indices are kept: at full latents the whole split is ~10 GB of audio, so
+        `score` collates one chunk at a time instead of holding all of it in RAM.
         """
-        if self._batch is None:
+        if self._indices is None:
             subset = datamodule.datasets["val"]
             want = self.cfg.get("n_utts")
             n = len(subset) if want is None else min(int(want), len(subset))
-            self._batch = datamodule.collate_fn([subset[i] for i in range(n)])
-        return self._batch
+            self._indices = list(range(n))
+        return self._indices
 
     @property
     def methods(self) -> list[str]:
@@ -101,28 +103,30 @@ class SamplingProbe:
         x0 comes from a generator seeded the same on every call, so two methods scored in
         the same epoch integrate the same noise and differ only by the integrator.
         """
-        batch = self.batch(datamodule)
+        indices = self.selection(datamodule)
+        subset = datamodule.datasets["val"]
         was_training = model.training
         model.eval()
         try:
             chunk = int(self.cfg.get("batch_size") or self.train_batch_size)
             num_steps = self.step_counts[0] if num_steps is None else int(num_steps)
             hard = bool(self.cfg.get("hard", False))
-            tokens = batch["tokens"].to(model.device)
             generator = torch.Generator(device=model.device)
             generator.manual_seed(int(self.cfg.get("seed", 0)))
-            pred = torch.cat(
-                [
+            preds, targets = [], []
+            for i in range(0, len(indices), chunk):
+                batch = datamodule.collate_fn([subset[j] for j in indices[i : i + chunk]])
+                preds.append(
                     model.sample(
-                        batch["audio"][i : i + chunk].to(model.device).float(),
+                        batch["audio"].to(model.device).float(),
                         num_steps,
                         hard=hard,
                         method=method,
                         generator=generator,
                     )
-                    for i in range(0, batch["audio"].size(0), chunk)
-                ]
-            )
+                )
+                targets.append(batch["tokens"].to(model.device))
+            pred, tokens = torch.cat(preds), torch.cat(targets)
         finally:
             model.train(was_training)
         wer, token_error = score_samples(

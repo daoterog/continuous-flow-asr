@@ -38,6 +38,10 @@ model:
     n_heads: 8
     n_blocks: 8
     dropout: 0.1
+    # Logits soft-capped by 30*tanh(x/30), as FLM does. Stage 2 (flow-asr-flm-parity):
+    # 15.29 sampled WER against the stack's 15.49 — neutral, kept because it is free and
+    # bounds the logits the loss can push on.
+    logit_cap: 30
   # configs/mu/micro.yaml, ~1.8M. Small enough that it cannot memorise the training set:
   # EXPERIMENTS row 13 measured its train/val accuracy gap at 0.036 against 0.510 for
   # `small`, and row 14 found dropout 0.1 made it worse (16.06 -> 29.53).

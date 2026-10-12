@@ -19,6 +19,12 @@
 #   lr1e-3      train.denoiser_lr=1e-3          an LR bracket around the recipe's 2e-3
 #   lr4e-3      train.denoiser_lr=4e-3
 #
+# Stage 2 results (sampled WER @ e99, control 15.49): softcap 15.29 (adopted, free),
+# lr4e-3 16.01, lr1e-3 17.76, decay8 18.68 (all dropped); ema was OOM-killed at epoch 20 —
+# a host-memory problem, not EMA's. Stage 3 reruns it on the stack + softcap:
+#
+#   STAGE=stage3 ARMS="control ema" SUBMIT=1 ./jobs/sweeps/flm_parity.sh
+#
 # Read each arm against the control at epoch 100 (sampled WER, 16 steps, full val):
 # >= 2 points better adopts it, >= 2 worse drops it — seed noise on small + micro is ~1-2.
 #

@@ -28,6 +28,10 @@ data:
   # a job outgrew its 240G (a stage-1 run was OOM-killed). Speed is unchanged: depth 4 vs 2
   # measured 712 vs 711 utts/s.
   prefetch_factor: 1
+  # Val and test loaders keep their own persistent workers alive between passes; at 17 each
+  # a run held ~34 worker processes and its main process reached ~53 GB, and a stage-2 run
+  # was still OOM-killed with prefetch_factor 1. A val pass every 10 epochs needs few.
+  eval_num_workers: 4
   # Val, test and the tau probe run under no_grad: 0.645 ms/utt at 512 against 0.836 at 32.
   eval_batch_size: 512
 schedule:

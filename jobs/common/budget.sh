@@ -25,13 +25,9 @@ SBU_PER_GPU_HOUR="${SBU_PER_GPU_HOUR:-128}"
 CPUS_PER_RUN=18
 MEM_PER_RUN_G=120
 MEM_MIN_G=160
-# The fulldata recipe (small + micro, full latents) under the snellius profile: batch 128,
-# gpu_prefetch, 17 workers, TF32. On the A100 that measured 711 utts/s with prefetch alone,
-# +12% from the 17th worker and +6% from TF32. Nodes differ by up to ~20% (the plain loader
-# ran 525 on one, 643 on another), so this assumes a slow node at ~680 utts/s: ~42 s of
-# training per 28.5k-utterance epoch plus ~3.3 s of evaluation amortised at every-10-epoch
-# validation and probing. Re-set it from a screen's real epoch times.
-SEC_PER_EPOCH="${SEC_PER_EPOCH:-45}"
+# Measured on the stage-2 screen (flow-asr-flm-parity, 2026-10-12): the fulldata recipe under
+# the snellius profile ran 49-58 s per epoch, evaluation included, depending on the node.
+SEC_PER_EPOCH="${SEC_PER_EPOCH:-55}"
 # Startup, the tau build, compile's warmup, the cold first epochs off GPFS.
 JOB_OVERHEAD_S="${JOB_OVERHEAD_S:-600}"
 
