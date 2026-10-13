@@ -85,6 +85,50 @@ def denoiser_times(
     return inputs
 
 
+def guided_logits(
+    denoiser: torch.nn.Module,
+    x_t: torch.Tensor,
+    time: torch.Tensor,
+    audio: torch.Tensor,
+    cfg_strength: float = 1.0,
+    uncond_offset: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """The denoiser's logits at x_t, guided toward the audio by classifier-free guidance.
+
+    `cfg_strength` w mixes a conditional and an unconditional prediction as
+    uncond + w * (cond - uncond): 1 is the conditional model alone, above 1 pushes past it,
+    away from what the model predicts without hearing anything. The unconditional branch is
+    what `train.audio_dropout` trains on its dropped rows — no audio, and a field built with
+    the uniform prior in mu's place, since mu is a read of the same audio and would leak it
+    back through x_t. `uncond_offset` is that difference, gamma(t) * (mu - 1/V), taken off
+    x_t for the unconditional half; None when there is no mu.
+
+    A model trained without audio dropout has never seen the unconditional input, so its
+    guidance is meaningless; w = 1 skips the second branch entirely.
+
+    Both branches go through one doubled batch, as DRAX does (src/models/drax/transformer.py).
+    """
+    if cfg_strength == 1.0:
+        return denoiser(x_t=x_t, time=time, audio_embeddings=audio)
+    x_uncond = x_t if uncond_offset is None else x_t - uncond_offset
+    logits = denoiser(
+        x_t=torch.cat([x_t, x_uncond]),
+        time=torch.cat([time, time]),
+        audio_embeddings=torch.cat([audio, torch.zeros_like(audio)]),
+    )
+    cond, uncond = logits.chunk(2)
+    return uncond + cfg_strength * (cond - uncond)
+
+
+def _uncond_offset(
+    gamma_fn: Callable | None, mu: torch.Tensor | None, t: float, vocab_size: int
+) -> torch.Tensor | None:
+    """gamma(t) * (mu - 1/V): what turns x_t into the unconditional branch's field."""
+    if gamma_fn is None or mu is None:
+        return None
+    return gamma_fn(t) * (mu - 1.0 / vocab_size)
+
+
 def _endpoint(
     model: torch.nn.Module,
     x_t: torch.Tensor,
@@ -126,11 +170,13 @@ def sample_tokens(
     generator: torch.Generator | None = None,
     waypoint: float = 0.0,
     time_grid: np.ndarray | list[float] | None = None,
+    cfg_strength: float = 1.0,
 ) -> torch.Tensor:
     """Integrate from noise to (B, canvas_len) token ids.
 
     `time_grid` is what the denoiser's time input reads at each point of `grid`; None
-    feeds it `grid` itself. See `denoiser_times`.
+    feeds it `grid` itself. See `denoiser_times`. `cfg_strength` guides every step; see
+    `guided_logits`.
 
     `waypoint` is unused — this integrator never forms the drift, it rebuilds the
     interpolant from gamma_fn directly — and is accepted only so the two samplers share one
@@ -155,7 +201,10 @@ def sample_tokens(
     logits = None
     for step, (t, t_next) in enumerate(pairwise(times)):
         time = torch.full((batch,), inputs[step], device=audio.device, dtype=torch.float32)
-        logits = denoiser(x_t=x_t, time=time, audio_embeddings=audio)
+        logits = guided_logits(
+            denoiser, x_t, time, audio, cfg_strength,
+            _uncond_offset(gamma_fn, mu, t, vocab_size),
+        )
         x1_hat = (
             F.one_hot(logits.argmax(dim=-1), vocab_size).to(logits.dtype)
             if hard
@@ -186,10 +235,11 @@ def sample_tokens_euler(
     waypoint: float = 0.0,
     eps: float = 1e-5,
     time_grid: np.ndarray | list[float] | None = None,
+    cfg_strength: float = 1.0,
 ) -> torch.Tensor:
     """Algorithm 6: Euler-step the drift, then decode the final state.
 
-    `time_grid` as in `sample_tokens`.
+    `time_grid` and `cfg_strength` as in `sample_tokens`.
 
     Differs from `sample_tokens` in both halves of the loop. The state is advanced by
     `x + (t_next - t) b` instead of being rebuilt from x0 at the new time, and the
@@ -212,7 +262,10 @@ def sample_tokens_euler(
     inputs = denoiser_times(times, time_grid)
     for step, (t, t_next) in enumerate(pairwise(times)):
         time = torch.full((batch,), inputs[step], device=audio.device, dtype=torch.float32)
-        logits = denoiser(x_t=x_t, time=time, audio_embeddings=audio)
+        logits = guided_logits(
+            denoiser, x_t, time, audio, cfg_strength,
+            _uncond_offset(gamma_fn, mu, t, vocab_size),
+        )
         x1_hat = (
             F.one_hot(logits.argmax(dim=-1), vocab_size).to(logits.dtype)
             if hard

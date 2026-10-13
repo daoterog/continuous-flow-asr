@@ -203,15 +203,17 @@ class MetricReporting:
             return
         if not self.sampling_probe.is_due(self.current_epoch):
             return
-        for method in self.sampling_probe.methods:
-            for n in self.sampling_probe.step_counts:
-                for grid in self.sampling_probe.grids:
-                    wer, token_error, n_utts = self.sampling_probe.score(
-                        self, datamodule, method, num_steps=n, grid=grid
-                    )
-                    key = f"sampled_{method}_{n}" + ("" if grid == "live" else f"_{grid}")
-                    self.log(f"{key}/wer", wer, batch_size=n_utts)
-                    self.log(f"{key}/perr", token_error, batch_size=n_utts)
+        probe = self.sampling_probe
+        for method in probe.methods:
+            for n in probe.step_counts:
+                for grid in probe.grids:
+                    for w in probe.cfg_strengths:
+                        wer, token_error, n_utts = probe.score(
+                            self, datamodule, method, num_steps=n, grid=grid, cfg_strength=w
+                        )
+                        key = probe.key(method, n, grid, w)
+                        self.log(f"{key}/wer", wer, batch_size=n_utts)
+                        self.log(f"{key}/perr", token_error, batch_size=n_utts)
 
     def reset_audio_only(self) -> None:
         """Clear the audio-only tally; `update_audio_only` says what each slot counts."""

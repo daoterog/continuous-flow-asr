@@ -97,6 +97,32 @@ class SamplingProbe:
         """
         return [str(g) for g in (self.cfg.get("grids") or ["live"])]
 
+    @property
+    def cfg_strengths(self) -> list[float]:
+        """The guidance weights scored each sampling epoch: `cfg_strengths`, else `cfg_strength`.
+
+        1 is no guidance. Several in one list sample the same checkpoint at each, so the
+        weight can be picked after training instead of guessed before it.
+        """
+        listed = self.cfg.get("cfg_strengths")
+        if listed:
+            return [float(w) for w in listed]
+        return [float(self.cfg.get("cfg_strength", 1.0))]
+
+    @staticmethod
+    def key(method: str, num_steps: int, grid: str = "live", cfg_strength: float = 1.0) -> str:
+        """The section one score is logged under, e.g. `sampled_interpolant_16_cfg2`.
+
+        The live grid and unguided sampling add nothing to the name, so every key from
+        before either existed still means what it did.
+        """
+        key = f"sampled_{method}_{num_steps}"
+        if grid != "live":
+            key += f"_{grid}"
+        if cfg_strength != 1.0:
+            key += f"_cfg{cfg_strength:g}"
+        return key
+
     def score(
         self,
         model: "FlowMatching",
@@ -105,6 +131,7 @@ class SamplingProbe:
         num_steps: int | None = None,
         grid: str = "live",
         role: str = "val",
+        cfg_strength: float = 1.0,
     ) -> tuple[float, float, int]:
         """(WER %, token error, utterances scored) for a full integration from noise.
 
@@ -137,6 +164,7 @@ class SamplingProbe:
                         method=method,
                         generator=generator,
                         grid=grid,
+                        cfg_strength=cfg_strength,
                     )
                 )
                 targets.append(batch["tokens"].to(model.device))

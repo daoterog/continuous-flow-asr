@@ -428,6 +428,7 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
         method: str | None = None,
         generator: torch.Generator | None = None,
         grid: str = "live",
+        cfg_strength: float | None = None,
     ) -> torch.Tensor:
         """Integrate from noise to (B, canvas_len) token ids for this batch of audio.
 
@@ -441,7 +442,12 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
         `grid` picks the flow times walked: `live`, the curve training draws from, or
         `reference`, the control's (`reference_reparam`). Either way a `uniform` denoiser
         is fed u off the live curve at those times, the label it was trained against.
+
+        `cfg_strength` is classifier-free guidance's weight (`flow.sampler.guided_logits`),
+        `sampling.cfg_strength` when None and 1 — no guidance — when that is unset too.
         """
+        if cfg_strength is None:
+            cfg_strength = float(self.cfg.get("sampling", {}).get("cfg_strength", 1.0))
         mu = None
         if self.mu_nn is not None:
             mu = F.softmax(self.mu_nn(audio), dim=-1)
@@ -479,6 +485,7 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
             generator=generator,
             waypoint=self.waypoint,
             time_grid=u_grid if self.time_input == "uniform" else None,
+            cfg_strength=cfg_strength,
         )
 
     def reference_reparam(self) -> TimeReparametrization:

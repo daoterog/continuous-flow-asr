@@ -67,6 +67,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p.add_argument("--role", choices=["train", "val", "test"], default="val")
     p.add_argument("--steps", type=int, nargs="+", default=[1, 2, 4, 8, 16, 32, 64])
     p.add_argument(
+        "--cfg-strengths", type=float, nargs="+", default=[1.0],
+        help="classifier-free guidance weights to score at every step count; 1 is none. "
+             "Only meaningful for a run trained with train.audio_dropout",
+    )
+    p.add_argument(
         "--method", nargs="+", default=None,
         help="integrators to score. Default: both for a flow map, where one step against "
              "sixteen is the whole question, and the run's own sampling.method otherwise",
@@ -342,24 +347,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     best = None
     for method in _methods(args, cfg, model):
         print(f"########## method={method} ##########")
-        print(f"{'steps':>6} {'WER %':>9} {'token err':>10}")
+        print(f"{'steps':>6} {'cfg':>5} {'WER %':>9} {'token err':>10}")
         for num_steps in args.steps:
-            preds, refs = [], []
-            for batch in batches:
-                audio = batch["audio"].to(device).float()
-                preds.append(model.sample(audio, num_steps, hard=args.hard, method=method))
-                refs.append(batch["tokens"].to(device))
-            pred, ref = torch.cat(preds), torch.cat(refs)
-            wer, token_error = score_samples(
-                pred, ref, dm.tokenizer, dm.pad_id, dm.vocab_map
-            )
-            print(f"{num_steps:>6} {wer:9.2f} {token_error:10.4f}")
-            if best is None or wer < best[2]:
-                best = (method, num_steps, wer, pred, ref)
+            for w in args.cfg_strengths:
+                # Only passed when guiding: a flow map's sampler takes no such argument.
+                guide = {} if w == 1.0 else {"cfg_strength": w}
+                preds, refs = [], []
+                for batch in batches:
+                    audio = batch["audio"].to(device).float()
+                    preds.append(
+                        model.sample(audio, num_steps, hard=args.hard, method=method, **guide)
+                    )
+                    refs.append(batch["tokens"].to(device))
+                pred, ref = torch.cat(preds), torch.cat(refs)
+                wer, token_error = score_samples(
+                    pred, ref, dm.tokenizer, dm.pad_id, dm.vocab_map
+                )
+                print(f"{num_steps:>6} {w:5g} {wer:9.2f} {token_error:10.4f}")
+                if best is None or wer < best[2]:
+                    best = (method, num_steps, wer, pred, ref, w)
         print()
 
-    method, steps, wer, pred, ref = best
-    print(f"best: {method}, {steps} steps, WER {wer:.2f}%")
+    method, steps, wer, pred, ref, w = best
+    print(f"best: {method}, {steps} steps, cfg {w:g}, WER {wer:.2f}%")
     if args.show or args.examples:
         show_examples(pred, ref, dm, args.show, args.examples)
     return 0

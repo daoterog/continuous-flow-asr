@@ -533,7 +533,8 @@ def best_monitor(model: pl.LightningModule) -> str:
     """
     probe = getattr(model, "sampling_probe", None)
     if isinstance(model, FlowMatching | MuOnly) and probe is not None and probe.enabled:
-        return f"sampled_{probe.methods[0]}_{probe.step_counts[0]}/wer"
+        key = probe.key(probe.methods[0], probe.step_counts[0], "live", probe.cfg_strengths[0])
+        return f"{key}/wer"
     return "total_loss/val"
 
 
@@ -572,23 +573,27 @@ def evaluate_saved(
         if saved_tau is not None:
             model.time_reparam = saved_tau
         for role in roles:
-            for method in probe.methods:
-                for n in probe.step_counts:
-                    # One split that cannot be read (its features missing on scratch, say)
-                    # must not cost the variants and splits after it.
-                    try:
-                        with autocast:
-                            wer, perr, n_utts = probe.score(
-                                model, dm, method, num_steps=n, role=role
-                            )
-                    except Exception as err:
-                        print(f"evaluate: {variant} on {role} failed, skipped — {err!r}")
-                        continue
-                    key = f"final/{variant}/{role}_sampled_{method}_{n}"
-                    print(f"{key}: WER {wer:.2f}  token error {perr:.4f}  ({n_utts} utts)")
-                    if isinstance(logger, WandbLogger):
-                        logger.experiment.summary[f"{key}/wer"] = wer
-                        logger.experiment.summary[f"{key}/perr"] = perr
+            for method, n, w in (
+                (method, n, w)
+                for method in probe.methods
+                for n in probe.step_counts
+                for w in probe.cfg_strengths
+            ):
+                # One split that cannot be read (its features missing on scratch, say)
+                # must not cost the variants and splits after it.
+                try:
+                    with autocast:
+                        wer, perr, n_utts = probe.score(
+                            model, dm, method, num_steps=n, role=role, cfg_strength=w
+                        )
+                except Exception as err:
+                    print(f"evaluate: {variant} on {role} failed, skipped — {err!r}")
+                    continue
+                key = f"final/{variant}/{role}_{probe.key(method, n, 'live', w)}"
+                print(f"{key}: WER {wer:.2f}  token error {perr:.4f}  ({n_utts} utts)")
+                if isinstance(logger, WandbLogger):
+                    logger.experiment.summary[f"{key}/wer"] = wer
+                    logger.experiment.summary[f"{key}/perr"] = perr
 
 
 if __name__ == "__main__":

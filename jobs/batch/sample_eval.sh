@@ -40,6 +40,8 @@
 #                   scores both for a distilled flow map, where one step against sixteen is
 #                   the question, and the run's own sampling.method for a one-time model.
 #   EVAL_SHOW     — reference/hypothesis pairs to print, spread over the split (default 25)
+#   EVAL_CFG      — classifier-free guidance weights, space separated (default "1", none);
+#                   only meaningful for a run trained with train.audio_dropout
 #   EVAL_EXAMPLES — write every pair, with its WER, to this TSV (e.g. figures/samples/x.tsv)
 #   EVAL_OVERRIDES— extra dotlist overrides. The default forces the whole split: a run's
 #                   own config may carry data.subset_n.val from when it trained, and
@@ -96,5 +98,6 @@ srun python -m scripts.evaluation.sample_eval \
     --steps ${EVAL_STEPS} \
     ${EVAL_METHOD:+--method ${EVAL_METHOD}} \
     --show "${EVAL_SHOW:-25}" \
+    --cfg-strengths ${EVAL_CFG:-1} \
     ${EVAL_EXAMPLES:+--examples "${EVAL_EXAMPLES}"} \
     data.env=snellius ${EVAL_OVERRIDES}
