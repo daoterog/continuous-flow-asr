@@ -4,8 +4,6 @@ Everything that reports numbers to a logger lives in `src.reporting`, and the me
 it owns is built by `src.metrics.utils`.
 """
 
-from pathlib import Path
-
 import lightning.pytorch as pl
 import numpy as np
 import torch
@@ -13,6 +11,7 @@ import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
 from transformers import WhisperTokenizerFast
 
+from src.checkpointing import ComponentCheckpoint
 from src.checkpointing.layout import COMPONENTS
 from src.data import VocabMap
 from src.data.augment import audio_drop, corrupt_draft, mask_latents
@@ -215,34 +214,13 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
                         metric.set_edges(new.bin_edges(metric.num_bins))
                 self.log("tau/t0", new.t_start)
                 self.log_tau_shape(new)
-                self.save_refresh(new)
+                for callback in self.trainer.callbacks:
+                    if isinstance(callback, ComponentCheckpoint):
+                        callback.record_tau(self, self.current_epoch)
                 self.print(f"tau refreshed for epoch {self.current_epoch}: {new!r}")
                 if self.tau_scheduler.mu_accuracy is not None:
                     self.print(f"mu accuracy EMA {self.tau_scheduler.mu_accuracy:.4f}")
         self.reset_metrics("train")
-
-    def save_refresh(self, curve: TimeReparametrization) -> Path:
-        """Write a refreshed curve to `<save_dir>/<run_id>/tau_refresh/e<epoch>.npz`.
-
-        The logged quantiles say where a curve sits but not its shape, and only the last
-        curve travels with the weights. One file per refresh is what lets
-        scripts/schedule/project_tau.py draw how a run's schedule actually moved, against
-        what it projected. Each holds the knots, the source and mu's accuracy then.
-        """
-        experiment = getattr(self.logger, "experiment", None)
-        run_id = getattr(experiment, "id", None) or "local"
-        out = Path(self.cfg.logging.save_dir) / str(run_id) / "tau_refresh"
-        out.mkdir(parents=True, exist_ok=True)
-        path = out / f"e{self.current_epoch:03d}.npz"
-        accuracy = self.tau_scheduler.mu_accuracy
-        np.savez(
-            path,
-            t_knots=curve.t_knots,
-            u_knots=curve.u_knots,
-            source=curve.source,
-            mu_accuracy=np.nan if accuracy is None else accuracy,
-        )
-        return path
 
     def training_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
         """One optimizer step."""

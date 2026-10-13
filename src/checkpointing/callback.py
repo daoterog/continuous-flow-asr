@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 import lightning.pytorch as pl
 from omegaconf import DictConfig, OmegaConf
 
-from .save import save_components, save_manifest, save_training_state
+from .save import save_components, save_manifest, save_tau_history, save_training_state
 
 if TYPE_CHECKING:
     from src.data import VocabMap
@@ -42,8 +42,20 @@ class ComponentCheckpoint(pl.Callback):
         self.best = float("inf") if mode == "min" else float("-inf")
 
     def on_fit_start(self, trainer: pl.Trainer, module: pl.LightningModule) -> None:
-        """Write the manifest before any weights exist, so a crash still leaves a rebuild."""
+        """Write the manifest before any weights exist, so a crash still leaves a rebuild.
+
+        And the curve the run starts on, the first entry of its tau history.
+        """
         save_manifest(self.out_dir, self.manifest, self.vocab_map)
+        self.record_tau(module, trainer.current_epoch)
+
+    def record_tau(self, module: pl.LightningModule, epoch: int) -> None:
+        """Add the module's live curve to `tau_refresh/`, as the one trained on from `epoch`.
+
+        Called by the module right after a refresh takes, since only the module knows when
+        that is; the writing lives here, with everything else the run puts on disk.
+        """
+        save_tau_history(module, self.out_dir, epoch)
 
     def on_validation_end(self, trainer: pl.Trainer, module: pl.LightningModule) -> None:
         """Refresh `_best` when the monitored metric improves.

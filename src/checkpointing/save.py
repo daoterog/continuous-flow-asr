@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import lightning.pytorch as pl
+import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf
 
@@ -97,6 +98,31 @@ def save_tau(module: pl.LightningModule, out_dir: Path, variant: str) -> Path | 
         return None
     path = Path(out_dir) / f"{TAU}_{variant}.npz"
     reparam.save(path)
+    return path
+
+
+def save_tau_history(
+    module: pl.LightningModule, out_dir: Path, epoch: int
+) -> Path | None:
+    """Write the curve live at `epoch` as `tau_refresh/e<epoch>.npz`, for the record.
+
+    `tau_<variant>.npz` keeps only the curve a variant was saved with; these keep every one
+    a run trained on, so scripts/schedule/project_tau.py can draw how the schedule actually
+    moved against what it projected. Each holds the knots, the source and mu's accuracy then.
+    """
+    reparam = getattr(module, "time_reparam", None)
+    if reparam is None or reparam.is_identity:
+        return None
+    accuracy = getattr(getattr(module, "tau_scheduler", None), "mu_accuracy", None)
+    path = Path(out_dir) / "tau_refresh" / f"e{epoch:03d}.npz"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        path,
+        t_knots=reparam.t_knots,
+        u_knots=reparam.u_knots,
+        source=reparam.source,
+        mu_accuracy=np.nan if accuracy is None else accuracy,
+    )
     return path
 
 
