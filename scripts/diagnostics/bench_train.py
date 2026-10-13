@@ -322,6 +322,23 @@ class ReplayLoader:
         return iter([self.batch] * self.steps)
 
 
+def bench_model(trainmod, dm, cfg):  # noqa: ANN001, ANN201 - `train` is imported lazily
+    """The module a trial times: mu alone for configs/recipes/mu_only.yaml, else the flow.
+
+    Built here rather than through `train.build_model`, which would also turn the distill
+    suite's config into a FlowMapping — the suites time the one-time model.
+    """
+    common = dict(
+        vocab_size=dm.vocab_size, pad_id=dm.pad_id, canvas_len=cfg.data.canvas_len,
+        tokenizer=dm.tokenizer, vocab_map=dm.vocab_map,
+    )
+    if cfg.get("mu_only"):
+        return trainmod.MuOnly(cfg, **common)
+    return trainmod.FlowMatching(
+        cfg, time_reparam=trainmod.build_time_reparam(dm, cfg), **common
+    )
+
+
 def time_one(config: str, overrides: list[str], args: argparse.Namespace) -> dict:
     """One trial: build, warm up, then time `--steps` optimizer steps end to end."""
     import lightning.pytorch as pl
@@ -349,11 +366,7 @@ def time_one(config: str, overrides: list[str], args: argparse.Namespace) -> dic
     ])
     T.setup_reproducibility(cfg)
     dm = T.build_datamodule(cfg)
-    model = T.FlowMatching(
-        cfg, vocab_size=dm.vocab_size, pad_id=dm.pad_id,
-        canvas_len=cfg.data.canvas_len, tokenizer=dm.tokenizer,
-        vocab_map=dm.vocab_map, time_reparam=T.build_time_reparam(dm, cfg),
-    )
+    model = bench_model(T, dm, cfg)
     timer = StepTimer(args.warmup)
     hook = type("BenchTimer", (Callback,), {"on_train_batch_end": staticmethod(
         lambda *a, **k: timer.on_train_batch_end()
@@ -414,11 +427,7 @@ def time_eval(config: str, args: argparse.Namespace) -> dict:
     ])
     T.setup_reproducibility(cfg)
     dm = T.build_datamodule(cfg)
-    model = T.FlowMatching(
-        cfg, vocab_size=dm.vocab_size, pad_id=dm.pad_id,
-        canvas_len=cfg.data.canvas_len, tokenizer=dm.tokenizer,
-        vocab_map=dm.vocab_map, time_reparam=T.build_time_reparam(dm, cfg),
-    )
+    model = bench_model(T, dm, cfg)
     trainer = pl.Trainer(
         max_epochs=1, accelerator="gpu", devices=1,
         precision=cfg.train.precision or "32-true",

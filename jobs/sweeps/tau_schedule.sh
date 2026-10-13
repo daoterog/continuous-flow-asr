@@ -20,6 +20,9 @@
 #
 #   drop<x>    model.denoiser.dropout=x     the recipe's 0.1, raised
 #   wd<x>      train.weight_decay=x         the recipe's 0.01, raised
+#   mudrop<x>  model.audio_decoder.dropout  mu's dropout; for configs/recipes/mu_only.yaml,
+#                                           where mu is the whole model
+#   mulr<x>    train.audio_decoder_lr       mu's learning rate, likewise
 #   mask       train.audio_mask=...         SpecAugment on the Whisper latents: 2 time and
 #                                           2 channel masks per utterance, each up to 10% of
 #                                           the axis (src/data/augment.py)
@@ -101,6 +104,8 @@ knob_override() {
         floor*)  echo "schedule.uniform_floor=${1#floor}" ;;
         sigma*)  echo "flow.alpha={\"type\":\"linear_down\",\"scale\":${1#sigma}}" ;;
         drop*)   echo "model.denoiser.dropout=${1#drop}" ;;
+        mudrop*) echo "model.audio_decoder.dropout=${1#mudrop}" ;;
+        mulr*)   echo "train.audio_decoder_lr=${1#mulr}" ;;
         wd*)     echo "train.weight_decay=${1#wd}" ;;
         measval*) echo "schedule.refresh_curve_from=measured schedule.refresh_every_n_epochs=${1#measval} schedule.refresh_split=val" ;;
         meas*)   echo "schedule.refresh_curve_from=measured schedule.refresh_every_n_epochs=${1#meas}" ;;

@@ -42,6 +42,7 @@ from src.flow.coefficients import make_schedule
 from src.flow.schedule import TimeReparametrization
 from src.flow_mapping import DISTILL_GROUPS, FlowMapping
 from src.flow_matching import FlowMatching
+from src.mu_only import MuOnly
 
 # Used to parse OmegaConf dotlist assignments like
 # `train.num_epochs=10`, `data.subset_n.train=64`
@@ -259,6 +260,8 @@ def build_model(
         validate_distill_teacher(dm, cfg)
         print(f"distilling from {cfg.distill.teacher}")
         return FlowMapping(cfg, **common)
+    if cfg.get("mu_only"):
+        return MuOnly(cfg, **common)
     return FlowMatching(cfg, time_reparam=build_time_reparam(dm, cfg), **common)
 
 
@@ -504,7 +507,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     trainer = build_trainer(cfg, logger, extra, monitor=best_monitor(model))
     trainer.fit(model, datamodule=dm)
 
-    if cfg.train.get("save_components", True) and isinstance(model, FlowMatching):
+    if cfg.train.get("save_components", True) and isinstance(model, FlowMatching | MuOnly):
         # The weights are already on disk; a failure here costs the numbers, not the run,
         # and must not turn a finished job into a failed one.
         try:
@@ -529,13 +532,13 @@ def best_monitor(model: pl.LightningModule) -> str:
     The first method and step count logged, on the live grid.
     """
     probe = getattr(model, "sampling_probe", None)
-    if isinstance(model, FlowMatching) and probe is not None and probe.enabled:
+    if isinstance(model, FlowMatching | MuOnly) and probe is not None and probe.enabled:
         return f"sampled_{probe.methods[0]}_{probe.step_counts[0]}/wer"
     return "total_loss/val"
 
 
 def evaluate_saved(
-    model: FlowMatching,
+    model: FlowMatching | MuOnly,
     dm: AudioFeatureDataModule,
     out_dir: Path,
     logger: Logger | None,
@@ -558,7 +561,7 @@ def evaluate_saved(
     bf16 = "bf16" in str(model.cfg.train.get("precision") or "") and device.type == "cuda"
     autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=bf16)
     for variant in ("best", "final"):
-        if not (out_dir / f"denoiser_{variant}.pth").exists():
+        if not (out_dir / f"{model.components[0]}_{variant}.pth").exists():
             print(f"evaluate: no _{variant} components in {out_dir}, skipped")
             continue
         _, built, saved_tau = load_components(out_dir, variant)

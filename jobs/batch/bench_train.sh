@@ -99,17 +99,22 @@ IFS=',' read -ra GPU_IDS <<< "${CUDA_VISIBLE_DEVICES:-0,1}"
 OUT0="bench_gpu_${SLURM_JOB_ID:-local}_0.out"
 OUT1="bench_gpu_${SLURM_JOB_ID:-local}_1.out"
 
+# BENCH_CONFIG benchmarks another recipe on the same ladder, e.g. configs/recipes/mu_only.yaml.
+CONFIG_ARGS=()
+[[ -n "${BENCH_CONFIG}" ]] && CONFIG_ARGS=(--config "${BENCH_CONFIG}")
+echo "config    : ${BENCH_CONFIG:-the gpu suite default}"
+
 CUDA_VISIBLE_DEVICES="${GPU_IDS[0]}" python -m scripts.diagnostics.bench_train \
-    --suite gpu --env snellius --steps "${STEPS}" --n-utts "${N_UTTS}" \
+    --suite gpu --env snellius "${CONFIG_ARGS[@]}" --steps "${STEPS}" --n-utts "${N_UTTS}" \
     --batches "${LADDER[@]}" --only "${LADDER_TRIALS[@]}" > "${OUT0}" 2>&1 &
 PID0=$!
 (
     CUDA_VISIBLE_DEVICES="${GPU_IDS[1]:-${GPU_IDS[0]}}" python -m scripts.diagnostics.bench_train \
-        --suite gpu --env snellius --steps "${STEPS}" --n-utts "${N_UTTS}" \
+        --suite gpu --env snellius "${CONFIG_ARGS[@]}" --steps "${STEPS}" --n-utts "${N_UTTS}" \
         --at-batch "${AT_BATCH}" \
         --only "replay $((AT_BATCH / 2))" "replay ${AT_BATCH}"
     CUDA_VISIBLE_DEVICES="${GPU_IDS[1]:-${GPU_IDS[0]}}" python -m scripts.diagnostics.bench_train \
-        --suite gpu --env snellius --eval-timing --at-batch "${AT_BATCH}"
+        --suite gpu --env snellius "${CONFIG_ARGS[@]}" --eval-timing --at-batch "${AT_BATCH}"
 ) > "${OUT1}" 2>&1 &
 PID1=$!
 
