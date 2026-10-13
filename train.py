@@ -540,6 +540,11 @@ def evaluate_saved(
     # Lightning leaves the module on the CPU once fit tears down.
     model.to(device).eval()
     probe = model.sampling_probe
+    # Sample under the precision validation ran at, or these numbers would be measured
+    # differently from the val curve `_best` was chosen on: Lightning wraps validation in
+    # bf16 autocast under `bf16-mixed`, and calling `sample` outside it would run fp32.
+    bf16 = "bf16" in str(model.cfg.train.get("precision") or "") and device.type == "cuda"
+    autocast = torch.autocast(device.type, dtype=torch.bfloat16, enabled=bf16)
     for variant in ("best", "final"):
         if not (out_dir / f"denoiser_{variant}.pth").exists():
             print(f"evaluate: no _{variant} components in {out_dir}, skipped")
@@ -554,7 +559,10 @@ def evaluate_saved(
         for role in roles:
             for method in probe.methods:
                 for n in probe.step_counts:
-                    wer, perr, n_utts = probe.score(model, dm, method, num_steps=n, role=role)
+                    with autocast:
+                        wer, perr, n_utts = probe.score(
+                            model, dm, method, num_steps=n, role=role
+                        )
                     key = f"final/{variant}/{role}_sampled_{method}_{n}"
                     print(f"{key}: WER {wer:.2f}  token error {perr:.4f}  ({n_utts} utts)")
                     if isinstance(logger, WandbLogger):
