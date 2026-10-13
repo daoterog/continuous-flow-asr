@@ -40,6 +40,11 @@
 #                                           the denoiser learns to correct the field
 #   draftmu<p>                              the same, swapped for samples from mu: the
 #                                           acoustically plausible errors a draft makes
+#   draftmudec<p>                           mu's swaps at p * (1 - t): a draft is worse the
+#                                           earlier it is
+#   notau      schedule.enabled=false       t drawn uniformly. For a sigma too small for the
+#                                           simulated curve, which collapses to a step at
+#                                           t = 0.5 once the field decodes deterministically
 #
 # Arms join knobs with `+` (sigma0.5+floor0.1); `control` is the recipe as is.
 #
@@ -99,6 +104,8 @@ knob_override() {
         wd*)     echo "train.weight_decay=${1#wd}" ;;
         measval*) echo "schedule.refresh_curve_from=measured schedule.refresh_every_n_epochs=${1#measval} schedule.refresh_split=val" ;;
         meas*)   echo "schedule.refresh_curve_from=measured schedule.refresh_every_n_epochs=${1#meas}" ;;
+        notau)   echo "schedule.enabled=false" ;;
+        draftmudec*) echo "train.draft_corruption={\"p\":${1#draftmudec},\"source\":\"mu\",\"schedule\":\"decreasing\"}" ;;
         draftmu*) echo "train.draft_corruption={\"p\":${1#draftmu},\"source\":\"mu\"}" ;;
         draft*)  echo "train.draft_corruption={\"p\":${1#draft},\"source\":\"uniform\"}" ;;
         adroplin*) echo "train.audio_dropout={\"p\":${1#adroplin},\"schedule\":\"linear\"}" ;;
