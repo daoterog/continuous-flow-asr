@@ -195,9 +195,13 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
         """
         super().on_train_epoch_start()
         if self.tau_scheduler.is_due(self):
-            new, skipped = self.tau_scheduler.refresh(
-                self, getattr(self.trainer, "datamodule", None)
-            )
+            self._ema_in()
+            try:
+                new, skipped = self.tau_scheduler.refresh(
+                    self, getattr(self.trainer, "datamodule", None)
+                )
+            finally:
+                self._ema_out()
             if skipped is not None:
                 self.print(skipped)
             # Outside the `new is not None` branch: a refresh that was declined still
