@@ -258,7 +258,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Rebuild the run, probe each role, write the tables and the figure."""
     args = parse_args(argv)
     cfg = _config_from_components(args)
+    # Both: the val and test loaders batch by eval_batch_size, which the snellius profile
+    # sets to 512 — far more full-latent utterances than a MIG slice holds.
     cfg.data.batch_size = args.batch_size
+    cfg.data.eval_batch_size = args.batch_size
     T.setup_reproducibility(cfg)
     dm = T.build_datamodule(cfg)
     model = _model_from_components(args, cfg, dm)

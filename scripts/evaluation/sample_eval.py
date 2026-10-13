@@ -318,6 +318,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"batch {cfg.data.batch_size} -> {cap}: {per_utt:.3f} GiB per utterance "
               f"of field, against a {args.field_budget_gib:.0f} GiB budget")
         cfg.data.batch_size = cap
+    # The val and test loaders batch by eval_batch_size, not batch_size — 512 under the
+    # snellius profile, which no MIG slice holds at full latents — so it follows the cap.
+    cfg.data.eval_batch_size = cfg.data.batch_size
 
     T.setup_reproducibility(cfg)
     dm = T.build_datamodule(cfg)
