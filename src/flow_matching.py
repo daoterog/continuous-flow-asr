@@ -204,8 +204,6 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
                 self._ema_out()
             if skipped is not None:
                 self.print(skipped)
-            # Outside the `new is not None` branch: a refresh that was declined still
-            # says which curve is driving, and under `warmup` that is the answer.
             self.log_tau_source()
             if new is not None:
                 new = new.with_uniform_floor(
