@@ -15,3 +15,12 @@ recipe: train960_full
 
 data:
   compact_vocab: false
+  # A deliberate exception to "recipes never set profile keys": the snellius profile's 512
+  # is sized for V=1,193, and at V=51,866 one (512, canvas_len, V) field is ~24 GB, so
+  # validation and the measured-tau sweep would run out of memory. 32 is ~1.5 GB.
+  eval_batch_size: 32
+
+sampling:
+  # The integrator holds several such fields at once; null would follow the training batch,
+  # which the smoke job sets for this vocabulary.
+  batch_size: 32
