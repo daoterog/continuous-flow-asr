@@ -18,6 +18,10 @@
 #
 # The reloaded `_final` on val must equal the sampled WER the run logged at its last
 # sampling epoch; that is the check this exists for.
+#
+# Optional env vars:
+#   EVAL_ROLES      — splits to score               (default "val test")
+#   EVAL_OVERRIDES  — dotlist overrides on top of the run's own config
 
 set -eo pipefail
 
@@ -35,4 +39,4 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
 # data.env=snellius because the features are on scratch, not in the repo's data/.
 srun python -m scripts.evaluation.evaluate_saved --components "${COMPONENTS}" \
-    data.env=snellius ${EVAL_OVERRIDES:-}
+    --roles ${EVAL_ROLES:-val test} data.env=snellius ${EVAL_OVERRIDES:-}

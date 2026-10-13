@@ -559,10 +559,16 @@ def evaluate_saved(
         for role in roles:
             for method in probe.methods:
                 for n in probe.step_counts:
-                    with autocast:
-                        wer, perr, n_utts = probe.score(
-                            model, dm, method, num_steps=n, role=role
-                        )
+                    # One split that cannot be read (its features missing on scratch, say)
+                    # must not cost the variants and splits after it.
+                    try:
+                        with autocast:
+                            wer, perr, n_utts = probe.score(
+                                model, dm, method, num_steps=n, role=role
+                            )
+                    except Exception as err:
+                        print(f"evaluate: {variant} on {role} failed, skipped — {err!r}")
+                        continue
                     key = f"final/{variant}/{role}_sampled_{method}_{n}"
                     print(f"{key}: WER {wer:.2f}  token error {perr:.4f}  ({n_utts} utts)")
                     if isinstance(logger, WandbLogger):
