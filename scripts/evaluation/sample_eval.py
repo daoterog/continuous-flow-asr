@@ -32,7 +32,7 @@ from src.data import AudioFeatureDataModule
 from src.flow.schedule import TimeReparametrization
 from src.flow_mapping import MAP_SAMPLERS, FlowMapping
 from src.flow_matching import FlowMatching
-from src.metrics import ids_to_text, score_samples
+from src.metrics import corpus_wer, ids_to_text, score_samples
 
 # The config this machine is configured for, to override a checkpoint's own data.env.
 
@@ -81,7 +81,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="GiB the (B, canvas, vocab) fields may occupy; the cap is derived from it",
     )
     p.add_argument("--hard", action="store_true", help="feed back one-hot instead of softmax")
-    p.add_argument("--show", type=int, default=3, help="example transcripts to print")
+    p.add_argument(
+        "--show", type=int, default=25,
+        help="reference/hypothesis pairs to print, spread evenly over the split",
+    )
+    p.add_argument(
+        "--examples", type=Path, default=None,
+        help="write every reference/hypothesis pair, with its WER, to this TSV",
+    )
     args = p.parse_args(flags)
     args.overrides = overrides
     return args
@@ -353,14 +360,49 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     method, steps, wer, pred, ref = best
     print(f"best: {method}, {steps} steps, WER {wer:.2f}%")
-    if args.show:
-        hyps = ids_to_text(pred[: args.show], dm.tokenizer, dm.pad_id, dm.vocab_map)
-        gold = ids_to_text(ref[: args.show], dm.tokenizer, dm.pad_id, dm.vocab_map)
-        print()
-        for i, (g, h) in enumerate(zip(gold, hyps, strict=True)):
-            print(f"  [{i}] ref  {g[:100]}")
-            print(f"      hyp  {h[:100]}")
+    if args.show or args.examples:
+        show_examples(pred, ref, dm, args.show, args.examples)
     return 0
+
+
+def show_examples(
+    pred: torch.Tensor,
+    ref: torch.Tensor,
+    dm: AudioFeatureDataModule,
+    n: int,
+    out: Path | None = None,
+) -> None:
+    """Print `n` reference/hypothesis pairs, and optionally write every pair to `out`.
+
+    The `n` are spread evenly over the split rather than taken from its head: LibriSpeech is
+    ordered by speaker and chapter, so the first few utterances are one reader. Each carries
+    its own WER, from the same normaliser and kaldialign scoring as the corpus number, so a
+    bad line can be told from a merely different spelling. `out` is a TSV of the whole split
+    (index, WER, reference, hypothesis), the raw text a reader would see.
+    """
+    hyps = ids_to_text(pred, dm.tokenizer, dm.pad_id, dm.vocab_map)
+    refs = ids_to_text(ref, dm.tokenizer, dm.pad_id, dm.vocab_map)
+    rows = []
+    for i, (r, h) in enumerate(zip(refs, hyps, strict=True)):
+        # One pair through the corpus scorer is that utterance's WER; an empty reference has
+        # none, as the corpus number drops it too.
+        rows.append((i, corpus_wer([r], [h]) if r.strip() else float("nan"), r, h))
+
+    perfect = sum(row[1] == 0 for row in rows)
+    print(f"\n{perfect} of {len(rows)} utterances perfect ({100 * perfect / len(rows):.1f}%)")
+    picks = sorted({round(k * (len(rows) - 1) / max(n - 1, 1)) for k in range(n)}) if n else []
+    for i in picks:
+        _, utt_wer, r, h = rows[i]
+        print(f"\n  [{i}] WER {utt_wer:5.1f}%")
+        print(f"      ref  {r}")
+        print(f"      hyp  {h}")
+    if out is not None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with out.open("w") as f:
+            f.write("index\twer\treference\thypothesis\n")
+            for i, utt_wer, r, h in rows:
+                f.write(f"{i}\t{utt_wer:.1f}\t{r}\t{h}\n")
+        print(f"\nwrote all {len(rows)} pairs to {out}")
 
 
 if __name__ == "__main__":

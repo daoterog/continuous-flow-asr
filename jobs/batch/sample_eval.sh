@@ -39,6 +39,8 @@
 #   EVAL_METHOD   — integrators to score, space separated ("interpolant euler"). Unset
 #                   scores both for a distilled flow map, where one step against sixteen is
 #                   the question, and the run's own sampling.method for a one-time model.
+#   EVAL_SHOW     — reference/hypothesis pairs to print, spread over the split (default 25)
+#   EVAL_EXAMPLES — write every pair, with its WER, to this TSV (e.g. figures/samples/x.tsv)
 #   EVAL_OVERRIDES— extra dotlist overrides. The default forces the whole split: a run's
 #                   own config may carry data.subset_n.val from when it trained, and
 #                   scoring two runs on different amounts is what makes them incomparable.
@@ -93,4 +95,6 @@ srun python -m scripts.evaluation.sample_eval \
     "${HARD_ARGS[@]}" \
     --steps ${EVAL_STEPS} \
     ${EVAL_METHOD:+--method ${EVAL_METHOD}} \
+    --show "${EVAL_SHOW:-25}" \
+    ${EVAL_EXAMPLES:+--examples "${EVAL_EXAMPLES}"} \
     data.env=snellius ${EVAL_OVERRIDES}
