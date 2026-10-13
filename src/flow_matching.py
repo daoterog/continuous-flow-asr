@@ -109,7 +109,11 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
         self.tokenizer = tokenizer
         self.vocab_map = vocab_map
         self.sampling_probe = SamplingProbe(cfg.get("sampling"), cfg.data.batch_size)
-        self.tau_scheduler = build_tau_scheduler(cfg.schedule, seed=cfg.seed)
+        self.tau_scheduler = build_tau_scheduler(
+            cfg.schedule,
+            seed=cfg.seed,
+            val_every=int(cfg.train.get("check_val_every_n_epoch", 1)),
+        )
 
         self.denoiser = build_denoiser(cfg.model.denoiser, vocab_size)
         self.mu_nn = (

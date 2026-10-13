@@ -32,16 +32,27 @@ TAU_STRATEGIES: dict[str, type[TauScheduler]] = {
 }
 
 
-def build_tau_scheduler(cfg: DictConfig, seed: int = 0) -> TauScheduler:
+def build_tau_scheduler(cfg: DictConfig, seed: int = 0, val_every: int = 1) -> TauScheduler:
     """The tau strategy `cfg.refresh_curve_from` names; `cfg` is the `schedule` node.
 
     Raises on an unknown name here rather than at the first refresh, which with
     `refresh_every_n_epochs: 5` would be several epochs into a job.
+
+    A refresh that reads the val split must land on a validation boundary: every
+    `refresh_every_n_epochs` a multiple of `val_every` (`train.check_val_every_n_epoch`),
+    so the curve is re-read right after a validation pass and never between two of them.
     """
     curve = str(cfg.get("refresh_curve_from", "simulated"))
     if curve not in TAU_STRATEGIES:
         raise ValueError(
             f"schedule.refresh_curve_from must be one of "
             f"{sorted(TAU_STRATEGIES)}, got {curve!r}"
+        )
+    every = int(cfg.get("refresh_every_n_epochs", 0))
+    if str(cfg.get("refresh_split", "train")) == "val" and every % max(val_every, 1):
+        raise ValueError(
+            f"schedule.refresh_split=val refreshes every {every} epochs, which is not a "
+            f"multiple of train.check_val_every_n_epoch={val_every}; set "
+            f"refresh_every_n_epochs to a multiple of it"
         )
     return TAU_STRATEGIES[curve](cfg, seed=seed)

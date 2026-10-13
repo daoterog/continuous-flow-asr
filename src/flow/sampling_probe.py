@@ -1,4 +1,4 @@
-"""Sampling from noise as a measurement, on a fixed slice of the validation split."""
+"""Sampling from noise as a measurement, on a fixed slice of a split (val unless told)."""
 
 from typing import TYPE_CHECKING
 
@@ -32,7 +32,7 @@ class SamplingProbe:
         """`cfg` is the `sampling` config node; the batch size is the chunking fallback."""
         self.cfg = cfg
         self.train_batch_size = train_batch_size
-        self._indices: list[int] | None = None
+        self._indices: dict[str, list[int]] = {}
 
     @property
     def enabled(self) -> bool:
@@ -51,20 +51,20 @@ class SamplingProbe:
         every = int(self.cfg.get("every_n_epochs", 5))
         return every > 0 and (epoch + 1) % every == 0
 
-    def selection(self, datamodule: "AudioFeatureDataModule") -> list[int]:
-        """The val utterances to sample, as indices into the split, chosen once and cached.
+    def selection(self, datamodule: "AudioFeatureDataModule", role: str = "val") -> list[int]:
+        """The `role` utterances to sample, as indices into the split, chosen once and cached.
 
         `n_utts` unset means the whole split, which is what makes two runs comparable —
         a WER over a different subset each time is not a number you can put side by side.
         Only the indices are kept: at full latents the whole split is ~10 GB of audio, so
         `score` collates one chunk at a time instead of holding all of it in RAM.
         """
-        if self._indices is None:
-            subset = datamodule.datasets["val"]
+        if role not in self._indices:
+            subset = datamodule.datasets[role]
             want = self.cfg.get("n_utts")
             n = len(subset) if want is None else min(int(want), len(subset))
-            self._indices = list(range(n))
-        return self._indices
+            self._indices[role] = list(range(n))
+        return self._indices[role]
 
     @property
     def methods(self) -> list[str]:
@@ -104,6 +104,7 @@ class SamplingProbe:
         method: str | None = None,
         num_steps: int | None = None,
         grid: str = "live",
+        role: str = "val",
     ) -> tuple[float, float, int]:
         """(WER %, token error, utterances scored) for a full integration from noise.
 
@@ -115,8 +116,8 @@ class SamplingProbe:
         x0 comes from a generator seeded the same on every call, so two methods scored in
         the same epoch integrate the same noise and differ only by the integrator.
         """
-        indices = self.selection(datamodule)
-        subset = datamodule.datasets["val"]
+        indices = self.selection(datamodule, role)
+        subset = datamodule.datasets[role]
         was_training = model.training
         model.eval()
         try:

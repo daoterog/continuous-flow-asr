@@ -31,6 +31,10 @@
 #                                           follows the denoiser's own error rather than the
 #                                           field's (scripts/diagnostics/probe_audio_info.py
 #                                           puts it at t~0-0.6, where simulated draws ~5%)
+#   measval<k>                              the same, read off val: on train the model
+#                                           memorises, recovery saturates just above t=0,
+#                                           and the curve collapses there (median t 0.006
+#                                           by epoch 90 in the `final` round)
 #   draft<p>   train.draft_corruption       a share p of real tokens in the field swapped
 #                                           for random ones, the loss still on the truth:
 #                                           the denoiser learns to correct the field
@@ -93,6 +97,7 @@ knob_override() {
         sigma*)  echo "flow.alpha={\"type\":\"linear_down\",\"scale\":${1#sigma}}" ;;
         drop*)   echo "model.denoiser.dropout=${1#drop}" ;;
         wd*)     echo "train.weight_decay=${1#wd}" ;;
+        measval*) echo "schedule.refresh_curve_from=measured schedule.refresh_every_n_epochs=${1#measval} schedule.refresh_split=val" ;;
         meas*)   echo "schedule.refresh_curve_from=measured schedule.refresh_every_n_epochs=${1#meas}" ;;
         draftmu*) echo "train.draft_corruption={\"p\":${1#draftmu},\"source\":\"mu\"}" ;;
         draft*)  echo "train.draft_corruption={\"p\":${1#draft},\"source\":\"uniform\"}" ;;
