@@ -1,0 +1,22 @@
+# Recipe: the final compact-vocabulary model, fulldata.yaml's stack on all of LibriSpeech.
+#
+#   python train.py --config configs/recipes/train960.yaml --where snellius --run big
+#
+# Everything that was screened on train.100 is inherited unchanged — model, sigma 0.4,
+# draft-mu, EMA, wd 0.05, the schedule — so this run differs from the screens in the data
+# alone. The vocabulary stays compact (V=1,193 on train.100, re-measured here: train.960
+# brings tokens train.100 never used), which is what every screen measured.
+# train960_full.yaml is the same run over Whisper's full vocabulary.
+_base_: fulldata.yaml
+
+recipe: train960
+
+data:
+  splits:
+    # LibriSpeech's three training sets: train.clean.100, train.clean.360 and
+    # train.other.500. The cross product names six pairs; src/data/spec.resolve_role keeps
+    # the three that exist on disk.
+    train: {configs: [clean, other], splits: [train.100, train.360, train.500]}
+    # Clean validation and test, as every screen, so the numbers line up.
+    val:   {configs: [clean], splits: [validation]}
+    test:  {configs: [clean], splits: [test]}

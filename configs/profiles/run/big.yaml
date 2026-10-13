@@ -1,0 +1,15 @@
+# Run: the train.960 runs (configs/recipes/train960*.yaml). Picked by `--run big`.
+train:
+  # Provisional: set from the smoke jobs' measured sec/epoch against the budget. One
+  # train.960 epoch is ~10x a train.100 one (281k utterances against 28.5k), so 100 of them
+  # are ~10x the steps of a 300-epoch train.100 run's first third, and OneCycle stretches
+  # its schedule over whatever total this gives.
+  num_epochs: 100
+  # A val pass and a sampling probe cost what they did on train.100 (~33 s, the val split is
+  # the same), against ~10x the training per epoch, so every 2 epochs keeps evaluation near
+  # the ~6% that every 10 was on train.100 — and gives 50 readings for `_best`.
+  check_val_every_n_epoch: 2
+sampling:
+  # A multiple of check_val_every_n_epoch: the probe runs inside the validation epoch.
+  every_n_epochs: 2
+  log_methods: null

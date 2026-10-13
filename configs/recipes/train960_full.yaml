@@ -1,0 +1,17 @@
+# Recipe: train960.yaml over Whisper's full vocabulary (V=51,866), the paper's final setup.
+#
+#   python train.py --config configs/recipes/train960_full.yaml --where snellius --run big
+#
+# Untested at this V. What changes besides the vocabulary:
+#   * the denoiser's input and output projections and mu's output layer grow 43x, so the
+#     model is no longer small + micro in parameter count (mu alone gains ~13M);
+#   * every (B, canvas_len, V) field is 43x larger, so the batch that trains compact OOMs
+#     here — the smoke job picks it, passed as data.batch_size at submission;
+#   * the field's noise ceiling rises (max of V Gaussians ~sqrt(2 ln V): 4.65 against 3.77),
+#     so the simulated tau curve under sigma 0.4 moves right of where it was screened.
+_base_: train960.yaml
+
+recipe: train960_full
+
+data:
+  compact_vocab: false
