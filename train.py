@@ -391,13 +391,25 @@ def components_dir(cfg: DictConfig, logger: object) -> Path:
 
 
 def build_trainer(
-    cfg: DictConfig, logger: object, extra_callbacks: Sequence[pl.Callback] = ()
+    cfg: DictConfig,
+    logger: object,
+    extra_callbacks: Sequence[pl.Callback] = (),
+    monitor: str = "total_loss/val",
 ) -> pl.Trainer:
-    """Trainer with gradient clipping, LR logging and a val-loss checkpoint."""
+    """Trainer with gradient clipping, LR logging and a checkpoint on the best `monitor`."""
     checkpoint = cfg.train.get("checkpoint", True)
     callbacks: list[pl.Callback] = [Heartbeat(), *extra_callbacks]
     if checkpoint:
-        callbacks.append(ModelCheckpoint(monitor="total_loss/val", mode="min", save_last=True))
+        sample_every_n = int(cfg.get("sampling", {}).get("every_n_epochs", 0) or 0)
+        val_every_n = int(cfg.train.get("check_val_every_n_epoch", 1))
+        if monitor.startswith("sampled_") and sample_every_n != val_every_n:
+            print(
+                f"checkpoint: sampling.every_n_epochs ({sample_every_n}) differs from "
+                f"check_val_every_n_epoch ({val_every_n}), so the .ckpt tracks "
+                f"total_loss/val; components _best still tracks {monitor}"
+            )
+            monitor = "total_loss/val"
+        callbacks.append(ModelCheckpoint(monitor=monitor, mode="min", save_last=True))
     if logger:
         callbacks.append(LearningRateMonitor(logging_interval="step"))
     stop_on = cfg.train.get("early_stop_on")
@@ -489,7 +501,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(f"components  {out_dir}  (_best by {best_monitor(model)})")
 
-    trainer = build_trainer(cfg, logger, extra)
+    trainer = build_trainer(cfg, logger, extra, monitor=best_monitor(model))
     trainer.fit(model, datamodule=dm)
 
     if cfg.train.get("save_components", True) and isinstance(model, FlowMatching):
