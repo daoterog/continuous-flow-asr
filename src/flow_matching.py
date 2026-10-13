@@ -258,6 +258,7 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
         t = self.time_reparam.t_of(u)
 
         heard, prior = audio, mu
+        draft_logits = mu_logits if self.mu_nn is not None else None
         audio_dropout = self.cfg.train.get("audio_dropout") or {}
         if self.training and audio_dropout.get("p", 0.0) > 0.0:
             dropped = audio_drop(t, self.cfg.train.get("audio_dropout"))
@@ -265,6 +266,11 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
             if mu is not None:
                 uniform = torch.full_like(mu, 1.0 / self.vocab_size)
                 prior = torch.where(dropped[:, None, None], uniform, mu)
+                # mu read the real audio, so its samples would carry it into a dropped row's
+                # draft; zero logits make the corruption uniform there instead.
+                draft_logits = torch.where(
+                    dropped[:, None, None], torch.zeros_like(mu_logits), mu_logits
+                )
 
         field_x1 = x1
         if self.training:
@@ -273,7 +279,7 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
                 t,
                 tokens != self.pad_id,
                 self.cfg.train.get("draft_corruption"),
-                mu_logits=mu_logits if self.mu_nn is not None else None,
+                mu_logits=draft_logits,
             )
         i_t = self.make_interpolant(x1=field_x1, t=t, mu=prior)
 
