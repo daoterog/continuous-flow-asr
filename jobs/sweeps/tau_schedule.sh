@@ -45,6 +45,12 @@
 #                                           acoustically plausible errors a draft makes
 #   draftmudec<p>                           mu's swaps at p * (1 - t): a draft is worse the
 #                                           earlier it is
+#   linear     flow.gamma=null + no mu      the linear interpolant recipe on this stack: no
+#                                           audio decoder, unit noise, no draft-mu (which
+#                                           needs a mu). Ours against it is "is mu needed?"
+#   cfgs       sampling.cfg_strengths       score every sampling epoch, and the final
+#                                           variants, at w = 1, 1.5, 2, 3 (classifier-free
+#                                           guidance; pair with adrop<p> to train it)
 #   notau      schedule.enabled=false       t drawn uniformly. For a sigma too small for the
 #                                           simulated curve, which collapses to a step at
 #                                           t = 0.5 once the field decodes deterministically
@@ -110,6 +116,8 @@ knob_override() {
         measval*) echo "schedule.refresh_curve_from=measured schedule.refresh_every_n_epochs=${1#measval} schedule.refresh_split=val" ;;
         meas*)   echo "schedule.refresh_curve_from=measured schedule.refresh_every_n_epochs=${1#meas}" ;;
         notau)   echo "schedule.enabled=false" ;;
+        linear)  echo "flow.gamma=null model.audio_decoder=null flow.alpha=linear_down train.draft_corruption={\"p\":0}" ;;
+        cfgs)    echo "sampling.cfg_strengths=[1,1.5,2,3]" ;;
         draftmudec*) echo "train.draft_corruption={\"p\":${1#draftmudec},\"source\":\"mu\",\"schedule\":\"decreasing\"}" ;;
         draftmu*) echo "train.draft_corruption={\"p\":${1#draftmu},\"source\":\"mu\"}" ;;
         draft*)  echo "train.draft_corruption={\"p\":${1#draft},\"source\":\"uniform\"}" ;;

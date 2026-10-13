@@ -91,9 +91,10 @@ train:
   # The field is built from a draft with 10% of its real tokens resampled from mu, the loss
   # still on the truth: training otherwise never shows the denoiser a field that is wrong,
   # which sampling always does (src/data/augment.py). tau-schedule on sigma 0.4, sampled val
-  # WER by dose: 0 -> 13.6, 0.1 -> 10.7, 0.2 -> 9.7 (seed 3; 10.2 on test-clean), each ahead
-  # of the one before at every sampling epoch.
-  draft_corruption: {p: 0.2, source: mu}
+  # WER by dose: 0 -> 13.6, 0.1 -> 10.7, 0.2 -> 9.7 (seed 3); then on seed 4, 0.2 -> 10.6
+  # and 0.3 -> 9.0 (9.3 on test-clean), ahead at every sampling epoch, while 0.4 and 0.5
+  # were already behind by epoch 69 (15.9, 29.5 against 10.6). 0.3 is past the knee's top.
+  draft_corruption: {p: 0.3, source: mu}
 
 schedule:
   enabled: true

@@ -12,6 +12,8 @@ taken apart one at a time:
 
 and two that take the audio away from the denoiser, at every t, keeping the real mu:
 
+  denoiser, no audio      zero latents and the uniform prior: classifier-free guidance's
+                          unconditional branch, as audio dropout trains it
   denoiser, wrong audio   another utterance's latents (the batch rolled by one): the same
                           kind of input, in distribution, carrying the wrong words
   gap fill                recovery only on the positions the field's own argmax gets wrong,
@@ -141,6 +143,15 @@ def probe(model: FlowMatching, loader: Iterable[dict], n_utts: int, seed: int) -
                     copies[t] = copies.get(t, 0.0) + float(
                         ((pred == wrong.argmax(-1)) & misleading).sum()
                     )
+            # Classifier-free guidance's unconditional branch, exactly: no audio and the
+            # uniform prior in mu's place, as audio dropout's rows train it. Junk on a model
+            # trained without audio dropout, which never saw zero latents.
+            x_t = a * eps + b * x1 + g * flat
+            pred = model.denoiser(
+                x_t=x_t, time=time, audio_embeddings=torch.zeros_like(audio)
+            ).argmax(-1)
+            tally.add(f"denoiser no audio t={t}", pred, tokens, real)
+
             field = (a * eps + b * x1 + g * mu).argmax(-1)
             tally.add(f"field t={t}", field, tokens, real)
 
@@ -184,6 +195,7 @@ def report(results: dict[str, dict[str, float]], out: Path) -> None:
                 "denoiser wrong mu",
                 "copies wrong mu",
                 "denoiser wrong audio",
+                "denoiser no audio",
                 "gap fill real audio",
                 "gap fill wrong audio",
                 "field",
@@ -202,6 +214,8 @@ def report(results: dict[str, dict[str, float]], out: Path) -> None:
                     "denoiser wrong mu",
                     "copies wrong mu",
                     "denoiser wrong audio",
+                    "denoiser no audio",
+                    "denoiser no audio",
                     "gap fill real audio",
                     "gap fill wrong audio",
                     "field",
@@ -222,6 +236,7 @@ def report(results: dict[str, dict[str, float]], out: Path) -> None:
             ("denoiser", "C0"),
             ("denoiser no mu", "C1"),
             ("denoiser wrong audio", "C4"),
+            ("denoiser no audio", "C5"),
             ("field", "C2"),
         ):
             ax.plot(
