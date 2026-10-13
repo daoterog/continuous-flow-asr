@@ -68,6 +68,11 @@ flow:
   # Down-weight padding to 0.1 (the stop token's run included); under the token-level
   # reduction above, every real token keeps the same weight whatever the utterance length.
   pad_loss_weight: 0.1
+  # Noise at 0.4 (1 - t), so x_0 ~ N(mu, 0.16 I): mu shows through, the field carries data
+  # earlier, and the simulated curve moves left as mu learns. tau-schedule, 100 epochs, wd
+  # 0.05: 11.7 / 12.5 sampled WER on two seeds against the unit-noise control's 13.8 / 14.7,
+  # ahead at every epoch. 0.5 and 0.7 lost (17.7, 17.3) and 0.3 tied (12.1).
+  alpha: {type: linear_down, scale: 0.4}
 
 train:
   denoiser_lr: 2.0e-3
@@ -83,6 +88,11 @@ train:
   # control's 16.10. Under the 2-point bar at epoch 99, but ahead at every sampling epoch
   # from 19 on, by 2-7 points mid-run, at no cost in time — adopted.
   ema_decay: 0.999
+  # The field is built from a draft with 10% of its real tokens resampled from mu, the loss
+  # still on the truth: training otherwise never shows the denoiser a field that is wrong,
+  # which sampling always does (src/data/augment.py). tau-schedule on sigma 0.4: 10.6
+  # against 11.7 on the same seed, ahead at every sampling epoch.
+  draft_corruption: {p: 0.1, source: mu}
 
 schedule:
   enabled: true
