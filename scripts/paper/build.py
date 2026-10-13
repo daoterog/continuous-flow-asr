@@ -34,7 +34,18 @@ from scripts.paper.style import INK_SECONDARY, REFERENCE, SERIES, plt, save
 
 PAPER = Path("paper")
 SBU_PER_GPU_HOUR = 128  # jobs/common/budget.sh
-OUTCOME = {"adopt": "adopted", "reject": "rejected", "neutral": "no effect", "kept": "kept"}
+OUTCOME = {
+    "adopt": "adopted",
+    "reject": "rejected",
+    "neutral": "no effect",
+    "kept": "kept",
+    # Re-tested on a later stack: shown, but not counted again on the ladder.
+    "confirmed": "confirmed",
+    # Promising, not settled: the next experiment, not part of the recipe.
+    "open": "open lead",
+    # Helped, but a variant of it helped more and was adopted instead.
+    "superseded": "superseded",
+}
 
 
 # -- data -------------------------------------------------------------------------------
@@ -83,13 +94,29 @@ def ablation_rows(entry: dict) -> list[dict]:
 
 
 def value(r: dict) -> str:
-    """What a row shows in its result column: the free-text result, else the WER."""
-    if r.get("result"):
-        return r["result"]
-    return f"{float(r['wer']):.2f}" if r.get("wer") else "--"
+    """What a row shows in its result column.
+
+    The WER, with the per-seed values beside it when there were several; a free-text result
+    (a loss, a share of the batch) when the row has no WER at all.
+    """
+    if not r.get("wer"):
+        return r.get("result") or "--"
+    mean = f"{float(r['wer']):.2f}"
+    return f"{mean} ({r['result']})" if r.get("result") else mean
 
 
 # -- tables -----------------------------------------------------------------------------
+
+
+def value_tex(r: dict) -> str:
+    """`value` for LaTeX, where per-seed lists are too wide: the mean +- half the range."""
+    try:
+        seeds = [float(x) for x in (r.get("result") or "").split(" / ")]
+    except ValueError:  # a free-text result, not a list of seeds
+        seeds = []
+    if r.get("wer") and len(seeds) > 1:
+        return rf"{float(r['wer']):.2f}\,$\pm$\,{(max(seeds) - min(seeds)) / 2:.2f}"
+    return tex_escape(value(r))
 
 
 def tex_escape(s: str) -> str:
@@ -106,15 +133,40 @@ def tex_escape(s: str) -> str:
     return s.replace("->", r"$\to$")
 
 
+def extra_columns(entry: dict) -> list[dict]:
+    """The entry's `columns:` beyond WER, each {name, metric, header?, digits?}."""
+    return entry.get("columns") or []
+
+
+def cell(r: dict, col: dict) -> str:
+    """One extra column's value, rounded as the column asks."""
+    v = number(r.get(col["name"]))
+    return "" if v is None else f"{v:.{int(col.get('digits', 2))}f}"
+
+
 def ablation_tex(entry: dict, rows: list[dict], phase: dict) -> str:
     """A booktabs table: one block per group, its reference first, then the changes."""
+    extra = extra_columns(entry)
+    width = 4 + len(extra)
+    # Numbers right-aligned in a fixed width that wraps a long header, so a table with
+    # several diagnostic columns still fits the text width; the change column takes the rest.
+    num = r">{\raggedleft\arraybackslash}p{" + ("1.0cm" if extra else "1.6cm") + "}"
+    # A row listing its seeds ("12.11 (11.68 / 12.54)") needs room to stay on one line.
+    seeded = any(r["wer"] and r["result"] for r in rows)
+    wer_col = r">{\raggedleft\arraybackslash}p{1.8cm}" if seeded else num
+    head = " & ".join(
+        ["Change", "WER", r"$\Delta$"]
+        + [tex_escape(c.get("header", c["name"])) for c in extra]
+        + ["Outcome"]
+    )
     lines = [
         r"\begin{table}[t]",
         r"\centering",
-        r"\small",
-        r"\begin{tabularx}{\linewidth}{@{}Xlrl@{}}",
+        r"\footnotesize" if len(extra) > 2 else r"\small",
+        r"\setlength{\tabcolsep}{3pt}" if len(extra) > 2 else "",
+        rf"\begin{{tabularx}}{{\linewidth}}{{@{{}}X{wer_col}{num * (1 + len(extra))}l@{{}}}}",
         r"\toprule",
-        r"Change & Result & $\Delta$ & Outcome \\",
+        head + r" \\",
         r"\midrule",
     ]
     groups = list(dict.fromkeys(r["group"] for r in rows))
@@ -123,35 +175,41 @@ def ablation_tex(entry: dict, rows: list[dict], phase: dict) -> str:
         best = min((float(r["wer"]) for r in members if r["wer"]), default=None)
         if i:
             lines.append(r"\midrule")
-        lines.append(rf"\multicolumn{{4}}{{@{{}}l}}{{\textit{{{tex_escape(group)}}}}} \\")
+        lines.append(rf"\multicolumn{{{width}}}{{@{{}}l}}{{\textit{{{tex_escape(group)}}}}} \\")
         for r in members:
-            shown = tex_escape(value(r))
-            if r["wer"] and best is not None and float(r["wer"]) == best and not r["result"]:
+            shown = value_tex(r)
+            if r["wer"] and best is not None and float(r["wer"]) == best:
                 shown = rf"\textbf{{{shown}}}"
             delta = "" if r["delta"] is None else f"{r['delta']:+.2f}"
             label = tex_escape(r["label"]) + (" (reference)" if r["role"] == "reference" else "")
             outcome = OUTCOME.get(r["outcome"], "")
-            lines.append(rf"\quad {label} & {shown} & {delta} & {outcome} \\")
+            extras = "".join(f" & {cell(r, c)}" for c in extra)
+            lines.append(rf"\quad {label} & {shown} & {delta}{extras} & {outcome} \\")
     lines += [r"\bottomrule", r"\end{tabularx}"]
     caption = tex_escape(entry["question"])
     setup = tex_escape(entry.get("setup") or phase.get("setup", ""))
     if setup:
         caption += rf" \emph{{Setup: {setup}.}}"
+    if any(r"$\pm$" in value_tex(r) for r in rows):
+        caption += r" Several seeds: mean $\pm$ half their range."
     if entry["status"] != "done":
         caption += rf" \emph{{({entry['status']}: results pending.)}}"
     lines += [rf"\caption{{{caption}}}", rf"\label{{tab:{entry['id']}}}", r"\end{table}"]
     return "\n".join(lines) + "\n"
 
 
-def ablation_md(rows: list[dict]) -> str:
+def ablation_md(rows: list[dict], entry: dict) -> str:
     """The same table as Markdown, for RESULTS.md."""
-    out = ["| change | result | Δ | outcome |", "|---|---|---|---|"]
+    extra = extra_columns(entry)
+    heads = ["change", "WER", "Δ", *(c.get("header", c["name"]) for c in extra), "outcome"]
+    out = ["| " + " | ".join(heads) + " |", "|" + "---|" * len(heads)]
     for group in dict.fromkeys(r["group"] for r in rows):
-        out.append(f"| **{group}** | | | |")
+        out.append(f"| **{group}** |" + " |" * (len(heads) - 1))
         for r in (r for r in rows if r["group"] == group):
             label = r["label"] + (" *(reference)*" if r["role"] == "reference" else "")
             delta = "" if r["delta"] is None else f"{r['delta']:+.2f}"
-            out.append(f"| {label} | {value(r)} | {delta} | {OUTCOME.get(r['outcome'], '')} |")
+            cells = [label, value(r), delta, *(cell(r, c) for c in extra)]
+            out.append("| " + " | ".join(cells) + f" | {OUTCOME.get(r['outcome'], '')} |")
     return "\n".join(out)
 
 
@@ -200,6 +258,11 @@ def placeholder_tex(entry: dict) -> str:
 # -- figures ----------------------------------------------------------------------------
 
 
+def first_run(spec: dict) -> str:
+    """The run a spec's curve is drawn from: its first seed."""
+    return (spec.get("runs") or [spec.get("run")])[0]
+
+
 def curves_figure(entry: dict, registry: dict) -> Path | None:
     """Sampled WER against epoch, one panel per group of the ablation it plots.
 
@@ -213,13 +276,20 @@ def curves_figure(entry: dict, registry: dict) -> Path | None:
     if not curves:
         return None
     groups = source["groups"]
-    fig, axes = plt.subplots(1, len(groups), figsize=(2.6 * len(groups), 2.4), sharey=True)
+    fig, axes = plt.subplots(1, len(groups), figsize=(3.0 * len(groups), 2.6), sharey=True)
     slot = 0
     for ax, group in zip(np.atleast_1d(axes), groups, strict=True):
-        ref = curves[group["reference"]["run"]]
-        ax.plot(list(ref), list(ref.values()), "--", color=REFERENCE, lw=1.4, label="control")
+        ref = curves[first_run(group["reference"])]
+        ax.plot(
+            list(ref),
+            list(ref.values()),
+            "--",
+            color=REFERENCE,
+            lw=1.4,
+            label=group["reference"]["label"],
+        )
         for spec in group["ablations"]:
-            h = curves[spec["run"]]
+            h = curves[first_run(spec)]
             color = SERIES[slot % len(SERIES)]
             slot += 1
             ax.plot(list(h), list(h.values()), "-", color=color, label=spec["label"])
@@ -227,7 +297,7 @@ def curves_figure(entry: dict, registry: dict) -> Path | None:
             ax.plot([last], [h[last]], "o", color=color, ms=4, mec="white", mew=1)
         ax.set_title(group["name"])
         ax.set_xlabel("epoch")
-        ax.set_ylim(12, 45)
+        ax.set_ylim(*entry.get("ylim", (12, 45)))
         ax.legend(loc="lower left", fontsize=6)
     np.atleast_1d(axes)[0].set_ylabel("sampled WER (%)")
     return save(fig, PAPER / "figures" / f"{entry['id']}.png")
@@ -297,13 +367,9 @@ def ladder_rows(registry: dict) -> list[dict]:
             continue
         for r in ablation_rows(entry):
             if r["outcome"] == "adopt":
-                # Typed groups name the knob ("tau refresh") and rows its value ("every 5
-                # epochs"); the ladder mixes groups, so a row needs both to be read alone.
-                label = (
-                    r["label"]
-                    if entry.get("groups")
-                    else f"{r['group'].split(' (')[0]}: {r['label']}"
-                )
+                # A typed row may name itself for the ladder, where it is read without its
+                # group ("every 5 epochs" means nothing out of the "tau refresh" block).
+                label = r.get("ladder") or r["label"]
                 out.append(
                     {
                         "phase": entry["phase"],
@@ -483,7 +549,58 @@ def field_recovery_figure(entry: dict) -> Path:
     return save(fig, PAPER / "figures" / f"{entry['id']}.png")
 
 
-BUILDERS = {"audio_info": audio_info_figure, "field_recovery": field_recovery_figure}
+def mu_reliance_figure(entry: dict) -> Path | None:
+    """Recovery at t = 0 under three versions of mu, one row per arm.
+
+    At t = 0 the field holds no data, so what the denoiser recovers it reads off the audio
+    and mu. Giving it its own mu, another utterance's mu, and no mu separates the two: the
+    wider the spread, the more the arm's answer is mu's rather than the audio's.
+    """
+    rows = {}
+    for source in entry["sources"]:
+        for r in read_csv(source):
+            rows.setdefault(r["label"], r)
+    arms = [(a["label"], a.get("show", a["label"])) for a in entry["arms"]]
+    arms = [(key, shown) for key, shown in arms if key in rows]
+    if not arms:
+        return None
+    readings = (
+        ("rec_mu", "its own mu", SERIES[0], "o"),
+        ("rec_wrong_mu", "another utterance's mu", SERIES[3], "D"),
+        ("rec_no_mu", "no mu (uniform)", SERIES[1], "s"),
+    )
+    fig, ax = plt.subplots(figsize=(5.6, 0.34 * len(arms) + 0.9))
+    y = np.arange(len(arms))[::-1]
+    for yi, (key, _) in zip(y, arms, strict=True):
+        vals = [number(rows[key].get(col)) for col, *_ in readings]
+        present = [v for v in vals if v is not None]
+        ax.plot([min(present), max(present)], [yi, yi], color=REFERENCE, lw=1, zorder=1)
+        for (_, label, color, marker), v in zip(readings, vals, strict=True):
+            if v is not None:
+                ax.plot(
+                    v,
+                    yi,
+                    marker,
+                    color=color,
+                    ms=5,
+                    mec="white",
+                    mew=0.8,
+                    zorder=2,
+                    label=label if yi == y[0] else None,
+                )
+    ax.set_yticks(y, [shown for _, shown in arms], fontsize=7)
+    ax.set_xlim(0, 0.75)
+    ax.set_xlabel("token recovery at t = 0 (val)")
+    ax.grid(axis="y", visible=False)
+    ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=3, fontsize=6)
+    return save(fig, PAPER / "figures" / f"{entry['id']}.png")
+
+
+BUILDERS = {
+    "audio_info": audio_info_figure,
+    "field_recovery": field_recovery_figure,
+    "mu_reliance": mu_reliance_figure,
+}
 
 
 # -- assembly ---------------------------------------------------------------------------
@@ -520,7 +637,7 @@ def build_entry(entry: dict, registry: dict, rerun: bool) -> tuple[str, str]:
     elif kind == "ablation":
         rows = ablation_rows(entry)
         tex = ablation_tex(entry, rows, phase)
-        md.append(ablation_md(rows))
+        md.append(ablation_md(rows, entry))
     elif kind == "table":
         rows = read_csv(entry["id"])
         if entry["id"] == "compute":

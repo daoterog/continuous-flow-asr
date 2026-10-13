@@ -7,9 +7,12 @@ an entry gains runs or a run finishes; the build reads only what it wrote.
     python -m scripts.paper.fetch --only phase4   # one entry
     python -m scripts.paper.fetch --compute       # runtimes of every run in every project
 
-An ablation entry writes `<id>.csv` in the same shape the typed tables use (one row per run:
-group, label, role, wer, result, outcome) and `<id>_curves.csv` (run, epoch, wer), which the
-curves figures read.
+An ablation entry writes `<id>.csv` in the same shape the typed tables use (one row per spec:
+group, label, role, wer, result, outcome, plus one column per entry `columns:` metric) and
+`<id>_curves.csv` (run, epoch, wer), which the curves figures read.
+
+A spec names one run (`run:`) or several seeds of one configuration (`runs: [...]`). Seeds
+are averaged, and the result column lists each one, so the spread is in the table.
 """
 
 import argparse
@@ -40,38 +43,61 @@ def history(api: wandb.Api, entity: str, run: str, metric: str) -> dict[int, flo
     return out
 
 
+def run_ids(spec: dict) -> list[str]:
+    """The runs behind a spec: its seeds, or its one run."""
+    return list(spec.get("runs") or ([spec["run"]] if "run" in spec else []))
+
+
+def at_epoch(api: wandb.Api, entity: str, run: str, metric: str, at: int) -> float | None:
+    """`metric` at epoch `at`, or None when the run did not log it there."""
+    return history(api, entity, run, metric).get(at)
+
+
 def fetch_ablation(api: wandb.Api, registry: dict, entry: dict) -> list[dict]:
-    """One row per reference and ablation run, at the entry's epoch; and their curves."""
+    """One row per reference and ablation spec, at the entry's epoch; and their curves."""
+    entity = registry["entity"]
     metric = entry.get("metric", registry["metric"])
     at = int(entry.get("at_epoch", 99))
+    extra = entry.get("columns") or []
     rows, curves = [], []
     for group in entry["groups"]:
         members = [(group["reference"], "reference")] + [
             (a, "ablation") for a in group["ablations"]
         ]
         for spec, role in members:
-            if "run" not in spec:
+            ids = run_ids(spec)
+            if not ids:
                 continue
-            h = history(api, registry["entity"], spec["run"], metric)
-            if at not in h:
-                print(f"  {spec['run']}: no {metric} at epoch {at} (has {sorted(h)[-3:]})")
-            rows.append(
-                {
-                    "group": group["name"],
-                    "label": spec["label"],
-                    "role": role,
-                    "wer": f"{h[at]:.2f}" if at in h else "",
-                    "result": "",
-                    "outcome": spec.get("outcome", ""),
-                    "rows": " ".join(str(r) for r in entry.get("experiments_rows", [])),
-                    "run": spec["run"],
-                }
-            )
-            curves += [
-                {"run": spec["run"], "epoch": e, "wer": f"{w:.3f}"} for e, w in sorted(h.items())
-            ]
-            print(f"  {group['name']:8s} {spec['label'][:45]:45s} {rows[-1]['wer']}")
-    write(PAPER / "data" / f"{entry['id']}.csv", rows, ABLATION_FIELDS)
+            per_seed = []
+            for i, run in enumerate(ids):
+                h = history(api, entity, run, metric)
+                if at not in h:
+                    print(f"  {run}: no {metric} at epoch {at} (has {sorted(h)[-3:]})")
+                else:
+                    per_seed.append(h[at])
+                if i == 0:
+                    curves += [
+                        {"run": run, "epoch": e, "wer": f"{w:.3f}"} for e, w in sorted(h.items())
+                    ]
+            row = {
+                "group": group["name"],
+                "label": spec["label"],
+                "role": role,
+                "wer": f"{sum(per_seed) / len(per_seed):.2f}" if per_seed else "",
+                "result": " / ".join(f"{w:.2f}" for w in per_seed) if len(per_seed) > 1 else "",
+                "outcome": spec.get("outcome", ""),
+                "rows": " ".join(str(r) for r in entry.get("experiments_rows", [])),
+                "run": ids[0],
+            }
+            for col in extra:
+                vals = [at_epoch(api, entity, run, col["metric"], at) for run in ids]
+                vals = [v for v in vals if v is not None]
+                row[col["name"]] = f"{sum(vals) / len(vals):.3f}" if vals else ""
+            rows.append(row)
+            label = f"{group['name'][:12]:12s} {spec['label'][:40]:40s}"
+            print(f"  {label} {row['wer']} {row['result']}")
+    fields = (*ABLATION_FIELDS, *(c["name"] for c in extra))
+    write(PAPER / "data" / f"{entry['id']}.csv", rows, fields)
     write(PAPER / "data" / f"{entry['id']}_curves.csv", curves, ("run", "epoch", "wer"))
     return rows
 
@@ -129,7 +155,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.only and entry["id"] not in args.only:
             continue
         has_runs = any(
-            "run" in spec
+            run_ids(spec)
             for g in entry.get("groups", [])
             for spec in [g["reference"], *g["ablations"]]
         )

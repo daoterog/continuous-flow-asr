@@ -26,8 +26,13 @@ target, so at high t they largely measure the input.
 | 12 | Should τ track μ's real accuracy? | **Yes.** Honest prior (`mu_accuracy 0.0`) + refresh every epoch: **0.00 / 0.02%** over 2 seeds. Static optimistic prior, no refresh: **0.27 / 1.28%**. Tighter *and* better. | `refresh_every_n_epochs` on; n=2, so suggestive not settled |
 
 τ is refreshed from μ's measured error (`1 − mu_perr`), re-running the model-free corruption
-sweep with that accuracy. Bins move with it, applied at the next epoch's start. Refresh
-cannot outpace validation — raise `--val-times` to refresh more often.
+sweep with that accuracy. Bins move with it, applied at the next epoch's start. The refresh
+is driven from `on_train_epoch_start`, so its cadence is counted in **training epochs** and
+is independent of how often validation runs (it used to be keyed off validation, which
+silently dropped refreshes whenever `check_val_every_n_epoch` did not divide it).
+
+**Rows 1–12 were measured at `canvas_len: 96`**, the default until 2026-09-27 (`7e03b07`).
+They are not reproducible at today's 224 and must not be compared against it — see row 24.
 
 ## Settled defaults
 
@@ -49,6 +54,16 @@ grad clipping ~irrelevant · τ measured on each variant's own path, refreshed f
   outright. Both were at raised learning rates, so this may simply be LR sensitivity.
 
 ## Real runs — full `clean/train.100`, scored by sampling from noise
+
+> **Which model these runs trained (audited 2026-10-10 from their wandb configs).** Only
+> `skilled-lake-22` below is denoiser `small` (512×8) + μ `micro` (256×1). Every run in the
+> wandb projects `flow-asr-fulldata-schedule`, `flow-asr-flm-parity` and `flow-asr-mu-reg`
+> (29 runs) trained base.yaml's **tiny** denoiser (256×4) and audio_cond.yaml's **256×2** μ,
+> because no sweep passed `--size`/`--mu`. They also used **stride-4** pooled latents, as did
+> skilled-lake-22. So `sim-e5` never reproduced skilled-lake-22, and those projects' WERs are
+> a tiny-model, stride-4 baseline. From now on cluster runs come from
+> `configs/recipes/fulldata.yaml` (small + micro, full latents via the snellius profile), and
+> `train.py` refuses a cluster config that is not a recipe.
 
 Best so far: **18.70% sampled WER** on all 2,703 of `clean/validation` at 16 steps
 (17.85% at 128) — `audio_cond`, denoiser `small` (40.7M), μ `micro` (1.8M), lr 2e-3, batch
@@ -83,6 +98,69 @@ they were not: two identical configs on the *same* slice differ by **0.6** point
 (16.25 / 16.81), two identical configs on *different* slices by **5.4**. `sampling.n_utts`
 now defaults to the whole validation split. Anything below a point is noise; the
 comparisons above at 2–3 points are suggestive, not settled.
+
+## Rewrite verification — 2026-10-01
+
+The codebase was reorganised in one day (`src/` into `data/ flow/ metrics/ checkpointing/`,
+`scripts/` into four packages, τ split into `SimulatedTau` / `MeasuredTau`). These rows are
+the checks that it still trains, run on the overfit harness at **canvas 96** so they are
+comparable to rows 1–12.
+
+| # | Question | Result | Verdict |
+|---|---|---|---|
+| 24 | Did the rewrite break `linear`? | **No.** The pre-rewrite commit `7e29b3c` scores **35.44%** on the same overfit config where HEAD scores **36.03%** (seed 0, canvas 224). The apparent regression against row 2's 2.56% is the **canvas change**, not code: `canvas_len` went 96 → 224 in `7e03b07` (2026-09-27), and at 96 HEAD scores **2.72%** (best of 2 seeds), reproducing row 2. | Rewrite clean. Row 2's gate is canvas-96 only |
+| 25 | Does the `measured` curve survive its own first refresh? | **It did not.** `_tau_from` *raised* when the best bin recovered <5%, which is the normal state of an untrained denoiser — so every `measured` run died at its first refresh. Now it skips with a reason and keeps the schedule it has (`schedule.measured_min_recovery`, default 0.05). | Bug, fixed. Introduced by the refactor |
+| 26 | Can `audio_cond` + `measured` memorise? | **No — 136.41%** sampled WER at n=256, canvas 96, refresh every 5, `num_bins 8` (1 seed). Over 100% means runaway insertions: the model never stops. Against row 8's **1.60%** for the simulated curve at the same scale. τ's t₀ marches right as the refresh fires on a weak model (0.14 → 0.68 → 0.71 → 0.81 over three epochs), starving every t below it. | Needs seeds + a warmup; see the refresh sweeps |
+
+**Seed variance is worse than row 11 says.** Canvas 224 `linear`, four seeds: 36.0 / 48.1 /
+66.1 / 71.5. Canvas 96, two seeds: 2.7 / 25.7. One run carries no information at this scale;
+compare medians over ≥4 seeds.
+
+**`schedule.num_bins` is one knob serving two strategies that want different values at
+overfit scale.** It sets the simulated sweep's grid *and* the denoiser metric's bin count
+under `measured`. The measured optimum tracks the epoch's token count (~12k real tokens per
+bin): 150 at full `train.100` (2.1M tokens), but ~8 at n=256 on the overfit harness (15k
+tokens). The simulated arm wants ≥80 regardless. So a measured-vs-simulated comparison on
+the overfit harness is handicapped whichever value is chosen — it only becomes clean at real
+data scale.
+
+## The measured schedule, on a real learning task — 2026-10-02/03
+
+Rows 24–26 were measured on the overfit harness, which **cannot test a schedule**: at 64
+utterances the model memorises, so its P_e is low at every t and the curve a measured
+refresh reads carries no information. Every measured-τ result above is void for that
+reason. The rows below are all real learning — 4,096 utterances of `clean/train.100`, real
+held-out validation, canvas 224, 30 epochs (~7,700 steps), sampled WER on a fixed
+512-utterance slice.
+
+`eN` below means `schedule.refresh_every_n_epochs = N`; `nM` means `schedule.probe_n_utts = M`.
+
+| # | Question | Result | Verdict |
+|---|---|---|---|
+| 27 | Does τ earn its place at all? | **Yes, decisively.** No reparameterisation (`schedule.enabled=false`) scores **92.9 / 93.2** against simulated's 73.9 / 71.7 and measured's 78.0 / 75.4. Held-out token error 0.59 vs 0.33 / 0.42. Seeds agree to 2 points against a 20-point gap. | τ is worth ~20 points. Settled |
+| 28 | Was the measured curve biased by the schedule that drew it? | **Yes, and it ratcheted.** The refresh read `denoiser_perr`, whose bins are τ's own quantiles, so it only ever saw where τ already drew — nothing below t₀. `make_tau_inverse` extrapolated the gap flat, normalising by that curve's worst error pushed t₀ right, and the next refresh read a narrower window: **0.250 → 0.500 → 0.625 → 0.750**, then stuck, with three quarters of the axis neither trained nor measured. | Fixed: sweep t uniformly on a fresh subset instead |
+| 29 | Do uniform *bins* fix it? | **No.** Uniform bins cannot invent samples the schedule never drew. On a trained checkpoint the uniformly-binned training metric still left **11 of 32 bins empty** with its lowest at t=0.214, against t=0.015 for a uniform sweep. The t have to be chosen by the estimator, not by the schedule. | `MeasuredTau` sweeps its own t |
+| 30 | Does τ⁻¹ need anchoring at 0 and 1? | **No — both ends emerge.** With a uniform sweep τ is normalised by the lowest bin's own error so τ(lowest)=0 by construction, and the highest bin sits at ~0.997. Measured: τ⁻¹(0)=0.030 unanchored vs 0.0028 anchored, identical grids otherwise. `anchor_zero` was compensating for the biased estimator. | Removed. A flat run is now a real measurement |
+| 31 | How often should the measured schedule refresh? | **Rarely. `e10` is best**: 74.2 / 71.4 against `e5` 76.7 / 76.1, `e3` 77.2 / 79.6, `e1` 74.3 / 78.8. Not monotone — every-epoch is no worse than every-5 — but 10 wins on both seeds. Since τ *starts* from the corruption-sweep prior, refreshing less means staying closer to it. | Default `refresh_every_n_epochs` → 10 |
+| 32 | How big must the refresh sweep be? | **2,048 is enough; 256 is not.** `n256` is the worst cell at 79.7 / 79.9 and starts t₀ at 0.132 against ~0.02 elsewhere — a thin curve puts the schedule in the wrong place and costs epochs recovering. **4,096 buys nothing**: `e1` 74.3→74.2, `e10` 72.8→74.0, both inside noise. | Keep `probe_n_utts: 2048` |
+| 33 | Is the refresh cost noise, or drift? | **Drift.** If frequent refreshing hurt because each curve is noisy, a bigger probe would rescue it; `e1-n2048` 74.33 vs `e1-n4096` 74.20 says it does not. What each refresh costs is moving the schedule off the prior it started from. | Explains 31 |
+| 34 | Does the sampler's grid waste steps? | **It did.** `bin_centers` reports the *mean* t per bin, so the top bin sits below 1 — measured 0.853 — and τ⁻¹ clamped above it: five of sixteen sampler steps landed on the same t, integrating nothing. `generation_grid` now drops repeats, so `num_steps` is a budget rather than a promise. | Fixed |
+| 35 | Does bending τ's shape help? | **No.** `tau_power` (drawing progress from Beta(k,1) instead of uniform) gave 67.1 at k=1.5 against a 67.0 control — inside noise — 84.9 at k=2.5, and 305% on the measured curve at k=2.0. Removed. | Rejected. The knob was added unasked |
+
+**Simulated still edges measured, but the gap has closed.** Three replicates each at the
+shared config: simulated {66.98, 71.71, 73.91}, measured `e5` {75.40, 76.68, 77.95} —
+perfectly separated. But at the better cadence `e10` measured scores {74.23, 71.44, 77.49,
+70.56}, which overlaps simulated's range; the best single run of either arm is simulated's
+66.98, the best measured is 70.56.
+
+**The noise floor here is 7 points.** An identical configuration at the same seed re-ran
+**66.98 vs 73.91**. Differences smaller than that are unreadable on one seed; the rows above
+rest on a difference holding its *direction* across a seed pair.
+
+**Held-out token error can point the opposite way to sampled WER.** `tau_power 2.5` had the
+best val token error of its sweep (0.169 vs 0.297) and the worst WER (84.9 vs 67.0): training
+only on t ≥ 0.5 makes one-step denoising from a near-clean input easy and leaves the model
+unable to generate from noise. Judge schedules on sampled WER.
 
 ## Throughput
 

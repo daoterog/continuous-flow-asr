@@ -27,5 +27,5 @@ the full denoiser; the denoiser with μ replaced by a uniform vector; the field'
   μ become readable earlier, so the schedule's own peak moves left and keeps moving as μ
   improves.
 
-Round 1 screens each knob alone (floor 0.3, 0.4; σ 0.7, 0.5, 0.4). Round 2 combines the best σ
-with a small floor, so that high t is not left untrained.
+The screens that followed took each knob alone (phase 5), then regularisation (phase 6), then
+the combinations (phase 7). The lower noise scale won and the floor lost.
