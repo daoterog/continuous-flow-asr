@@ -279,7 +279,9 @@ sampling:
   log_methods: null
   seed: 0
   num_steps: 16
-  every_n_epochs: 5
+  # Equal to train.check_val_every_n_epoch: sampled WER picks the checkpoints, so every
+  # validation has to sample (see configs/profiles/run/sweep.yaml).
+  every_n_epochs: 10
   # null means the whole validation split. A subset makes sampled WER depend on which
   # utterances it took: two runs with identical configs but different slices differed by
   # 5.4 points, where two sharing a slice differed by 0.6. Comparability is worth the
@@ -338,9 +340,9 @@ train:
   precision: null
   fast_dev_run: false
   log_every_n_steps: 50
-  # Validation costs a decode per batch when WER is on; on short-epoch runs (an overfit
-  # check has a handful of steps per epoch) it is worth checking less often.
-  check_val_every_n_epoch: 1
+  # Validation costs a decode per batch when WER is on, and with sampling.every_n_epochs
+  # (equal to it) a full integration too, so every 10 epochs keeps runs fast.
+  check_val_every_n_epoch: 10
   # Lightning's own .ckpt: a pickle of the whole module, loadable only back into the same
   # class. Off by default because save_components below covers what it was kept for, in a
   # form a student model can read. Turn it on for `trainer.test(ckpt_path="best")`, which

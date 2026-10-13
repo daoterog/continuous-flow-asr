@@ -9,7 +9,8 @@ train:
   # decoded on the CPU — about a third of an epoch once compile + bf16 made the step fast.
   check_val_every_n_epoch: 10
 sampling:
-  # Must be a multiple of check_val_every_n_epoch: the probe runs inside the validation
-  # epoch, so a probe epoch without validation never fires. Both count (epoch + 1) % k.
+  # Equal to check_val_every_n_epoch. The probe runs inside the validation epoch, so a
+  # probe epoch without validation never fires; and sampled WER picks the checkpoints, so a
+  # validation without the probe would leave the .ckpt on val loss (train.build_trainer).
   every_n_epochs: 10
   log_methods: null

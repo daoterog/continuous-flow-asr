@@ -10,6 +10,6 @@ train:
   # the ~6% that every 10 was on train.100 — and gives 50 readings for `_best`.
   check_val_every_n_epoch: 2
 sampling:
-  # A multiple of check_val_every_n_epoch: the probe runs inside the validation epoch.
+  # Equal to check_val_every_n_epoch: see sweep.yaml.
   every_n_epochs: 2
   log_methods: null

@@ -7,6 +7,6 @@ train:
   # 30 readings over 300 epochs is plenty for the `_best` components and the curve.
   check_val_every_n_epoch: 10
 sampling:
-  # A multiple of check_val_every_n_epoch: the probe runs inside the validation epoch.
+  # Equal to check_val_every_n_epoch: see sweep.yaml.
   every_n_epochs: 10
   log_methods: null

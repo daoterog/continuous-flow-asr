@@ -39,7 +39,7 @@ beats everything.
 |---|---|---|---|
 | `train.num_epochs` | 100 | 300 | screen vs final (`TIER` in `jobs/common/sweep.sh`) |
 | `train.check_val_every_n_epoch` | 10 | 10 | measured: val pass 10.7 s + probe 22.2 s vs ~54 s of training per epoch → ~6% |
-| `sampling.every_n_epochs` | 10 | 10 | must be a multiple of the val cadence: the probe runs inside validation |
+| `sampling.every_n_epochs` | 10 | 10 | must equal the val cadence: the probe runs inside validation, and sampled WER picks the checkpoints |
 | `sampling.log_methods` | null | null | Euler is settled; the one place to turn it back on |
 
 **Where the numbers come from:** `./jobs/submit/bench_train.sh` timed the full-data recipe
