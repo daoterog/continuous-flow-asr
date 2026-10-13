@@ -45,10 +45,13 @@ class ComponentCheckpoint(pl.Callback):
         """Write the manifest before any weights exist, so a crash still leaves a rebuild."""
         save_manifest(self.out_dir, self.manifest, self.vocab_map)
 
-    def on_validation_epoch_end(
-        self, trainer: pl.Trainer, module: pl.LightningModule
-    ) -> None:
-        """Refresh `_best` when the monitored metric improves."""
+    def on_validation_end(self, trainer: pl.Trainer, module: pl.LightningModule) -> None:
+        """Refresh `_best` when the monitored metric improves.
+
+        Here rather than at `on_validation_epoch_end`: Lightning runs the callbacks' epoch-end
+        hook before the module's, and the module's is where sampled WER is logged. Tracking it
+        there would save this epoch's weights against the previous probe's WER.
+        """
         if trainer.sanity_checking:
             return
         value = trainer.callback_metrics.get(self.monitor)

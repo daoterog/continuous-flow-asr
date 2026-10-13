@@ -36,7 +36,7 @@ from lightning.pytorch.loggers import Logger, WandbLogger
 from omegaconf import DictConfig, OmegaConf
 from transformers import WhisperTokenizerFast
 
-from src.checkpointing import ComponentCheckpoint, load_manifest, manifest_for
+from src.checkpointing import ComponentCheckpoint, load_components, load_manifest, manifest_for
 from src.data import ROLES, AudioFeatureDataModule
 from src.flow.coefficients import make_schedule
 from src.flow.schedule import TimeReparametrization
@@ -484,17 +484,82 @@ def main(argv: Sequence[str] | None = None) -> int:
                     cfg, dm.vocab_size, dm.pad_id, dm.d_model, cfg.data.canvas_len
                 ),
                 vocab_map=dm.vocab_map,
-                monitor="total_loss/val",
+                monitor=best_monitor(model),
             )
         )
-        print(f"components  {out_dir}")
+        print(f"components  {out_dir}  (_best by {best_monitor(model)})")
 
     trainer = build_trainer(cfg, logger, extra)
     trainer.fit(model, datamodule=dm)
 
-    # Test is deliberately not run here — call it explicitly once the model is final:
-    #   trainer.test(model, datamodule=dm, ckpt_path="best")
+    if cfg.train.get("save_components", True) and isinstance(model, FlowMatching):
+        # The weights are already on disk; a failure here costs the numbers, not the run,
+        # and must not turn a finished job into a failed one.
+        try:
+            evaluate_saved(model, dm, out_dir, logger)
+        except Exception:
+            import traceback
+
+            traceback.print_exc()
+            print(
+                f"evaluate: scoring the saved variants failed; the run is intact in "
+                f"{out_dir}. Rescore it with scripts/evaluation/sample_eval.py --components "
+                f"{out_dir} --role test"
+            )
     return 0
+
+
+def best_monitor(model: pl.LightningModule) -> str:
+    """What `_best` is chosen by: sampled WER when the run samples, else val loss.
+
+    Sampled WER is the number every run is compared on, and val loss ranks checkpoints
+    differently — it rewards confidence on the target-built x_t that inference never sees.
+    The first method and step count logged, on the live grid.
+    """
+    probe = getattr(model, "sampling_probe", None)
+    if isinstance(model, FlowMatching) and probe is not None and probe.enabled:
+        return f"sampled_{probe.methods[0]}_{probe.step_counts[0]}/wer"
+    return "total_loss/val"
+
+
+def evaluate_saved(
+    model: FlowMatching,
+    dm: AudioFeatureDataModule,
+    out_dir: Path,
+    logger: Logger | None,
+    roles: Sequence[str] = ("val", "test"),
+) -> None:
+    """Sample `_best` and `_final` on every role, into the run's summary as `final/...`.
+
+    Each variant is loaded from what the run wrote — the EMA weights where there is an EMA,
+    and the curve they were trained against — so these are the numbers anyone rescoring
+    the directory with scripts/evaluation/sample_eval.py would get. The whole split, every
+    method and step count the run logs.
+    """
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Lightning leaves the module on the CPU once fit tears down.
+    model.to(device).eval()
+    probe = model.sampling_probe
+    for variant in ("best", "final"):
+        if not (out_dir / f"denoiser_{variant}.pth").exists():
+            print(f"evaluate: no _{variant} components in {out_dir}, skipped")
+            continue
+        _, built, saved_tau = load_components(out_dir, variant)
+        for name, sub in built.items():
+            target = getattr(model, name, None)
+            if target is not None:
+                getattr(target, "_orig_mod", target).load_state_dict(sub.state_dict())
+        if saved_tau is not None:
+            model.time_reparam = saved_tau
+        for role in roles:
+            for method in probe.methods:
+                for n in probe.step_counts:
+                    wer, perr, n_utts = probe.score(model, dm, method, num_steps=n, role=role)
+                    key = f"final/{variant}/{role}_sampled_{method}_{n}"
+                    print(f"{key}: WER {wer:.2f}  token error {perr:.4f}  ({n_utts} utts)")
+                    if isinstance(logger, WandbLogger):
+                        logger.experiment.summary[f"{key}/wer"] = wer
+                        logger.experiment.summary[f"{key}/perr"] = perr
 
 
 if __name__ == "__main__":
