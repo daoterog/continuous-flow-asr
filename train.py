@@ -529,12 +529,16 @@ def best_monitor(model: pl.LightningModule) -> str:
 
     Sampled WER is the number every run is compared on, and val loss ranks checkpoints
     differently — it rewards confidence on the target-built x_t that inference never sees.
-    The first method and step count logged, on the live grid.
+    The first method and step count logged, on the live grid; with several guidance
+    weights, the best of them each epoch, so `_best` is the checkpoint that samples best at
+    whichever weight suits it rather than at w = 1.
     """
     probe = getattr(model, "sampling_probe", None)
     if isinstance(model, FlowMatching | MuOnly) and probe is not None and probe.enabled:
-        key = probe.key(probe.methods[0], probe.step_counts[0], "live", probe.cfg_strengths[0])
-        return f"{key}/wer"
+        method, n = probe.methods[0], probe.step_counts[0]
+        if len(probe.cfg_strengths) > 1:
+            return f"{probe.best_key(method, n)}/wer"
+        return f"{probe.key(method, n, 'live', probe.cfg_strengths[0])}/wer"
     return "total_loss/val"
 
 

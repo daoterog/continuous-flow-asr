@@ -123,6 +123,17 @@ class SamplingProbe:
             key += f"_cfg{cfg_strength:g}"
         return key
 
+    @staticmethod
+    def best_key(method: str, num_steps: int, grid: str = "live") -> str:
+        """The section the best of several guidance weights is logged under: `..._cfgbest`.
+
+        The lowest WER among the weights scored that epoch, under `/wer`, and the weight
+        that reached it under `/cfg`. Picking `_best` on any one weight would choose the
+        checkpoint for that weight, when the question is which checkpoint samples best at
+        the weight it would be used with.
+        """
+        return f"{SamplingProbe.key(method, num_steps, grid)}_cfgbest"
+
     def score(
         self,
         model: "FlowMatching",

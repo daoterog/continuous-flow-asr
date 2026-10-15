@@ -207,6 +207,7 @@ class MetricReporting:
         for method in probe.methods:
             for n in probe.step_counts:
                 for grid in probe.grids:
+                    scored = []
                     for w in probe.cfg_strengths:
                         wer, token_error, n_utts = probe.score(
                             self, datamodule, method, num_steps=n, grid=grid, cfg_strength=w
@@ -214,6 +215,12 @@ class MetricReporting:
                         key = probe.key(method, n, grid, w)
                         self.log(f"{key}/wer", wer, batch_size=n_utts)
                         self.log(f"{key}/perr", token_error, batch_size=n_utts)
+                        scored.append((wer, w))
+                    if len(scored) > 1:
+                        wer, w = min(scored)
+                        key = probe.best_key(method, n, grid)
+                        self.log(f"{key}/wer", wer, batch_size=n_utts)
+                        self.log(f"{key}/cfg", w, batch_size=n_utts)
 
     def reset_audio_only(self) -> None:
         """Clear the audio-only tally; `update_audio_only` says what each slot counts."""
