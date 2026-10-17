@@ -65,6 +65,7 @@ fmt_hms() { printf '%02d:%02d:%02d' $(($1 / 3600)) $((($1 % 3600) / 60)) $(($1 %
 SIZING_ERR="$(mktemp)"
 trap 'rm -f "${SIZING_ERR}"' EXIT
 
+WALLTIME_GIVEN="${WALLTIME}"
 if [[ -z "${WALLTIME}" ]]; then
     # --print-steps builds the data and counts batches; no model, no GPU, so it runs
     # here on the login node. It needs the features to exist, which they must anyway.
@@ -109,11 +110,12 @@ elif [[ -n "${EST_S}" ]]; then
 else
     JOB_S="$(_slurm_seconds "${WALLTIME}")"
 fi
-# An explicit WALLTIME is checked against how long the runs actually are: their epoch count
+# A caller's WALLTIME is checked against how long the runs actually are — a derived one
+# already came from the step count, max_steps included. Their epoch count
 # is an explicit train.num_epochs override, else the --run profile's. A hand-written
 # submission once forgot TRAIN_RUN=sweep, got the 300-epoch `full` profile under a 3 h
 # walltime, and was killed at epoch 201 — paid for, and with no usable result.
-if [[ -n "${WALLTIME}" && -z "${WALLTIME_OK}" ]]; then
+if [[ -n "${WALLTIME_GIVEN}" && -z "${WALLTIME_OK}" ]]; then
     epochs_run="$(echo "${RUNS[0]}" | grep -o 'train.num_epochs=[0-9]*' | cut -d= -f2 || true)"
     if [[ -z "${epochs_run}" ]]; then
         epochs_run="$(awk '$1 == "num_epochs:" {print $2}' \
