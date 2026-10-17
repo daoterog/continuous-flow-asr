@@ -38,6 +38,7 @@ from transformers import WhisperTokenizerFast
 
 from src.checkpointing import ComponentCheckpoint, load_components, load_manifest, manifest_for
 from src.data import ROLES, AudioFeatureDataModule
+from src.flops import FlopCount
 from src.flow.coefficients import make_schedule
 from src.flow.schedule import TimeReparametrization
 from src.flow_mapping import DISTILL_GROUPS, FlowMapping
@@ -429,6 +430,10 @@ def build_trainer(
         )
     return pl.Trainer(
         max_epochs=cfg.train.num_epochs,
+        # A step budget, when set, is the real limit and num_epochs only a ceiling: the
+        # train.960 runs are sized by optimizer steps so they compare to each other and to
+        # the screens however many utterances an epoch holds. -1 is Lightning's "unset".
+        max_steps=int(cfg.train.get("max_steps") or -1),
         accelerator=cfg.train.accelerator,
         devices=cfg.train.devices,
         precision=cfg.train.precision or "32-true",
@@ -473,9 +478,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         # No model, no CUDA, so this runs on a login node.
         dm = build_datamodule(cfg)
         per_epoch = len(dm.train_dataloader())
+        total = per_epoch * cfg.train.num_epochs
+        if cfg.train.get("max_steps"):
+            total = min(total, int(cfg.train.max_steps))
         print(f"steps_per_epoch {per_epoch}")
         print(f"epochs {cfg.train.num_epochs}")
-        print(f"total_steps {per_epoch * cfg.train.num_epochs}")
+        print(f"total_steps {total}")
         return 0
 
     print(f"profile: where={cfg.profile.where} run={cfg.profile.run or '(none)'}  "
@@ -490,6 +498,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     logger = build_logger(cfg)
     extra: list[pl.Callback] = []
+    if isinstance(model, FlowMatching | MuOnly):
+        # Sampling cost quoted at the step count the probe scores, the one runs compare on.
+        extra.append(FlopCount(sample_steps=model.sampling_probe.step_counts[0]))
     if cfg.train.get("save_components", True):
         out_dir = components_dir(cfg, logger)
         extra.append(

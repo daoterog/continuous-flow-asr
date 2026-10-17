@@ -73,6 +73,9 @@ echo "config    : ${TRAIN_CONFIG}"
 echo "runs      : ${TRAIN_N}"
 echo "node      : $(hostname)"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+# Whether train.960's ~1.1 TB of latents could be staged to node-local disk instead of read
+# off GPFS every epoch.
+echo "local disk: $(df -h "${TMPDIR:-/tmp}" | tail -1)"
 
 # What depends on running here — the scratch data root, workers, eval batch, compile, the
 # per-step metrics — comes from configs/profiles/where/snellius.yaml, not from overrides.
