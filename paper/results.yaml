@@ -285,11 +285,14 @@ entries:
     status: running
     question: How does one transcript form over the sampling steps?
     builder: sampling_examples
+    # The best model only. For the final model, rerun sample_trajectory.sh on it alone with
+    # TRAJ_OUT=paper/data/<dir> and point this at <dir>/sampling_examples; the WER-over-steps
+    # figure stays on the tuning models above.
+    data: sampling_examples
     role: val
     steps: [1, 2, 4, 8, 16]
     columns:
       - {label: ours, show: "Ours"}
-      - {label: linear, show: "Linear"}
 
   # -- 8----------------------------------------------------------------------------------
   - id: main_result

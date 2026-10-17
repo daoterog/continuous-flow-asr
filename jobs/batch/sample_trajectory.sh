@@ -29,6 +29,8 @@
 #   TRAJ_STEPS      — step counts                      (default "1 2 4 8 16 32 64")
 #   TRAJ_CFG        — guided weights for runs trained with audio dropout (default "1.5 2")
 #   TRAJ_OUT        — where the CSVs land              (default paper/data)
+#   TRAJ_SHOW       — utterances whose every step is written (default 25); the
+#                     examples table picks the one that forms most visibly among them
 #   TRAJ_OVERRIDES  — dotlist overrides on top of each run's own config. The default
 #                     forces the whole split, as sample_eval.sh does.
 
@@ -56,4 +58,5 @@ srun python -m scripts.evaluation.sample_trajectory \
     --steps ${TRAJ_STEPS:-1 2 4 8 16 32 64} \
     --cfg-strengths ${TRAJ_CFG:-1.5 2} \
     --out "${TRAJ_OUT:-paper/data}" \
+    --n-show "${TRAJ_SHOW:-25}" \
     data.env=snellius ${TRAJ_OVERRIDES}

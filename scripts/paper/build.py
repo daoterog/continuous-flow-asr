@@ -690,10 +690,11 @@ def sampling_example_rows(entry: dict) -> list[dict]:
 
     `utt` picks the utterance; unset, it is the one the first model improves on most between
     its first step and its last, so the table shows a transcript forming rather than one
-    already right at step 1.
+    already right at step 1. `data` names the TSV under paper/data/, so a later model's
+    transcripts can sit beside the tuning models' rather than replace them.
     """
     role = entry.get("role", "val")
-    rows = [r for r in read_tsv("sampling_examples") if r["role"] == role]
+    rows = [r for r in read_tsv(entry.get("data", "sampling_examples")) if r["role"] == role]
     if not rows:
         return []
     cols = entry["columns"]
