@@ -435,6 +435,7 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
         generator: torch.Generator | None = None,
         grid: str = "live",
         cfg_strength: float | None = None,
+        trace: list | None = None,
     ) -> torch.Tensor:
         """Integrate from noise to (B, canvas_len) token ids for this batch of audio.
 
@@ -451,6 +452,9 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
 
         `cfg_strength` is classifier-free guidance's weight (`flow.sampler.guided_logits`),
         `sampling.cfg_strength` when None and 1 — no guidance — when that is unset too.
+
+        `trace`, when a list, receives each step's prediction and state
+        (`flow.sampler._record`).
         """
         if cfg_strength is None:
             cfg_strength = float(self.cfg.get("sampling", {}).get("cfg_strength", 1.0))
@@ -492,6 +496,7 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
             waypoint=self.waypoint,
             time_grid=u_grid if self.time_input == "uniform" else None,
             cfg_strength=cfg_strength,
+            trace=trace,
         )
 
     def reference_reparam(self) -> TimeReparametrization:

@@ -596,10 +596,141 @@ def mu_reliance_figure(entry: dict) -> Path | None:
     return save(fig, PAPER / "figures" / f"{entry['id']}.png")
 
 
+def read_tsv(name: str) -> list[dict]:
+    """paper/data/<name>.tsv as dicts, or [] when it does not exist yet."""
+    path = PAPER / "data" / f"{name}.tsv"
+    if not path.exists():
+        return []
+    with path.open() as f:
+        return list(csv.DictReader(f, delimiter="\t"))
+
+
+def sampling_series(entry: dict, rows: list[dict]) -> list[dict]:
+    """One series per (model, guidance weight) the data holds, in the entry's model order.
+
+    The name says how it was sampled, from the row rather than by hand: a guided weight is
+    named, and a model trained with audio dropout but sampled at w = 1 is marked unguided —
+    drawn dashed in its guided twin's colour, so each pair reads as one model.
+    """
+    series = []
+    for color, model in zip(SERIES, entry["models"], strict=False):
+        mine = [r for r in rows if r["label"] == model["label"]]
+        for w in sorted({float(r["cfg"]) for r in mine}):
+            dropout = float(mine[0]["trained_dropout"])
+            show = model["show"]
+            if w != 1.0:
+                show += f", w = {w:g}"
+            elif dropout > 0.0:
+                show += ", unguided"
+            series.append({
+                "label": model["label"], "cfg": w, "show": show, "color": color,
+                "ls": "--" if dropout > 0.0 and w == 1.0 else "-",
+            })
+    return series
+
+
+def sampling_steps_figure(entry: dict) -> Path | None:
+    """WER against the number of sampling steps, and along one trajectory, step by step.
+
+    (a) the final WER at each step count N; (b) at N = `trace_steps`, the WER of the
+    denoiser's running prediction after each step — what sampling would return if it stopped
+    there; (c) the same for the noisy state's own argmax, which only becomes the transcript
+    at the end. The one-pass reference (mu alone) is a flat line: it has no steps.
+    """
+    role, n_trace = entry.get("role", "val"), int(entry.get("trace_steps", 16))
+    steps = [r for r in read_csv("sampling_steps") if r["role"] == role]
+    trace = [r for r in read_csv("sampling_trajectory")
+             if r["role"] == role and int(r["num_steps"]) == n_trace]
+    if not steps:
+        return None
+    fig, axes = plt.subplots(1, 3, figsize=(7.2, 2.5), sharey=False)
+    ref = entry.get("reference")
+    ref_wer = next((number(r["wer"]) for r in steps if ref and r["label"] == ref["label"]), None)
+    for s in sampling_series(entry, steps):
+        def pick(rows: list[dict], s: dict = s) -> list[dict]:
+            return [r for r in rows if r["label"] == s["label"] and float(r["cfg"]) == s["cfg"]]
+
+        style = {"color": s["color"], "ls": s["ls"], "marker": "o", "ms": 3}
+        mine = sorted(pick(steps), key=lambda r: int(r["num_steps"]))
+        axes[0].plot([int(r["num_steps"]) for r in mine], [number(r["wer"]) for r in mine],
+                     label=s["show"], **style)
+        mine = sorted(pick(trace), key=lambda r: int(r["step"]))
+        k = [int(r["step"]) for r in mine]
+        axes[1].plot(k, [number(r["wer_pred"]) for r in mine], **style)
+        axes[2].plot(k, [number(r["wer_state"]) for r in mine], **style)
+    if ref_wer is not None:
+        for ax in axes[:2]:
+            ax.axhline(ref_wer, color=REFERENCE, ls=":", lw=1.2,
+                       label=ref["show"] if ax is axes[0] else None)
+    axes[0].set_xscale("log", base=2)
+    counts = sorted({int(r["num_steps"]) for r in steps})
+    axes[0].set_xticks(counts, [str(n) for n in counts])
+    axes[0].minorticks_off()
+    axes[0].set_xlabel("sampling steps N")
+    axes[0].set_ylabel(f"WER % ({entry.get('split_name', role)})")
+    axes[0].set_title("(a) final transcript", loc="left")
+    axes[1].set_title(f"(b) running prediction, N = {n_trace}", loc="left")
+    axes[2].set_title(f"(c) state's argmax, N = {n_trace}", loc="left")
+    for ax in axes[1:]:
+        ax.set_xlabel("step k")
+    ylim = entry.get("ylim")
+    if ylim:
+        axes[0].set_ylim(*ylim)
+        axes[1].set_ylim(*ylim)
+    # The state at the first step is noise, whose argmax inserts tokens freely (WER > 100%).
+    if entry.get("ylim_state"):
+        axes[2].set_ylim(*entry["ylim_state"])
+    fig.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=4, fontsize=6)
+    fig.tight_layout()
+    return save(fig, PAPER / "figures" / f"{entry['id']}.png")
+
+
+def sampling_example_rows(entry: dict) -> list[dict]:
+    """One utterance's running prediction at chosen steps, a column per model, then the reference.
+
+    `utt` picks the utterance; unset, it is the one the first model improves on most between
+    its first step and its last, so the table shows a transcript forming rather than one
+    already right at step 1.
+    """
+    role = entry.get("role", "val")
+    rows = [r for r in read_tsv("sampling_examples") if r["role"] == role]
+    if not rows:
+        return []
+    cols = entry["columns"]
+
+    def cell(c: dict, utt: str, step: str) -> dict | None:
+        return next((r for r in rows if r["label"] == c["label"]
+                     and float(r["cfg"] or 1) == float(c.get("cfg", 1))
+                     and r["utt"] == utt and r["step"] == step), None)
+
+    utt = entry.get("utt")
+    if utt is None:
+        utts = sorted({r["utt"] for r in rows if r["label"] == cols[0]["label"]}, key=int)
+        steps = [str(s) for s in entry["steps"]]
+
+        def gain(u: str) -> float:
+            first, last = cell(cols[0], u, steps[0]), cell(cols[0], u, steps[-1])
+            return number(first["wer"]) - number(last["wer"]) if first and last else -1.0
+
+        utt = max(utts, key=gain)
+    utt = str(utt)
+    out = []
+    for step in entry["steps"]:
+        row = {"step": str(step)}
+        for c in cols:
+            hit = cell(c, utt, str(step))
+            row[c["show"]] = f"{hit['text']} ({float(hit['wer']):.0f}%)" if hit else ""
+        out.append(row)
+    ref = next((r["text"] for r in rows if r["label"] == "reference" and r["utt"] == utt), "")
+    out.append({"step": "reference", **{c["show"]: ref for c in cols}})
+    return out
+
+
 BUILDERS = {
     "audio_info": audio_info_figure,
     "field_recovery": field_recovery_figure,
     "mu_reliance": mu_reliance_figure,
+    "sampling_steps": sampling_steps_figure,
 }
 
 
@@ -642,6 +773,8 @@ def build_entry(entry: dict, registry: dict, rerun: bool) -> tuple[str, str]:
         rows = read_csv(entry["id"])
         if entry["id"] == "compute":
             rows, _ = compute_summary(entry, registry)
+        if entry.get("builder") == "sampling_examples":
+            rows = sampling_example_rows(entry)
         if rows and done:
             tex, table = plain_tex(entry, rows), plain_md(rows)
         else:

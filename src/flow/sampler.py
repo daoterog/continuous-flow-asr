@@ -154,6 +154,20 @@ def _endpoint(
     return F.softmax(logits, dim=-1)
 
 
+def _record(trace: list, t: float, x_t: torch.Tensor, logits: torch.Tensor) -> None:
+    """One step's reading of the trajectory, appended to `trace`.
+
+    `pred` is the denoiser's estimate of the transcript at this step, guidance included —
+    what the sampler would return if it stopped here. `state` is what the noisy field
+    itself reads as before the step is taken. Both are (B, L) ids on the host.
+    """
+    trace.append({
+        "t": float(t),
+        "pred": logits.argmax(dim=-1).cpu(),
+        "state": x_t.argmax(dim=-1).cpu(),
+    })
+
+
 @torch.no_grad()
 def sample_tokens(
     denoiser: torch.nn.Module,
@@ -171,12 +185,13 @@ def sample_tokens(
     waypoint: float = 0.0,
     time_grid: np.ndarray | list[float] | None = None,
     cfg_strength: float = 1.0,
+    trace: list | None = None,
 ) -> torch.Tensor:
     """Integrate from noise to (B, canvas_len) token ids.
 
     `time_grid` is what the denoiser's time input reads at each point of `grid`; None
     feeds it `grid` itself. See `denoiser_times`. `cfg_strength` guides every step; see
-    `guided_logits`.
+    `guided_logits`. `trace` collects every step's reading; see `_record`.
 
     `waypoint` is unused — this integrator never forms the drift, it rebuilds the
     interpolant from gamma_fn directly — and is accepted only so the two samplers share one
@@ -205,6 +220,8 @@ def sample_tokens(
             denoiser, x_t, time, audio, cfg_strength,
             _uncond_offset(gamma_fn, mu, t, vocab_size),
         )
+        if trace is not None:
+            _record(trace, t, x_t, logits)
         x1_hat = (
             F.one_hot(logits.argmax(dim=-1), vocab_size).to(logits.dtype)
             if hard
@@ -236,10 +253,11 @@ def sample_tokens_euler(
     eps: float = 1e-5,
     time_grid: np.ndarray | list[float] | None = None,
     cfg_strength: float = 1.0,
+    trace: list | None = None,
 ) -> torch.Tensor:
     """Algorithm 6: Euler-step the drift, then decode the final state.
 
-    `time_grid` and `cfg_strength` as in `sample_tokens`.
+    `time_grid`, `cfg_strength` and `trace` as in `sample_tokens`.
 
     Differs from `sample_tokens` in both halves of the loop. The state is advanced by
     `x + (t_next - t) b` instead of being rebuilt from x0 at the new time, and the
@@ -271,6 +289,8 @@ def sample_tokens_euler(
             if hard
             else F.softmax(logits, dim=-1)
         )
+        if trace is not None:
+            _record(trace, t, x_t, logits)
         x_t = x_t + (t_next - t) * drift(x_t, x1_hat, t, mu, waypoint, eps)
 
     return x_t.argmax(dim=-1)

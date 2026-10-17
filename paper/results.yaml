@@ -259,7 +259,39 @@ entries:
       - {label: "measured tau (refresh every 10)", show: "measured tau"}
       - {label: "+ measured tau (refresh every 10)", show: "sigma 0.4 + measured tau"}
 
-  # -- 8 ----------------------------------------------------------------------------------
+  # Data: jobs/batch/sample_trajectory.sh -> data/sampling_{steps,trajectory}.csv and
+  # data/sampling_examples.tsv. `label` is the --model label the job ran under; how each was
+  # sampled (method, guidance) comes from the run's own config and is in the rows.
+  - id: sampling_steps
+    phase: 7
+    kind: figure
+    status: running
+    question: How does WER change with the number of sampling steps, and step by step along one trajectory?
+    builder: sampling_steps
+    role: val
+    split_name: dev-clean
+    trace_steps: 16
+    ylim_state: [0, 150]
+    models:
+      - {label: ours, show: "Ours"}                                # y9hyu9p0
+      - {label: ours-adrop0.05, show: "Ours, audio dropout 0.05"}  # 6n9h2pko
+      - {label: linear, show: "Linear"}                            # 16keaex7
+      - {label: linear-adrop0.1, show: "Linear, audio dropout 0.1"}  # 1nz9v8pz
+    reference: {label: mu-only, show: "mu alone (one pass)"}       # txuowwbe
+
+  - id: sampling_examples
+    phase: 7
+    kind: table
+    status: running
+    question: How does one transcript form over the sampling steps?
+    builder: sampling_examples
+    role: val
+    steps: [1, 2, 4, 8, 16]
+    columns:
+      - {label: ours, show: "Ours"}
+      - {label: linear, show: "Linear"}
+
+  # -- 8----------------------------------------------------------------------------------
   - id: main_result
     phase: 8
     kind: table
