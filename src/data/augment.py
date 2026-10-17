@@ -86,7 +86,13 @@ def corrupt_draft(
     elif source == "mu":
         if mu_logits is None:
             raise ValueError("train.draft_corruption.source=mu needs a run with mu")
-        wrong = F.gumbel_softmax(mu_logits.detach().float(), hard=True).to(x1.dtype)
+        # The Gumbel-max sample that F.gumbel_softmax(hard=True) returns, from the same
+        # draws, without its straight-through soft path: the logits are detached, so that
+        # path carries no gradient, and at the full vocabulary its five extra (B, L, V)
+        # float32 tensors ran a batch of 64 out of an A100's 40 GB.
+        noisy = torch.empty_like(mu_logits, dtype=torch.float32).exponential_().log_().neg_()
+        pick = noisy.add_(mu_logits.detach().float()).argmax(-1, keepdim=True)
+        wrong = torch.zeros_like(x1).scatter_(-1, pick, 1.0)
     else:
         raise ValueError(f"train.draft_corruption.source must be uniform or mu, got {source!r}")
     return torch.where(hit[..., None], wrong, x1)

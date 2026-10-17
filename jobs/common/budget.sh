@@ -20,9 +20,22 @@
 BUDGET_SINCE="${BUDGET_SINCE:-25-08-2026}"
 BUDGET_CAP="${BUDGET_CAP:-100000}"
 SWEEP_CAP="${SWEEP_CAP:-3000}"
-SBU_PER_GPU_HOUR="${SBU_PER_GPU_HOUR:-128}"
-# Per run, per GPU: 18 cores and at least 160G for the whole job (see jobs/batch/train.sh).
-CPUS_PER_RUN=18
+# PARTITION picks the node type. gpu_h100 (`scontrol show partition gpu_h100`, 2026-10-17):
+# TRESBillingWeights=gres/gpu=192,cpu=12 with no memory weight, on 4-GPU, 64-core, 720 GiB
+# nodes. So a share is 1 GPU or 16 cores, memory is free, and a run with 160G pays for one
+# GPU — 192 SBU/h against the A100's 256. There are no H200s on Snellius.
+PARTITION="${PARTITION:-gpu_a100}"
+case "${PARTITION}" in
+    gpu_a100) _rate=128 _cores=18 _mem_share=120 ;;
+    gpu_h100) _rate=192 _cores=16 _mem_share="" ;;
+    *) echo "budget.sh: unknown PARTITION ${PARTITION}" >&2; return 1 ;;
+esac
+SBU_PER_GPU_HOUR="${SBU_PER_GPU_HOUR:-${_rate}}"
+# Per run, per GPU: one share of cores and at least 160G for the whole job (see
+# jobs/batch/train.sh). MEM_G overrides the job's memory: on gpu_h100 it costs nothing, and
+# whatever the job holds is page cache for train.960's 1.1 TB of latents.
+CPUS_PER_RUN="${_cores}"
+MEM_SHARE_G="${_mem_share}"
 MEM_PER_RUN_G=120
 MEM_MIN_G=160
 # Measured on the stage-2 screen (flow-asr-flm-parity, 2026-10-12): the fulldata recipe under
@@ -51,15 +64,15 @@ job_resources() {
     local n="${1:-1}" mem
     mem=$((MEM_PER_RUN_G * n))
     ((mem < MEM_MIN_G)) && mem=${MEM_MIN_G}
-    echo "${n} $((CPUS_PER_RUN * n)) ${mem}"
+    echo "${n} $((CPUS_PER_RUN * n)) ${MEM_G:-${mem}}"
 }
 
 # GPUs a job of N runs is charged for: the largest of its GPU, CPU and memory shares.
 charged_gpus() {
     local gpus cpus mem
     read -r gpus cpus mem <<< "$(job_resources "${1:-1}")"
-    awk -v g="${gpus}" -v c="${cpus}" -v m="${mem}" 'BEGIN {
-        x = g; cs = c / 18; ms = m / 120
+    awk -v g="${gpus}" -v c="${cpus}" -v m="${mem}" -v cc="${CPUS_PER_RUN}" -v mc="${MEM_SHARE_G}" 'BEGIN {
+        x = g; cs = c / cc; ms = (mc == "" ? 0 : m / mc)
         if (cs > x) x = cs; if (ms > x) x = ms
         printf "%d", (x == int(x) ? x : int(x) + 1)
     }'
