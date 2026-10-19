@@ -11,11 +11,8 @@ from torch.utils.data import Dataset
 class AudioFeatureDataset(Dataset):
     """Utterance-level view over the sharded (frames, d_model) feature files.
 
-    The split is ~103 GB on disk, so only the requested slice is read into RAM, with one
-    positioned read at its byte offset; the OS page cache keeps hot shards resident. On
-    GPFS that read is ~1.75x faster than faulting the same slice in through a memory map
-    (Snellius login node, 16 processes over random train.960 utterances: 68-85 utt/s
-    against 39-47).
+    The split is ~103 GB on disk, so the .npy shards stay memory-mapped and only the
+    requested slice is copied into RAM; the OS page cache keeps hot shards resident.
     The .json indexes are small, so they are read once up front and flattened into a
     single utterance table (shards are not all the same size, so idx can't be split
     arithmetically).
@@ -50,8 +47,7 @@ class AudioFeatureDataset(Dataset):
                 f"shards under {self.audio_feature_dir} disagree on d_model: {d_models}"
             )
         self.d_model = d_models.pop()
-        # shard -> (path, data offset, dtype, d_model), read from the .npy header on first use
-        self._shards: dict[int, tuple[Path, int, np.dtype, int]] = {}
+        self._shards: dict[int, np.ndarray] = {}  # lazy, so each worker gets its own mmap
 
     def __len__(self) -> int:
         """Number of utterances across every shard."""
@@ -62,17 +58,11 @@ class AudioFeatureDataset(Dataset):
         """Every transcript, in dataset order."""
         return [u[3] for u in self.utts]
 
-    def _read(self, shard_idx: int, offset: int, length: int) -> np.ndarray:
-        """Frames [offset, offset + length) of one shard, as an array that owns its memory."""
+    def _feats(self, shard_idx: int) -> np.ndarray:
         if shard_idx not in self._shards:
             path = self.index_paths[shard_idx].with_suffix(".npy")
-            header = np.load(path, mmap_mode="r")  # parses the header; no data is read
-            self._shards[shard_idx] = (path, header.offset, header.dtype, header.shape[1])
-        path, start, dtype, d_model = self._shards[shard_idx]
-        flat = np.fromfile(
-            path, dtype, count=length * d_model, offset=start + offset * d_model * dtype.itemsize
-        )
-        return flat.reshape(length, d_model)
+            self._shards[shard_idx] = np.load(path, mmap_mode="r")
+        return self._shards[shard_idx]
 
     def __getitem__(self, idx: int) -> dict:
         """One utterance: its (frames, d_model) latents and its raw transcript.
@@ -84,7 +74,9 @@ class AudioFeatureDataset(Dataset):
         anyway, so widening it here would double the per-batch transfer for nothing.
         """
         shard_idx, offset, length, text = self.utts[idx]
-        audio = torch.from_numpy(self._read(shard_idx, offset, length))
+        feats = self._feats(shard_idx)[offset : offset + length]
+        # copy off the read-only mmap so the tensor owns its memory
+        audio = torch.from_numpy(np.array(feats))
         if self.audio_stride > 1:
             frames, d_model = audio.shape
             keep = frames // self.audio_stride * self.audio_stride
