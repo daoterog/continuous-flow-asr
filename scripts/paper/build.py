@@ -629,57 +629,104 @@ def sampling_series(entry: dict, rows: list[dict]) -> list[dict]:
     return series
 
 
+def plateau(xs: list[int], wers: list[float], tol: float) -> int:
+    """The first x within `tol` (relative) of the series' best WER: where it stops improving."""
+    best = min(wers)
+    return next(x for x, w in zip(xs, wers, strict=True) if w <= best * (1 + tol))
+
+
 def sampling_steps_figure(entry: dict) -> Path | None:
     """WER against the number of sampling steps, and along one trajectory, step by step.
 
     (a) the final WER at each step count N; (b) at N = `trace_steps`, the WER of the
     denoiser's running prediction after each step — what sampling would return if it stopped
-    there; (c) the same for the noisy state's own argmax, which only becomes the transcript
-    at the end. The one-pass reference (mu alone) is a flat line: it has no steps.
+    there; (c), when `show_state`, the noisy state's own argmax after k steps, from the
+    starting noise (k = 0) to t = 1 (k = N), where it is the final transcript. The one-pass
+    reference (mu alone) is a flat line: it has no steps.
+
+    `trace_data` names the trajectory CSV under paper/data/, so a longer trace from its own
+    job (`trace_steps: 64`) can replace the 16-step one without touching the sweep;
+    `extra_steps` lists that job's sampling_steps CSVs, whose new step counts join (a).
+
+    `logy` puts WER on a log axis, so a gap reads as a ratio and the low-WER lines separate.
+    `plateau` (a relative tolerance) marks, for each model in `plateau_lines` at w = 1, the
+    first point within it of that line's own best, with a ring and a vertical line.
     """
     role, n_trace = entry.get("role", "val"), int(entry.get("trace_steps", 16))
     steps = [r for r in read_csv("sampling_steps") if r["role"] == role]
-    trace = [r for r in read_csv("sampling_trajectory")
+    # Step counts a later job added (`extra_steps`), where the sweep did not already have them.
+    have = {(r["label"], r["cfg"], r["num_steps"]) for r in steps}
+    for name in entry.get("extra_steps") or []:
+        steps += [r for r in read_csv(name) if r["role"] == role
+                  and (r["label"], r["cfg"], r["num_steps"]) not in have]
+    trace = [r for r in read_csv(entry.get("trace_data", "sampling_trajectory"))
              if r["role"] == role and int(r["num_steps"]) == n_trace]
     if not steps:
         return None
-    fig, axes = plt.subplots(1, 3, figsize=(7.2, 2.5), sharey=False)
+    show_state = entry.get("show_state", True)
+    n_panels = 3 if show_state else 2
+    fig, axes = plt.subplots(1, n_panels, figsize=(2.4 * n_panels, 2.5), sharey=False)
+    wer_axes = axes[:2]
     ref = entry.get("reference")
     ref_wer = next((number(r["wer"]) for r in steps if ref and r["label"] == ref["label"]), None)
+    tol, lined = entry.get("plateau"), set(entry.get("plateau_lines") or [])
     for s in sampling_series(entry, steps):
         def pick(rows: list[dict], s: dict = s) -> list[dict]:
             return [r for r in rows if r["label"] == s["label"] and float(r["cfg"]) == s["cfg"]]
 
         style = {"color": s["color"], "ls": s["ls"], "marker": "o", "ms": 3}
         mine = sorted(pick(steps), key=lambda r: int(r["num_steps"]))
-        axes[0].plot([int(r["num_steps"]) for r in mine], [number(r["wer"]) for r in mine],
-                     label=s["show"], **style)
+        n, wer_n = [int(r["num_steps"]) for r in mine], [number(r["wer"]) for r in mine]
+        axes[0].plot(n, wer_n, label=s["show"], **style)
         mine = sorted(pick(trace), key=lambda r: int(r["step"]))
-        k = [int(r["step"]) for r in mine]
-        axes[1].plot(k, [number(r["wer_pred"]) for r in mine], **style)
-        axes[2].plot(k, [number(r["wer_state"]) for r in mine], **style)
+        k, wer_k = [int(r["step"]) for r in mine], [number(r["wer_pred"]) for r in mine]
+        axes[1].plot(k, wer_k, **style)
+        if show_state and mine:
+            # The trace holds the state entering each step, so step k's row is the state after
+            # k - 1 steps. The one after the last step sits at t = 1, where the path is the
+            # prediction alone: its argmax is the final transcript, scored in sampling_steps.
+            final = next(w for x, w in zip(n, wer_n, strict=True) if x == n_trace)
+            axes[2].plot([x - 1 for x in k] + [n_trace],
+                         [number(r["wer_state"]) for r in mine] + [final], **style)
+        if tol is None:
+            continue
+        if s["label"] not in lined or s["cfg"] != 1.0:
+            continue
+        for ax, xs, ws in ((axes[0], n, wer_n), (axes[1], k, wer_k)):
+            if not xs:
+                continue
+            x = plateau(xs, ws, tol)
+            ax.axvline(x, color=s["color"], lw=0.9, ls=(0, (3, 2)), zorder=1.5)
+            ax.plot(x, ws[xs.index(x)], "o", ms=7, mfc="none", mec=s["color"], mew=1.2)
     if ref_wer is not None:
-        for ax in axes[:2]:
+        for ax in wer_axes:
             ax.axhline(ref_wer, color=REFERENCE, ls=":", lw=1.2,
                        label=ref["show"] if ax is axes[0] else None)
     axes[0].set_xscale("log", base=2)
     counts = sorted({int(r["num_steps"]) for r in steps})
-    axes[0].set_xticks(counts, [str(n) for n in counts])
-    axes[0].minorticks_off()
+    axes[0].set_xticks(counts, [str(c) for c in counts])
     axes[0].set_xlabel("sampling steps N")
     axes[0].set_ylabel(f"WER % ({entry.get('split_name', role)})")
     axes[0].set_title("(a) final transcript", loc="left")
     axes[1].set_title(f"(b) running prediction, N = {n_trace}", loc="left")
-    axes[2].set_title(f"(c) state's argmax, N = {n_trace}", loc="left")
-    for ax in axes[1:]:
-        ax.set_xlabel("step k")
-    ylim = entry.get("ylim")
-    if ylim:
-        axes[0].set_ylim(*ylim)
-        axes[1].set_ylim(*ylim)
-    # The state at the first step is noise, whose argmax inserts tokens freely (WER > 100%).
-    if entry.get("ylim_state"):
-        axes[2].set_ylim(*entry["ylim_state"])
+    axes[1].set_xlabel("step k")
+    quarters = [n_trace * q // 4 for q in range(1, 5)]
+    axes[1].set_xticks([1, *quarters])
+    if show_state:
+        axes[2].set_title(f"(c) state's argmax, N = {n_trace}", loc="left")
+        axes[2].set_xlabel("steps taken k")
+        axes[2].set_xticks([0, *quarters])
+        # The state at the first step is noise, whose argmax inserts tokens freely (WER > 100%).
+        if entry.get("ylim_state"):
+            axes[2].set_ylim(*entry["ylim_state"])
+    for ax in wer_axes:
+        if entry.get("logy"):
+            ax.set_yscale("log")
+            ticks = entry.get("yticks", [8, 10, 15, 20, 30, 40, 60])
+            ax.set_yticks(ticks, [str(t) for t in ticks])
+        if entry.get("ylim"):
+            ax.set_ylim(*entry["ylim"])
+        ax.minorticks_off()
     fig.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=4, fontsize=6)
     fig.tight_layout()
     return save(fig, PAPER / "figures" / f"{entry['id']}.png")

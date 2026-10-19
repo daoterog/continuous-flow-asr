@@ -265,13 +265,16 @@ entries:
   - id: sampling_steps
     phase: 7
     kind: figure
-    status: running
+    status: done
     question: How does WER change with the number of sampling steps, and step by step along one trajectory?
     builder: sampling_steps
     role: val
     split_name: dev-clean
     trace_steps: 16
     ylim_state: [0, 150]
+    logy: true
+    plateau: 0.05
+    plateau_lines: [ours, linear]
     models:
       - {label: ours, show: "Ours"}                                # y9hyu9p0
       - {label: ours-adrop0.05, show: "Ours, audio dropout 0.05"}  # 6n9h2pko
@@ -282,7 +285,7 @@ entries:
   - id: sampling_examples
     phase: 7
     kind: table
-    status: running
+    status: done
     question: How does one transcript form over the sampling steps?
     builder: sampling_examples
     # The best model only. For the final model, rerun sample_trajectory.sh on it alone with

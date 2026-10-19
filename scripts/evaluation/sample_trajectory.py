@@ -3,7 +3,7 @@ r"""WER across sampling step counts, WER along one trajectory, and the transcrip
 Three readings of the same saved models, for the paper's sampling figure:
 
   sampling_steps.csv       final WER at each step count N
-  sampling_trajectory.csv  at N = --trace-steps, the WER of the denoiser's running
+  sampling_trajectory.csv  at each N in --trace-steps, the WER of the denoiser's running
                            prediction and of the state's argmax at every step k
   sampling_examples.tsv    for --n-show utterances, the decoded prediction at every step
 
@@ -56,7 +56,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     p.add_argument("--variant", default="best", choices=["best", "final"])
     p.add_argument("--role", nargs="+", default=["val"], choices=["train", "val", "test"])
     p.add_argument("--steps", type=int, nargs="+", default=[1, 2, 4, 8, 16, 32, 64])
-    p.add_argument("--trace-steps", type=int, default=16, help="the N whose steps are traced")
+    p.add_argument("--trace-steps", type=int, nargs="+", default=[16],
+                   help="the step counts whose every step is recorded")
     p.add_argument(
         "--cfg-strengths", type=float, nargs="+", default=[1.5, 2.0],
         help="guided weights for models trained with audio dropout, on top of w = 1",
@@ -153,7 +154,7 @@ def score_role(
 
     for w in weights:
         for n in [1] if is_mu else args.steps:
-            traced = n == args.trace_steps and not is_mu
+            traced = n in args.trace_steps and not is_mu
             preds, steps_seen = [], []
             for b_idx, batch in enumerate(batches):
                 gen = torch.Generator(device=device).manual_seed(args.seed + b_idx)
