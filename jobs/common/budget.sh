@@ -99,7 +99,9 @@ budget_spent() {
         return 0
     fi
     command -v accuse >/dev/null 2>&1 || return 1
-    accuse -u "${USER}" -s "${BUDGET_SINCE}" -e "$(date +%d-%m-%Y)" --sbu 2>/dev/null \
+    # Bounded: accuse queries the accounting database and can stall, which would leave a
+    # submission hanging before sbatch. A timeout fails the gate loudly instead.
+    timeout 60 accuse -u "${USER}" -s "${BUDGET_SINCE}" -e "$(date +%d-%m-%Y)" --sbu 2>/dev/null \
         | awk '/^Totals/ { printf "%.0f", $(NF-1) - $NF; found = 1 } END { exit !found }'
 }
 

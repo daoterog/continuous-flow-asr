@@ -66,13 +66,27 @@ SIZING_ERR="$(mktemp)"
 trap 'rm -f "${SIZING_ERR}"' EXIT
 
 WALLTIME_GIVEN="${WALLTIME}"
+# A step-budgeted run (train.max_steps, from an override or the --run profile) is as long as
+# its budget: the profile's num_epochs is a ceiling that never binds, so there is nothing to
+# count. Counting means building the data on the login node — reading every shard index and
+# tokenizing every transcript — which for train.960 left the terminal hanging for minutes.
+MAX_STEPS="$(echo "${RUNS[0]}" | grep -o 'train.max_steps=[0-9]*' | cut -d= -f2 || true)"
+if [[ -z "${MAX_STEPS}" ]]; then
+    MAX_STEPS="$(awk '$1 == "max_steps:" {print $2}' \
+        "${REPO_DIR}/configs/profiles/run/${TRAIN_RUN:-full}.yaml" 2>/dev/null || true)"
+fi
+
 if [[ -z "${WALLTIME}" ]]; then
-    # --print-steps builds the data and counts batches; no model, no GPU, so it runs
-    # here on the login node. It needs the features to exist, which they must anyway.
-    TOTAL_STEPS="$(cd "${REPO_DIR}" && python train.py --config "${CONFIG}" \
-        --where snellius --run "${TRAIN_RUN:-full}" ${OVERRIDES} --print-steps \
-        2>"${SIZING_ERR}" \
-        | awk '/^total_steps/ {print $2}' || true)"
+    # Otherwise --print-steps builds the data and counts batches; no model, no GPU, so it
+    # runs here on the login node. It needs the features to exist, which they must anyway.
+    if [[ -n "${MAX_STEPS}" ]]; then
+        TOTAL_STEPS="${MAX_STEPS}"
+    else
+        TOTAL_STEPS="$(cd "${REPO_DIR}" && python train.py --config "${CONFIG}" \
+            --where snellius --run "${TRAIN_RUN:-full}" ${OVERRIDES} --print-steps \
+            2>"${SIZING_ERR}" \
+            | awk '/^total_steps/ {print $2}' || true)"
+    fi
 
     if [[ -z "${TOTAL_STEPS}" ]]; then
         # Loud, and not the partition maximum: a 5-day request would sit in the queue
