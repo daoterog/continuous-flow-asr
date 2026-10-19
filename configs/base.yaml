@@ -400,3 +400,6 @@ logging:
   group: null
   offline: false              # or pass --offline
   save_dir: runs
+  # Lightning's .ckpt and training_state.pt, under <checkpoint_dir>/<run_id>/; null keeps
+  # them in save_dir. Only resuming needs them.
+  checkpoint_dir: null

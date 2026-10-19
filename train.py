@@ -394,6 +394,20 @@ def components_dir(cfg: DictConfig, logger: object) -> Path:
     return Path(cfg.logging.save_dir) / str(run_id) / "components"
 
 
+def checkpoint_dir(cfg: DictConfig, logger: object) -> Path | None:
+    """Where the resume files go — Lightning's .ckpt and the training state — or None.
+
+    None keeps them beside the components. They are large (optimizer state, two .ckpt per
+    run) and nothing loads them, so on Snellius they go to scratch instead of filling the
+    200 GiB home quota, which two crashed smoke runs found at 105%.
+    """
+    root = cfg.logging.get("checkpoint_dir")
+    if not root:
+        return None
+    run_id = getattr(getattr(logger, "experiment", None), "id", None) or "local"
+    return Path(root) / str(run_id)
+
+
 def build_trainer(
     cfg: DictConfig,
     logger: object,
@@ -413,7 +427,12 @@ def build_trainer(
                 f"total_loss/val; components _best still tracks {monitor}"
             )
             monitor = "total_loss/val"
-        callbacks.append(ModelCheckpoint(monitor=monitor, mode="min", save_last=True))
+        callbacks.append(
+            ModelCheckpoint(
+                dirpath=checkpoint_dir(cfg, logger), monitor=monitor, mode="min",
+                save_last=True,
+            )
+        )
     if logger:
         callbacks.append(LearningRateMonitor(logging_interval="step"))
     stop_on = cfg.train.get("early_stop_on")
@@ -511,6 +530,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 vocab_map=dm.vocab_map,
                 monitor=best_monitor(model),
+                state_dir=checkpoint_dir(cfg, logger),
             )
         )
         print(f"components  {out_dir}  (_best by {best_monitor(model)})")

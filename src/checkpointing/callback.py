@@ -28,8 +28,12 @@ class ComponentCheckpoint(pl.Callback):
         monitor: str = "total_loss/val",
         mode: str = "min",
         save_training_state: bool = True,
+        state_dir: Path | None = None,
     ) -> None:
-        """Track `monitor` for the `_best` variant; `mode` says which direction wins."""
+        """Track `monitor` for the `_best` variant; `mode` says which direction wins.
+
+        `state_dir` is where the training state goes, `out_dir` when None.
+        """
         super().__init__()
         if mode not in ("min", "max"):
             raise ValueError(f"mode must be 'min' or 'max', got {mode!r}")
@@ -39,6 +43,7 @@ class ComponentCheckpoint(pl.Callback):
         self.monitor = monitor
         self.mode = mode
         self.save_training_state = save_training_state
+        self.state_dir = Path(state_dir) if state_dir is not None else self.out_dir
         self.best = float("inf") if mode == "min" else float("-inf")
 
     def on_fit_start(self, trainer: pl.Trainer, module: pl.LightningModule) -> None:
@@ -95,7 +100,7 @@ class ComponentCheckpoint(pl.Callback):
             save_manifest(self.out_dir, self.manifest, self.vocab_map)
         save_components(module, self.out_dir, "final")
         if self.save_training_state:
-            save_training_state(trainer, self.out_dir)
+            save_training_state(trainer, self.state_dir)
 
     def teardown(
         self, trainer: pl.Trainer, module: pl.LightningModule, stage: str

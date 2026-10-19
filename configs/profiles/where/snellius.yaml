@@ -54,3 +54,8 @@ metrics:
   # 68.6 ms of CPU against 0.5 ms without it, ~15 s of a ~77 s epoch with the GPU idle.
   # The train/val gap is still read from *_perr/train and *_loss/train.
   wer_bins: {train: 0, val: 10, test: 10}
+logging:
+  # Resume files on scratch: two .ckpt plus a training state per run filled the 200 GiB home
+  # quota (2026-10-19), and two smoke runs died mid-save. Scratch purges old files, which
+  # suits them — nothing loads them; the components stay in save_dir, in home.
+  checkpoint_dir: /scratch-shared/cont-flow-asr/checkpoints
