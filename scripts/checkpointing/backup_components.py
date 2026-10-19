@@ -77,8 +77,10 @@ def main() -> int:
         )
         artifact = wandb.Artifact(f"components-{run_id}", type="model",
                                   metadata={"run_id": run_id})
+        # immutable: upload from the file where it is, instead of first copying it into
+        # wandb's staging directory — a second copy of every weight, in a full home.
         for f in files:
-            artifact.add_file(str(f), name=str(f.relative_to(directory)))
+            artifact.add_file(str(f), name=str(f.relative_to(directory)), policy="immutable")
         run.log_artifact(artifact)
         run.finish()
 
