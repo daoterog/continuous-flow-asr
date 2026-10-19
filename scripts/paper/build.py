@@ -680,14 +680,16 @@ def sampling_steps_figure(entry: dict) -> Path | None:
         axes[0].plot(n, wer_n, label=s["show"], **style)
         mine = sorted(pick(trace), key=lambda r: int(r["step"]))
         k, wer_k = [int(r["step"]) for r in mine], [number(r["wer_pred"]) for r in mine]
-        axes[1].plot(k, wer_k, **style)
+        # Past 16 steps the markers merge into a band; the line alone reads better.
+        trace_style = dict(style, marker="o" if n_trace <= 16 else None)
+        axes[1].plot(k, wer_k, **trace_style)
         if show_state and mine:
             # The trace holds the state entering each step, so step k's row is the state after
             # k - 1 steps. The one after the last step sits at t = 1, where the path is the
             # prediction alone: its argmax is the final transcript, scored in sampling_steps.
             final = next(w for x, w in zip(n, wer_n, strict=True) if x == n_trace)
             axes[2].plot([x - 1 for x in k] + [n_trace],
-                         [number(r["wer_state"]) for r in mine] + [final], **style)
+                         [number(r["wer_state"]) for r in mine] + [final], **trace_style)
         if tol is None:
             continue
         if s["label"] not in lined or s["cfg"] != 1.0:

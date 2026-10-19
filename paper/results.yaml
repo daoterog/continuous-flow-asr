@@ -270,7 +270,9 @@ entries:
     builder: sampling_steps
     role: val
     split_name: dev-clean
-    trace_steps: 16
+    trace_steps: 64
+    trace_data: trace_long/sampling_trajectory
+    extra_steps: [trace_long/sampling_steps]
     ylim_state: [0, 150]
     logy: true
     plateau: 0.05
