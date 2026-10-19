@@ -67,6 +67,10 @@ data:
   # workers. Loading, not the step, is what bounds throughput here, so this is the single
   # largest lever. A 6-core laptop wants 4; match it to the cores you actually have.
   num_workers: 16
+  # Utterances each worker reads at once. 1 is one after another, so a job has num_workers
+  # reads in flight; off GPFS a read waits on latency, and more in flight is more data.
+  # The batches are identical either way (src/data/datamodule.py, ThreadedSubset).
+  read_threads: 1
 
   # One role = configs x splits, the same cross product the precompute scripts take.
   # Overridable as --train-configs / --train-splits / --val-configs / ... on the CLI.

@@ -1,14 +1,13 @@
-"""Does a second pass over the same utterances come back from memory, per read method?
+"""How fast do random utterances come off GPFS, by how many reads are in flight?
 
-Training reads random utterances; whether the job's RAM holds them after the first epoch
-decides whether train.960 is limited by GPFS or by the GPU. Two ways to read a slice:
-`mmap`, faulting it in through a memory map (`np.load(mmap_mode="r")`), and `pread`, one
-positioned read at its byte offset (`np.fromfile(offset=...)`). Each method gets its own
-random set of utterances, read `--passes` times by a pool of worker processes the way the
-DataLoader's workers do; pass 1 is cold, and later passes are as fast as the cache makes
-them.
+Training reads random utterances through memory maps, one at a time per DataLoader worker,
+so a job keeps as many reads in flight as it has workers. A node reading at 0.43 GB/s with
+16 of them is either out of bandwidth or waiting on latency; only the second gets faster
+with more reads in flight. Each configuration `PxT` reads with P worker processes of T
+threads each (P*T reads in flight), on its own disjoint set of random utterances, so its
+first pass is cold; the second pass says whether the reads stayed in the job's RAM.
 
-    python -m scripts.diagnostics.bench_reads --n 12000 --workers 16 --passes 3
+    python -m scripts.diagnostics.bench_reads --n 3000 --configs 16x1 32x1 64x1 16x4 16x8
 """
 
 import argparse
@@ -17,6 +16,7 @@ import json
 import random
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import Pool
 from pathlib import Path
 
@@ -24,6 +24,7 @@ import numpy as np
 
 ROOT = "/scratch-shared/cont-flow-asr/data/features/whisper-large-v3"
 _maps: dict[str, np.ndarray] = {}  # per worker process, as in AudioFeatureDataset
+_threads: ThreadPoolExecutor | None = None
 
 
 def _shard(path: str) -> np.ndarray:
@@ -32,28 +33,34 @@ def _shard(path: str) -> np.ndarray:
     return _maps[path]
 
 
-def via_mmap(u: tuple[str, int, int]) -> int:
-    """Copy the slice off a memory map that stays open in this worker."""
+def read_one(u: tuple[str, int, int]) -> int:
+    """Copy one utterance off its memory map, the way AudioFeatureDataset does."""
     path, offset, length = u
     return np.array(_shard(path)[offset : offset + length]).nbytes
 
 
-def via_pread(u: tuple[str, int, int]) -> int:
-    """Read the slice with one positioned read, the header taken from the open map."""
-    path, offset, length = u
-    a = _shard(path)
-    d = a.shape[1]
-    start = a.offset + offset * d * a.itemsize
-    return np.fromfile(path, a.dtype, count=length * d, offset=start).nbytes
+def _init(threads: int) -> None:
+    global _threads
+    _threads = ThreadPoolExecutor(threads) if threads > 1 else None
+
+
+def read_chunk(chunk: list[tuple[str, int, int]]) -> int:
+    """One worker's share: through its threads when it has them, else one at a time."""
+    if _threads is None:
+        return sum(read_one(u) for u in chunk)
+    return sum(_threads.map(read_one, chunk))
 
 
 def main() -> int:
-    """Time each method's passes over its own random utterances."""
-    p = argparse.ArgumentParser(description=__doc__)
+    """Time a cold and a warm pass for each configuration."""
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("--root", default=ROOT)
-    p.add_argument("--n", type=int, default=12000, help="utterances per method")
-    p.add_argument("--workers", type=int, default=16)
-    p.add_argument("--passes", type=int, default=3)
+    p.add_argument("--n", type=int, default=3000, help="utterances per configuration")
+    p.add_argument("--configs", nargs="+", default=["16x1", "32x1", "64x1", "16x4", "16x8"],
+                   help="PxT: P worker processes of T threads each")
+    p.add_argument("--chunk", type=int, default=32, help="utterances per task")
     args = p.parse_args()
 
     utts = []
@@ -65,18 +72,22 @@ def main() -> int:
         utts += [(idx[:-5] + ".npy", u["offset"], u["length"]) for u in index["utts"]]
     random.seed(0)
     random.shuffle(utts)
-    print(f"{len(utts)} utterances; {args.n} per method, {args.workers} workers", flush=True)
+    print(f"{len(utts)} utterances; {args.n} fresh ones per configuration", flush=True)
+    if len(args.configs) * args.n > len(utts):
+        raise SystemExit("not enough utterances for disjoint sets; lower --n")
 
-    with Pool(args.workers) as pool:
-        for i, (name, fn) in enumerate((("mmap", via_mmap), ("pread", via_pread))):
-            chunk = utts[i * args.n : (i + 1) * args.n]
-            for k in range(args.passes):
-                random.shuffle(chunk)
+    for k, config in enumerate(args.configs):
+        procs, threads = (int(x) for x in config.split("x"))
+        mine = utts[k * args.n : (k + 1) * args.n]
+        with Pool(procs, initializer=_init, initargs=(threads,)) as pool:
+            for name in ("cold", "warm"):
+                random.shuffle(mine)
+                chunks = [mine[i : i + args.chunk] for i in range(0, len(mine), args.chunk)]
                 t = time.time()
-                b = sum(pool.imap_unordered(fn, chunk, chunksize=4))
+                b = sum(pool.imap_unordered(read_chunk, chunks))
                 dt = time.time() - t
-                print(f"{name:6s} pass {k + 1}  {len(chunk) / dt:6.0f} utt/s  "
-                      f"{b / dt / 1e9:5.2f} GB/s", flush=True)
+                print(f"{config:>6}  {procs * threads:>4} in flight  {name}  "
+                      f"{len(mine) / dt:6.0f} utt/s  {b / dt / 1e9:5.2f} GB/s", flush=True)
     return 0
 
 

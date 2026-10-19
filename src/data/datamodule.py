@@ -1,6 +1,8 @@
 """The LightningDataModule: one tokenization pass, the shared vocabulary, the loaders."""
 
+import os
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
 
@@ -16,6 +18,37 @@ from .spec import resolve_role
 from .vocab import VocabMap
 
 ROLES = ("train", "val", "test")
+
+
+class ThreadedSubset(Subset):
+    """A Subset that reads a whole batch's utterances concurrently, `threads` at a time.
+
+    A DataLoader worker otherwise reads its batch one utterance after another, so a job
+    keeps only as many reads in flight as it has workers. Off GPFS a read is latency-bound,
+    so more in flight is more throughput. Same items in the same order — the batches are
+    bit-identical to a plain Subset's. The pool is made lazily in the process that uses it:
+    threads do not survive the fork into a worker.
+    """
+
+    def __init__(self, dataset: ConcatDataset, indices: list[int], threads: int = 1) -> None:
+        """`threads` 1 reads one at a time, as a plain Subset does."""
+        super().__init__(dataset, indices)
+        self.threads = threads
+        self._pool: ThreadPoolExecutor | None = None
+        self._pool_pid: int | None = None
+
+    def __getitems__(self, indices: list[int]) -> list:
+        """The batch's items, read through this process's thread pool."""
+        if self.threads <= 1:
+            return [self.dataset[self.indices[i]] for i in indices]
+        if self._pool is None or self._pool_pid != os.getpid():
+            self._pool = ThreadPoolExecutor(self.threads)
+            self._pool_pid = os.getpid()
+        return list(self._pool.map(lambda i: self.dataset[self.indices[i]], indices))
+
+    def __getstate__(self) -> dict:
+        """Without the pool, which cannot be pickled into a spawned worker."""
+        return {**self.__dict__, "_pool": None, "_pool_pid": None}
 
 
 class AudioFeatureDataModule(pl.LightningDataModule):
@@ -45,6 +78,7 @@ class AudioFeatureDataModule(pl.LightningDataModule):
         gpu_prefetch: bool = False,
         prefetch_factor: int | None = None,
         eval_num_workers: int | None = None,
+        read_threads: int = 1,
     ) -> None:
         """Record the configuration; nothing is read off disk until `setup()`.
 
@@ -76,6 +110,8 @@ class AudioFeatureDataModule(pl.LightningDataModule):
         # Val and test run every few epochs and keep their workers alive in between, so they
         # need far fewer than training; None gives them training's count.
         self.eval_num_workers = num_workers if eval_num_workers is None else eval_num_workers
+        # Utterances each worker reads at once (ThreadedSubset); 1 is one at a time.
+        self.read_threads = read_threads
 
         self.datasets: dict[str, Subset] = {}
         self.dirs: dict[str, list[Path]] = {}
@@ -131,7 +167,9 @@ class AudioFeatureDataModule(pl.LightningDataModule):
                 eligible = np.random.default_rng(self.seed).choice(
                     eligible, cap, replace=False
                 )
-            self.datasets[role] = Subset(raw[role], sorted(eligible.tolist()))
+            self.datasets[role] = ThreadedSubset(
+                raw[role], sorted(eligible.tolist()), self.read_threads
+            )
             # Kept for the summary: it is the ratio that says how much of the canvas the
             # token-level metrics are really about, the rest being padding they exclude.
             self.mean_len[role] = float(lengths[eligible].mean()) if len(eligible) else 0.0
