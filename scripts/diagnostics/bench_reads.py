@@ -61,6 +61,9 @@ def main() -> int:
     p.add_argument("--configs", nargs="+", default=["16x1", "32x1", "64x1", "16x4", "16x8"],
                    help="PxT: P worker processes of T threads each")
     p.add_argument("--chunk", type=int, default=32, help="utterances per task")
+    p.add_argument("--seed", type=int, default=0,
+                   help="picks the utterances; change it between jobs, since a node can keep "
+                        "a previous job's reads in RAM and make a cold pass look warm")
     args = p.parse_args()
 
     utts = []
@@ -70,7 +73,7 @@ def main() -> int:
         with open(idx) as f:
             index = json.load(f)
         utts += [(idx[:-5] + ".npy", u["offset"], u["length"]) for u in index["utts"]]
-    random.seed(0)
+    random.seed(args.seed)
     random.shuffle(utts)
     print(f"{len(utts)} utterances; {args.n} fresh ones per configuration", flush=True)
     if len(args.configs) * args.n > len(utts):
