@@ -82,6 +82,68 @@ echo "local disk: $(df -h "${TMPDIR:-/tmp}" | tail -1)"
 PROFILE=(--where snellius --run "${TRAIN_RUN:-full}")
 echo "profile   : ${PROFILE[*]}"
 
+# STAGE_DATA=1 (set by SCRATCH_NODE=1 in submit/train.sh): copy every feature directory the
+# run reads onto this node's local NVMe and train from there. train.960's 1.1 TB does not fit
+# in RAM, and GPFS gives one node 0.2-0.8 GB/s of random reads whatever the loader does
+# (mmfsd at 718% CPU with 256 reads in flight, the GPU 0-10% busy). A bulk sequential copy is
+# what GPFS streams best, and after it every read is local. The volume is
+# /scratch-node/$USER.$SLURM_JOB_ID (1.8 TB for a 1-GPU H100 job, 2026-10-20) and is deleted
+# when the job ends.
+if [[ -n "${STAGE_DATA}" ]]; then
+    STAGE_DIR="${STAGE_DIR:-/scratch-node/${USER}.${SLURM_JOB_ID}}"
+    if [[ ! -d "${STAGE_DIR}" ]]; then
+        echo "ERROR: STAGE_DATA needs node-local NVMe at ${STAGE_DIR}; submit with" >&2
+        echo "       --constraint=scratch-node (SCRATCH_NODE=1 ./jobs/submit/train.sh ...)" >&2
+        exit 1
+    fi
+    # shellcheck disable=SC2086
+    mapfile -t LISTING < <(python train.py --config "${TRAIN_CONFIG}" "${PROFILE[@]}" \
+        ${TRAIN_OVERRIDES_0} --print-data-dirs)
+    SRC_ROOT="$(printf '%s\n' "${LISTING[@]}" | awk '$1 == "root" {print $2}')"
+    mapfile -t SRC_DIRS < <(printf '%s\n' "${LISTING[@]}" | awk '$1 == "dir" {print $2}')
+    if [[ -z "${SRC_ROOT}" || ${#SRC_DIRS[@]} -eq 0 ]]; then
+        echo "ERROR: could not list the run's feature directories" >&2
+        exit 1
+    fi
+    DST_ROOT="${STAGE_DIR}/data"
+
+    # Summed file sizes, not du: du also counts directory entries, which differ in number.
+    need=$(find "${SRC_DIRS[@]}" -maxdepth 1 -type f -printf "%s\n" | awk '{s += $1} END {print s}')
+    have=$(df -B1 --output=avail "${STAGE_DIR}" | tail -1)
+    echo "stage     : ${#SRC_DIRS[@]} directories, $((need / 2**30)) GiB -> ${DST_ROOT}" \
+        "($((have / 2**30)) GiB free)"
+    if ((need > have)); then
+        echo "ERROR: the features do not fit on ${STAGE_DIR}" >&2
+        exit 1
+    fi
+
+    t0=$(date +%s)
+    for d in "${SRC_DIRS[@]}"; do
+        mkdir -p "${DST_ROOT}/${d#"${SRC_ROOT}"/}"
+    done
+    # One cp per file, 16 at a time: shards are ~10 GB each, and parallel sequential
+    # streams are what GPFS delivers fastest.
+    for d in "${SRC_DIRS[@]}"; do
+        find "${d}" -maxdepth 1 -type f -printf "%p\0${DST_ROOT}/${d#"${SRC_ROOT}"/}/\0"
+    done | xargs -0 -n 2 -P 16 cp
+    t1=$(date +%s)
+
+    got=$(find "${DST_ROOT}" -type f -printf "%s\n" | awk '{s += $1} END {print s}')
+    if ((got != need)); then
+        echo "ERROR: staged ${got} bytes, expected ${need}" >&2
+        exit 1
+    fi
+    secs=$((t1 - t0 > 0 ? t1 - t0 : 1))
+    echo "stage     : copied in ${secs}s, $(awk -v b="${need}" -v s="${secs}" \
+        'BEGIN {printf "%.2f", b / s / 1e9}') GB/s"
+
+    # Every run in this job reads the staged copy.
+    for ((i = 0; i < ${TRAIN_N:-1}; i++)); do
+        var="TRAIN_OVERRIDES_${i}"
+        printf -v "${var}" '%s' "${!var} data.data_root=${DST_ROOT}"
+    done
+fi
+
 if [[ "${TRAIN_N}" -eq 1 ]]; then
     echo "overrides : ${TRAIN_OVERRIDES_0}"
     srun python train.py --config "${TRAIN_CONFIG}" "${PROFILE[@]}" ${TRAIN_OVERRIDES_0}

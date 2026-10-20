@@ -113,7 +113,7 @@ for i in "${!RUNS[@]}"; do
     echo "run ${i}     : ${RUNS[$i]:-(no overrides)}"
 done
 echo "profile   : --where snellius --run ${TRAIN_RUN:-full}"
-echo "partition : ${PARTITION}"
+echo "partition : ${PARTITION}${SCRATCH_NODE:+ (scratch-node: features copied to local NVMe)}"
 echo "walltime  : ${WALLTIME}"
 
 # What this job is expected to cost: the caller's figure, else the step-count estimate,
@@ -167,8 +167,15 @@ export TRAIN_N="${#RUNS[@]}"
 for i in "${!RUNS[@]}"; do
     export "TRAIN_OVERRIDES_${i}=${RUNS[$i]}"
 done
+# SCRATCH_NODE=1: a node with local NVMe, and the job copies the features onto it before
+# training (STAGE_DATA in jobs/batch/train.sh). Count the copy in OVERHEAD_S.
+CONSTRAINT=()
+if [[ -n "${SCRATCH_NODE}" ]]; then
+    CONSTRAINT=(--constraint=scratch-node)
+    export STAGE_DATA=1
+fi
 JOBID="$(sbatch --parsable \
-    --partition="${PARTITION}" --time="${WALLTIME}" \
+    --partition="${PARTITION}" --time="${WALLTIME}" "${CONSTRAINT[@]}" \
     --gpus="${GPUS}" --cpus-per-task="${CPUS}" --mem="${MEM_G}G" \
     --export=ALL \
     "${BATCH_DIR}/train.sh")"

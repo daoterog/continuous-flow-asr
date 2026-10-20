@@ -20,12 +20,12 @@ data:
     # Clean validation and test, as every screen, so the numbers line up.
     val:   {configs: [clean], splits: [validation]}
     test:  {configs: [clean], splits: [test]}
-  # train.960's 1.1 TB of latents cannot all be held in RAM, so ~40% of reads go to GPFS,
-  # where a read waits on latency: cold throughput grows with reads in flight until the
-  # node's bandwidth caps it. H100 node, 2026-10-19, one job, fresh utterances (cold / warm
-  # utt/s): 16x1 46 / 1044 | 32x4 154 / 2767 | 64x2 186 / 1952 | 64x4 218 / 1994 |
-  # 128x1 215 / 1342 — flat past ~128 in flight at ~0.84 GB/s. Processes beat threads (a
-  # process's page faults partly serialize), but each worker is a whole Python process, so
-  # 64 workers x 4 threads rather than 128 x 1. Identical batches either way.
-  num_workers: 64
-  read_threads: 4
+  # train.960's 1.1 TB of latents cannot be held in RAM, and off GPFS a node gets 0.2-0.8
+  # GB/s of random reads however many are in flight (H100, 2026-10-19, cold utt/s: 16x1 46 |
+  # 64x4 218 | 128x1 215, flat past ~128). So the big runs copy the features to the node's
+  # local NVMe first (SCRATCH_NODE=1, jobs/batch/train.sh) and read from there, where a
+  # handful of reads in flight per worker keeps up. 15 workers leave one of an H100 job's 16
+  # cores to the training process; 2 threads each overlap the reads. Batches are identical
+  # for any setting.
+  num_workers: 15
+  read_threads: 2

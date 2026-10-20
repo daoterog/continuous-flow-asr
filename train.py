@@ -38,6 +38,7 @@ from transformers import WhisperTokenizerFast
 
 from src.checkpointing import ComponentCheckpoint, load_components, load_manifest, manifest_for
 from src.data import ROLES, AudioFeatureDataModule
+from src.data.spec import resolve_role
 from src.flops import FlopCount
 from src.flow.coefficients import make_schedule
 from src.flow.schedule import TimeReparametrization
@@ -137,6 +138,11 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, l
     )
     p.add_argument("--offline", action="store_true", help="log without a network")
     p.add_argument("--print-config", action="store_true", help="resolve, print and exit")
+    p.add_argument(
+        "--print-data-dirs", action="store_true",
+        help="print the data root and every feature directory the run reads, and exit; "
+            "jobs/batch/train.sh copies exactly these onto node-local NVMe",
+    )
     p.add_argument(
         "--print-steps", action="store_true",
         help="print the run's total optimizer steps and exit; jobs/submit/train.sh sizes "
@@ -491,6 +497,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     cfg, args = build_config(argv)
     if args.print_config:
         print(OmegaConf.to_yaml(cfg))
+        return 0
+
+    if args.print_data_dirs:
+        # Only the directory names: no tokenizer, no shards opened.
+        root = data_root_for(cfg.data.env, cfg.data.data_root)
+        print(f"root {root}")
+        for role, spec in cfg.data.splits.items():
+            for d in resolve_role(root, cfg.data.model, spec.configs, spec.splits, role):
+                print(f"dir {d}")
         return 0
 
     if args.print_steps:
