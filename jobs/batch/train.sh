@@ -69,6 +69,9 @@ fi
 TRAIN_N="${TRAIN_N:-1}"
 TRAIN_OVERRIDES_0="${TRAIN_OVERRIDES_0-${TRAIN_OVERRIDES}}"
 
+# The code this job actually runs: twice a submission ran a checkout that had not been
+# pulled, and only the missing log lines gave it away.
+echo "commit    : $(git -C "${REPO_HOME:-$HOME/continuous-flow-asr}" log -1 --format='%h %s' 2>/dev/null)"
 echo "config    : ${TRAIN_CONFIG}"
 echo "runs      : ${TRAIN_N}"
 echo "node      : $(hostname)"

@@ -361,6 +361,7 @@ def build_datamodule(cfg: DictConfig) -> AudioFeatureDataModule:
         prefetch_factor=cfg.data.get("prefetch_factor"),
         eval_num_workers=cfg.data.get("eval_num_workers"),
         read_threads=int(cfg.data.get("read_threads", 1)),
+        direct_read=bool(cfg.data.get("direct_read", False)),
     ).prepare()
 
 

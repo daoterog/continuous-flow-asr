@@ -71,6 +71,10 @@ data:
   # reads in flight; off GPFS a read waits on latency, and more in flight is more data.
   # The batches are identical either way (src/data/datamodule.py, ThreadedSubset).
   read_threads: 1
+  # Train without DataLoader workers: read each batch straight into pinned memory with
+  # read_threads threads (src/data/direct.py). Only for features on a local disk — on GPFS a
+  # plain read skips the page cache — so the train.960 recipe sets it with SCRATCH_NODE=1.
+  direct_read: false
 
   # One role = configs x splits, the same cross product the precompute scripts take.
   # Overridable as --train-configs / --train-splits / --val-configs / ... on the CLI.

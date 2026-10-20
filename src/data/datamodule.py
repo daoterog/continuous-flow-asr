@@ -13,6 +13,7 @@ from torch.utils.data import ConcatDataset, DataLoader, Subset
 from transformers import WhisperTokenizerFast
 
 from .collate import CudaPrefetcher, collate, make_loader
+from .direct import DirectBatchLoader
 from .features import AudioFeatureDataset
 from .spec import resolve_role
 from .vocab import VocabMap
@@ -79,6 +80,7 @@ class AudioFeatureDataModule(pl.LightningDataModule):
         prefetch_factor: int | None = None,
         eval_num_workers: int | None = None,
         read_threads: int = 1,
+        direct_read: bool = False,
     ) -> None:
         """Record the configuration; nothing is read off disk until `setup()`.
 
@@ -110,8 +112,13 @@ class AudioFeatureDataModule(pl.LightningDataModule):
         # Val and test run every few epochs and keep their workers alive in between, so they
         # need far fewer than training; None gives them training's count.
         self.eval_num_workers = num_workers if eval_num_workers is None else eval_num_workers
-        # Utterances each worker reads at once (ThreadedSubset); 1 is one at a time.
+        # Utterances each worker reads at once (ThreadedSubset); 1 is one at a time. With
+        # direct_read, the reader threads of the training loader.
         self.read_threads = read_threads
+        # Train from DirectBatchLoader: features on local disk read straight into pinned
+        # memory, no workers. Needs a GPU and full latents; otherwise the DataLoader path.
+        self.direct_read = direct_read and torch.cuda.is_available() and audio_stride == 1
+        self._direct: DirectBatchLoader | None = None
 
         self.datasets: dict[str, Subset] = {}
         self.dirs: dict[str, list[Path]] = {}
@@ -219,9 +226,20 @@ class AudioFeatureDataModule(pl.LightningDataModule):
             vocab_map=self.vocab_map,
         )
 
-    def _loader(self, role: str, shuffle: bool) -> DataLoader | CudaPrefetcher:
+    def _loader(
+        self, role: str, shuffle: bool
+    ) -> DataLoader | CudaPrefetcher | DirectBatchLoader:
         if not self._is_set_up:
             self.setup()
+        if role == "train" and self.direct_read:
+            # Built once: it tokenizes the whole split up front.
+            if self._direct is None:
+                self._direct = DirectBatchLoader(
+                    self.datasets["train"], self.batch_size, self.tokenizer,
+                    self.canvas_len, self.vocab_map, shuffle=shuffle,
+                    steps_per_epoch=self.steps_per_epoch, threads=max(self.read_threads, 1),
+                )
+            return self._direct
         loader = make_loader(
             self.datasets[role],
             batch_size=self.batch_size if role == "train" else self.eval_batch_size,
