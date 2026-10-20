@@ -1,9 +1,11 @@
 """Batching: padding a canvas of token ids, and the DataLoader around it."""
 
-from collections.abc import Callable
+import queue
+import threading
+from collections.abc import Callable, Iterator
 
 import torch
-from torch.utils.data import DataLoader, Dataset, RandomSampler
+from torch.utils.data import DataLoader, Dataset, RandomSampler, get_worker_info
 from transformers import WhisperTokenizerFast
 
 from .vocab import VocabMap
@@ -36,8 +38,17 @@ def collate(
         tokens = vocab_map.encode(tokens)
 
     # every clip is the same length now that the cache is untrimmed, and the dataset has
-    # already pooled along time, so a plain stack does it
-    return {"audio": torch.stack([b["audio"] for b in batch]), "tokens": tokens}
+    # already pooled along time, so a plain stack does it. Inside a DataLoader worker the
+    # stack goes straight into shared memory, as torch's own default_collate does: a batch
+    # is ~490 MB at full latents, and stacking into private memory would cost one more copy
+    # when it is handed to the main process.
+    audios = [b["audio"] for b in batch]
+    out = None
+    if get_worker_info() is not None:
+        first = audios[0]
+        storage = first._typed_storage()._new_shared(len(audios) * first.numel())
+        out = first.new(storage).resize_(len(audios), *first.shape)
+    return {"audio": torch.stack(audios, out=out), "tokens": tokens}
 
 def make_loader(
     ds: Dataset,
@@ -79,51 +90,97 @@ def make_loader(
 
 
 class CudaPrefetcher:
-    """A loader whose batches arrive already on the GPU, copied while the previous one trains.
+    """A loader whose batches arrive already on the GPU, prepared while the step trains.
 
-    With the full Whisper latents a batch of 128 is ~490 MB, and the plain path copies it to
-    the device on the compute stream right before the step — measured on an A100 at 244 ms
-    per step against 172.5 ms with the batch already resident, ~30% of the epoch. Here the
-    next batch's copy is issued on a side stream as soon as the current batch is handed out,
-    so it overlaps with that batch's forward and backward. Nothing about the batch changes;
-    Lightning's own transfer then finds it on the device and does nothing.
+    With the full Whisper latents a batch of 128 is ~490 MB, and getting it onto the device
+    is as much work as the step itself. A background thread takes each batch from the
+    loader, copies it into a reused pinned buffer (a multi-threaded copy; the DataLoader's
+    own pin thread is limited to one core and capped an H100 run at ~1,040 utts/s), and
+    issues the copy to the GPU on a side stream. The training loop only takes finished
+    batches from a short queue, so it never waits on the host. H100, train.960 recipe,
+    2026-10-20: GPU-only ceiling 1,341 utts/s, the loader alone 1,043, the two together
+    741 before this. Nothing about the batch changes; Lightning's own transfer then finds it
+    on the device and does nothing.
 
-    Needs `pin_memory=True` on the wrapped loader, or the non-blocking copy degrades to a
-    synchronous one and nothing is gained.
+    The wrapped loader should not pin (`pin_memory=False`): pinning here replaces it.
     """
 
-    def __init__(self, loader: DataLoader) -> None:
-        """Wrap `loader`; its length, workers and sampler are unchanged."""
+    def __init__(self, loader: DataLoader, depth: int = 2) -> None:
+        """Wrap `loader`; `depth` batches are kept ready on the GPU ahead of the step."""
         self.loader = loader
+        self.depth = depth
 
     def __len__(self) -> int:
         """Batches per epoch, as the wrapped loader reports them."""
         return len(self.loader)
 
-    def __iter__(self):
-        """Yield each batch on the GPU, with the next one already in flight."""
-        stream = torch.cuda.Stream()
-        batches = iter(self.loader)
+    def __iter__(self) -> Iterator[dict]:
+        """Yield each batch on the GPU, with the next ones already prepared."""
+        device = torch.cuda.current_device()
+        ready: queue.Queue = queue.Queue(maxsize=self.depth)
+        stop = threading.Event()
+        done = object()
 
-        def fetch() -> dict | None:
-            batch = next(batches, None)
-            if batch is None:
-                return None
-            with torch.cuda.stream(stream):
-                return {
-                    k: v.to("cuda", non_blocking=True) if torch.is_tensor(v) else v
-                    for k, v in batch.items()
-                }
+        def put(item: object) -> bool:
+            while not stop.is_set():
+                try:
+                    ready.put(item, timeout=0.1)
+                    return True
+                except queue.Full:
+                    continue
+            return False
 
-        upcoming = fetch()
-        while upcoming is not None:
-            torch.cuda.current_stream().wait_stream(stream)
-            batch = upcoming
-            for v in batch.values():
-                if torch.is_tensor(v):
-                    # The tensor was allocated on the side stream but is used on the compute
-                    # stream; without this its memory could be reused while still in use.
-                    v.record_stream(torch.cuda.current_stream())
-            upcoming = fetch()
-            yield batch
+        def produce() -> None:
+            torch.cuda.set_device(device)
+            stream = torch.cuda.Stream()
+            # depth + 1 slots: one being filled, up to `depth` queued or in use.
+            slots: list[tuple[dict, torch.cuda.Event] | None] = [None] * (self.depth + 1)
+            try:
+                for i, batch in enumerate(self.loader):
+                    if stop.is_set():
+                        return
+                    k = i % len(slots)
+                    pinned = slots[k][0] if slots[k] is not None else {}
+                    if slots[k] is not None:
+                        slots[k][1].synchronize()  # its last copy to the GPU has finished
+                    out = {}
+                    for name, v in batch.items():
+                        if not torch.is_tensor(v):
+                            out[name] = v
+                            continue
+                        buf = pinned.get(name)
+                        if buf is None or buf.shape != v.shape or buf.dtype != v.dtype:
+                            buf = torch.empty(v.shape, dtype=v.dtype, pin_memory=True)
+                            pinned[name] = buf
+                        buf.copy_(v)
+                        with torch.cuda.stream(stream):
+                            out[name] = buf.to(device, non_blocking=True)
+                    copied = torch.cuda.Event()
+                    copied.record(stream)
+                    slots[k] = (pinned, copied)
+                    if not put((out, copied)):
+                        return
+                put(done)
+            except BaseException as err:  # handed to the training loop, raised there
+                put(err)
 
+        thread = threading.Thread(target=produce, daemon=True)
+        thread.start()
+        try:
+            while True:
+                item = ready.get()
+                if item is done:
+                    return
+                if isinstance(item, BaseException):
+                    raise item
+                batch, copied = item
+                torch.cuda.current_stream().wait_event(copied)
+                for v in batch.values():
+                    if torch.is_tensor(v):
+                        # Allocated on the side stream, used on the compute stream: without
+                        # this its memory could be reused while the step still reads it.
+                        v.record_stream(torch.cuda.current_stream())
+                yield batch
+        finally:
+            stop.set()
+            thread.join(timeout=10)

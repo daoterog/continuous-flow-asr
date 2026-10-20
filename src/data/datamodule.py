@@ -228,7 +228,9 @@ class AudioFeatureDataModule(pl.LightningDataModule):
             shuffle=shuffle,
             collate_fn=self.collate_fn,
             num_workers=self.num_workers if role == "train" else self.eval_num_workers,
-            pin_memory=self.pin_memory,
+            # CudaPrefetcher pins on its own, multi-threaded; the loader's pin thread is
+            # single-core and would cap it.
+            pin_memory=self.pin_memory and not self.gpu_prefetch,
             # Only the training loader: val and test must cover their split exactly once.
             steps_per_epoch=self.steps_per_epoch if role == "train" else None,
             prefetch_factor=self.prefetch_factor,
