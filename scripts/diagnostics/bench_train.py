@@ -119,6 +119,9 @@ DISTILL_TRIALS: list[tuple[str, list[str]]] = [
 
 # Marks a trial that feeds one batch, kept on the GPU, back every step (see time_one).
 REPLAY = "__replay__"
+# Marks a trial that only runs the loader — workers, pinning, the copy to the GPU — with no
+# model: the data path's own ceiling (see time_loader).
+LOADER = "__loader__"
 
 
 def gpu_trials(at_batch: int, batches: Sequence[int]) -> list[tuple[str, list[str]]]:
@@ -139,7 +142,10 @@ def gpu_trials(at_batch: int, batches: Sequence[int]) -> list[tuple[str, list[st
     # (data.gpu_prefetch, CudaPrefetcher): how much of the real-vs-replay gap it recovers.
     prefetch = [(f"prefetch {b}", [f"data.batch_size={b}", "data.gpu_prefetch=true"])
                 for b in batches]
-    return [*ladder, *replay, *prefetch]
+    # The data path alone: if it tops out where the real row does, the host is the limit;
+    # if replay does, the GPU step is.
+    loader = [(f"loader {at_batch}", [f"data.batch_size={at_batch}", LOADER])]
+    return [*ladder, *replay, *prefetch, *loader]
 
 
 # The last knobs left after prefetch, each one change from the profile's production setting
@@ -347,6 +353,8 @@ def time_one(config: str, overrides: list[str], args: argparse.Namespace) -> dic
     import train as T
 
     total = args.warmup + args.steps
+    if LOADER in overrides:
+        return time_loader(config, [o for o in overrides if o != LOADER], args)
     replay = REPLAY in overrides
     overrides = [o for o in overrides if o != REPLAY]
     cfg, _ = T.build_config([
@@ -397,6 +405,45 @@ def time_one(config: str, overrides: list[str], args: argparse.Namespace) -> dic
         "utts_per_s": cfg.data.batch_size / per_step,
         "peak_gib": torch.cuda.max_memory_allocated() / 2**30,
         "gpu_util": gpu_util,
+        "batch": cfg.data.batch_size,
+    }
+
+
+def time_loader(config: str, overrides: list[str], args: argparse.Namespace) -> dict:
+    """Batches per second out of the training loader, onto the GPU, with nothing training.
+
+    The same loader a run uses — its workers, read threads, pinning and CudaPrefetcher —
+    iterated `--warmup` + `--steps` times, each batch waited for on the device.
+    """
+    import train as T
+
+    total = args.warmup + args.steps
+    cfg, _ = T.build_config([
+        "--config", config, "--offline", "--where", args.env,
+        f"data.subset_n.train={args.n_utts}",
+        f"data.subset_n.val={min(args.n_utts, 64)}",
+        f"data.steps_per_epoch={total}",
+        *overrides,
+        *args.set,
+    ])
+    T.setup_reproducibility(cfg)
+    dm = T.build_datamodule(cfg)
+    started, n = None, 0
+    for i, batch in enumerate(dm.train_dataloader()):
+        audio = batch["audio"]
+        if not audio.is_cuda:  # without CudaPrefetcher the run's own step would copy it
+            audio = audio.to("cuda", non_blocking=True)
+        torch.cuda.synchronize()
+        if i + 1 == args.warmup:
+            started = time.perf_counter()
+        elif started is not None:
+            n += 1
+    per_step = (time.perf_counter() - started) / max(n, 1)
+    return {
+        "ms_per_step": per_step * 1000,
+        "utts_per_s": cfg.data.batch_size / per_step,
+        "peak_gib": 0.0,
+        "gpu_util": float("nan"),
         "batch": cfg.data.batch_size,
     }
 
@@ -513,6 +560,8 @@ def main(argv: Sequence[str] | None = None) -> int:
               f"{r['peak_gib']:9.2f} {r['gpu_util']:6.0f}")
         torch.cuda.empty_cache()
 
+    # A loader row trains nothing, so it is a ceiling to read against, not a contender.
+    results = [(lbl, r) for lbl, r in results if not lbl.startswith("loader")] or results
     if not results:
         return 1
     best = max(results, key=lambda kv: kv[1]["utts_per_s"])
