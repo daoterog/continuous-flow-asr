@@ -365,6 +365,27 @@ def build_datamodule(cfg: DictConfig) -> AudioFeatureDataModule:
     ).prepare()
 
 
+class StopAtStep(pl.Callback):
+    """End the fit at the first validation on or after `step`, leaving the LR schedule alone.
+
+    `max_steps` sets both where training stops and how long OneCycle is; this stops a run
+    early on the schedule of a longer one, so its curve lines up step for step with a run
+    that went the whole way. Checked after validation, so the run ends on a scored
+    checkpoint and still writes `_final` and its evaluation.
+    """
+
+    def __init__(self, step: int) -> None:
+        """Stop once `trainer.global_step` reaches `step`."""
+        super().__init__()
+        self.step = step
+
+    def on_validation_end(self, trainer: pl.Trainer, module: pl.LightningModule) -> None:
+        """Ask the fit loop to stop once the step is reached."""
+        if not trainer.sanity_checking and trainer.global_step >= self.step:
+            print(f"stop_at_step: {trainer.global_step} >= {self.step}, ending the fit")
+            trainer.should_stop = True
+
+
 class Heartbeat(pl.Callback):
     """Used to identify possibly failed training runs.
 
@@ -425,6 +446,8 @@ def build_trainer(
     """Trainer with gradient clipping, LR logging and a checkpoint on the best `monitor`."""
     checkpoint = cfg.train.get("checkpoint", True)
     callbacks: list[pl.Callback] = [Heartbeat(), *extra_callbacks]
+    if cfg.train.get("stop_at_step"):
+        callbacks.append(StopAtStep(int(cfg.train.stop_at_step)))
     if checkpoint:
         sample_every_n = int(cfg.get("sampling", {}).get("every_n_epochs", 0) or 0)
         val_every_n = int(cfg.train.get("check_val_every_n_epoch", 1))

@@ -329,6 +329,9 @@ metrics:
 
 train:
   num_epochs: 50
+  # End the fit at the first validation past this step, without shortening the LR schedule
+  # (train.py, StopAtStep): a cheaper run that stays comparable to a full-length one.
+  stop_at_step: null
   # 1e-2 came from the notebook and is far too hot: on the overfit check it sat at
   # loss 1.86 where 1e-3 reached 0.014. The optimum moves with the step count, since
   # OneCycleLR derives its schedule from the total, so re-check it if epochs change a lot.
