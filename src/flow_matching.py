@@ -20,7 +20,7 @@ from src.flow import build_tau_scheduler
 from src.flow.coefficients import make_schedule, waypoint_strength
 from src.flow.sampler import sample_tokens, sample_tokens_euler
 from src.flow.sampling_probe import SamplingProbe
-from src.flow.schedule import TimeReparametrization
+from src.flow.schedule import TimeReparametrization, degenerate_tau
 from src.metrics.utils import is_binned
 from src.models import build_audio_decoder, build_denoiser
 from src.reporting import MetricReporting
@@ -205,9 +205,15 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
                 self.print(skipped)
             self.log_tau_source()
             if new is not None:
-                new = new.with_uniform_floor(
-                    float(self.cfg.schedule.get("uniform_floor", 0.0))
-                )
+                floor = float(self.cfg.schedule.get("uniform_floor", 0.0))
+                new = new.with_uniform_floor(floor)
+                # A refreshed simulated curve can turn degenerate as mu's accuracy moves;
+                # keep the current one rather than fail a run that is hours in.
+                problems = degenerate_tau(new, floor)
+                if problems and not self.cfg.schedule.get("allow_degenerate_tau", False):
+                    self.print(f"tau refresh refused: {'; '.join(problems)}")
+                    new = None
+            if new is not None:
                 self.time_reparam = new
                 for metric in self.metrics.values():
                     if is_binned(metric):

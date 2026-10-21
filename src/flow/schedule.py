@@ -138,6 +138,41 @@ def tau_from_recovery(
     return np.maximum.accumulate(tau)
 
 
+# The prior tau must start where sampling does, at t=0, and spread its draw: below these it
+# is degenerate (`degenerate_tau`). sigma 0.4 at V=51,866 draws 80% within [0.31, 0.68];
+# sigma 0.05 within [0.476, 0.522], starting at 0.29.
+MAX_T_START = 1e-3
+MIN_DRAW_SPAN = 0.15
+
+
+def degenerate_tau(reparam: "TimeReparametrization", floor: float) -> list[str]:
+    """Why a simulated prior tau is unfit to train on; empty when it is fine.
+
+    Two ways a small sigma breaks it. The curve starts above t=0 when recovery is flat to
+    float precision there, so the source state is never drawn and sampling begins from a
+    state training never produced. And it squeezes the draw into a sliver when the field
+    flips from mu's guess to the target within a band ~sigma wide. A uniform floor answers
+    both — it restarts the draw at 0 and spreads a share everywhere — so with one the
+    squeeze is a deliberate choice and is not reported.
+    """
+    if reparam.source != "simulated":
+        return []
+    problems = []
+    if reparam.t_start > MAX_T_START:
+        problems.append(
+            f"the draw starts at t={reparam.t_start:.3f}, so the source state mu + "
+            f"sigma*eps is never trained and sampling starts from a state training never "
+            f"produced"
+        )
+    lo, hi = float(reparam.t_of(0.1)), float(reparam.t_of(0.9))
+    if floor <= 0.0 and hi - lo < MIN_DRAW_SPAN:
+        problems.append(
+            f"80% of every batch lands in t in [{lo:.3f}, {hi:.3f}], a span under "
+            f"{MIN_DRAW_SPAN}"
+        )
+    return problems
+
+
 @dataclass(frozen=True, eq=False)
 class TimeReparametrization:
     """u = tau(t), the fraction of decoding done by flow time t, and its inverse.

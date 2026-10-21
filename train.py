@@ -41,7 +41,7 @@ from src.data import ROLES, AudioFeatureDataModule
 from src.data.spec import resolve_role
 from src.flops import FlopCount
 from src.flow.coefficients import make_schedule
-from src.flow.schedule import TimeReparametrization
+from src.flow.schedule import TimeReparametrization, degenerate_tau
 from src.flow_mapping import DISTILL_GROUPS, FlowMapping
 from src.flow_matching import FlowMatching
 from src.mu_only import MuOnly
@@ -325,6 +325,13 @@ def build_time_reparam(dm: AudioFeatureDataModule, cfg: DictConfig) -> TimeRepar
     ).with_uniform_floor(float(cfg.schedule.get("uniform_floor", 0.0)))
     path = "with mu" if gamma_fn is not None else "linear"
     print(f"tau: exact curve on the {path} path over {dm.vocab_size:,} tokens: {reparam!r}")
+    problems = degenerate_tau(reparam, float(cfg.schedule.get("uniform_floor", 0.0)))
+    if problems and not cfg.schedule.get("allow_degenerate_tau", False):
+        raise ValueError(
+            "the simulated tau is degenerate at this sigma: " + "; ".join(problems) + ". "
+            "Train with uniform t (schedule.enabled=false) or a schedule.uniform_floor, or "
+            "pass schedule.allow_degenerate_tau=true if this is deliberate."
+        )
     return reparam
 
 

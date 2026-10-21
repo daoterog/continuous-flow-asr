@@ -262,6 +262,16 @@ schedule:
   # degenerate curve has a high peak, that is exactly its problem.
   measured_max_median_t: 0.9
 
+  # `simulated` only: let a degenerate prior tau through. Off, a run whose simulated curve
+  # starts above t=0, or (without uniform_floor) draws 80% of every batch within less than
+  # 0.15 of t, stops before training (schedule.degenerate_tau). That is what a small sigma
+  # does: at sigma 0.05 over the full vocabulary the curve starts at t=0.29 and squeezes 80%
+  # of training into t in [0.476, 0.522], so the source state mu + sigma*eps is never
+  # trained and sampling starts from a state training never showed the model — a
+  # 2026-10-21 run that learned like compact for 7 epochs, then stalled behind sigma 0.4.
+  # Use schedule.enabled=false or a uniform_floor instead; this is for deliberate tests.
+  allow_degenerate_tau: false
+
 sampling:
   # Integrate from noise on a fixed slice of val and score the result. This is the only
   # metric that reflects inference — the binned ones score one denoising step from an x_t
