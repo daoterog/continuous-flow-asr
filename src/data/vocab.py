@@ -27,6 +27,21 @@ class VocabMap:
         self.to_compact = rev
         self.size = len(used)
 
+    @classmethod
+    def from_ids(cls, to_full: torch.Tensor, tokenizer_size: int) -> "VocabMap":
+        """The map a run saved (`vocab_map.pt`), rebuilt without the texts it came from.
+
+        Evaluating on splits the map was not built from needs the trained map itself:
+        rebuilding it from the new texts would renumber the compact ids under the weights.
+        """
+        out = cls.__new__(cls)
+        out.to_full = to_full.long().cpu()
+        rev = torch.full((tokenizer_size,), -1, dtype=torch.long)
+        rev[out.to_full] = torch.arange(len(out.to_full))
+        out.to_compact = rev
+        out.size = len(out.to_full)
+        return out
+
     def encode(self, ids: torch.Tensor) -> torch.Tensor:
         """Whisper ids -> compact ids."""
         out = self.to_compact.to(ids.device)[ids]

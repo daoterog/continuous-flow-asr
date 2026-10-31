@@ -129,6 +129,16 @@ def _config_from_components(args: argparse.Namespace) -> "DictConfig":
             print(f"data.env {cfg.data.env} -> {here} (this machine, not the checkpoint's)")
             cfg.data.env = here
 
+    # `data.data_root` too: a run that staged its features to node-local NVMe carries
+    # /scratch-node/<user>.<job>/data, which was deleted when that job ended. Fall back to
+    # the machine's default root unless the caller named one.
+    root = cfg.data.get("data_root")
+    if root and not Path(root).exists() and not any(
+        o.startswith("data.data_root=") for o in args.overrides
+    ):
+        print(f"data.data_root {root} -> default (gone; staged by the training job)")
+        cfg.data.data_root = None
+
     # `train.compile` is the same kind of inherited run-time choice, and here it is not
     # merely unhelpful but fatal: a compiled module's state_dict keys all carry an
     # `_orig_mod.` prefix, so loading plain component weights into one fails on every key.
