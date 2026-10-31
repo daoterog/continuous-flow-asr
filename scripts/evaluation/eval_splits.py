@@ -48,6 +48,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--components", type=Path, required=True)
     p.add_argument("--splits", nargs="+", default=SPLITS, help="config/split pairs")
     p.add_argument("--variants", nargs="+", default=["best", "final"])
+    p.add_argument("--cfg", type=float, nargs="+", default=None,
+                   help="guidance weights to score; defaults to the run's first (unguided)")
     p.add_argument("--out", type=Path, default=None,
                    help="TSV of the results; defaults to <components>/eval_splits.tsv")
     args = p.parse_args(flags)
@@ -71,12 +73,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     model.to(device).eval()
 
     probe = model.sampling_probe
-    method, num_steps, w = probe.methods[0], probe.step_counts[0], probe.cfg_strengths[0]
+    method, num_steps = probe.methods[0], probe.step_counts[0]
+    weights = args.cfg or [probe.cfg_strengths[0]]
     chunk = int(cfg.sampling.get("batch_size") or cfg.data.batch_size)
     bf16 = "bf16" in str(cfg.train.get("precision") or "") and device.type == "cuda"
     root = data_root_for(cfg.data.env, cfg.data.get("data_root"))
     print(f"vocab {vocab_size:,} ({'compact' if vocab_map is not None else 'full'})  "
-          f"{method} {num_steps} steps  cfg {w}  chunk {chunk}  bf16 {bf16}  root {root}")
+          f"{method} {num_steps} steps  cfg {weights}  chunk {chunk}  bf16 {bf16}  root {root}")
 
     rows = []
     for variant in args.variants:
@@ -88,7 +91,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             getattr(model, name).load_state_dict(sub.state_dict())
         if saved_tau is not None:
             model.time_reparam = saved_tau
-        for spec in args.splits:
+        for w, spec in ((w, spec) for w in weights for spec in args.splits):
             config, split = spec.split("/")
             ds = AudioFeatureDataset(feature_dir(root, cfg.data.model, config, split),
                                      cfg.data.audio_stride)
@@ -119,14 +122,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             pairs = [(texts[i], h) for i, h in zip(kept, hyps, strict=True)
                      if data_utils.normalizer(texts[i]).strip()]
             wer = corpus_wer([r for r, _ in pairs], [h for _, h in pairs])
-            rows.append((variant, spec, wer, len(kept), len(texts), oov_utts, oov_toks))
-            print(f"{variant:6s} {spec:18s} WER {wer:6.2f}  ({len(kept)}/{len(texts)} utts"
+            rows.append((variant, w, spec, wer, len(kept), len(texts), oov_utts, oov_toks))
+            print(f"{variant:6s} w={w:<4g} {spec:18s} WER {wer:6.2f}  "
+                  f"({len(kept)}/{len(texts)} utts"
                   + (f", {oov_utts} with {oov_toks} tokens outside the compact vocab)"
                      if vocab_map is not None else ")"), flush=True)
 
     out = args.out or args.components / "eval_splits.tsv"
     with open(out, "w") as f:
-        f.write("variant\tsplit\twer\tkept\ttotal\toov_utts\toov_tokens\n")
+        f.write("variant\tcfg\tsplit\twer\tkept\ttotal\toov_utts\toov_tokens\n")
         for r in rows:
             f.write("\t".join(f"{x:.4f}" if isinstance(x, float) else str(x) for x in r) + "\n")
     print(f"wrote {out}")
