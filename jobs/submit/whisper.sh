@@ -8,6 +8,7 @@
 #   SPLITS="validation" ./jobs/submit/whisper.sh            # small run first
 #   ALLOW_MODEL=1 MODEL=openai/whisper-small ./jobs/submit/whisper.sh   # off the pin
 #   WALLTIME=02:00:00 ./jobs/submit/whisper.sh              # skip the estimate
+#   DEPENDENCY=afterok:123 ./jobs/submit/whisper.sh         # wait for job 123 (the download)
 #
 # train.clean.100 is 28,539 utterances across 14 shards, ~46 GB of trimmed float16
 # features. The shard is the unit of parallelism, so N_JOBS above 14 gains nothing.
@@ -96,5 +97,6 @@ echo "walltime  : ${WALLTIME}"
 sbatch \
     --array="0-$((N_JOBS - 1))" \
     --time="${WALLTIME}" \
+    ${DEPENDENCY:+--dependency="${DEPENDENCY}"} \
     --export=ALL,CONFIGS="${CONFIGS}",SPLITS="${SPLITS}",MODEL="${MODEL}",BATCH_SIZE="${BATCH_SIZE}",NO_TRIM="${NO_TRIM}" \
     "${BATCH_DIR}/precompute_whisper.sh"
