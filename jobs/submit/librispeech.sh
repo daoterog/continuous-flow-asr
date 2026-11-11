@@ -35,19 +35,29 @@ BATCH_DIR="${REPO_DIR}/jobs/batch"
 
 fmt_hms() { printf '%02d:%02d:%02d' $(($1 / 3600)) $((($1 % 3600) / 60)) $(($1 % 60)); }
 
+SIZING_ERR="$(mktemp)"
+trap 'rm -f "${SIZING_ERR}"' EXIT
+
 if [[ -z "${WALLTIME}" ]]; then
     # Shard 0 takes ceil(n/N_JOBS) files, so it is the worst-case task.
     # `|| true` is load-bearing: under `set -eo pipefail` a failing python (env not
     # active, no network) would abort the script instead of reaching the fallback.
-    SHARD_BYTES="$(cd "${REPO_DIR}" && python -m scripts.download_librispeech \
+    SHARD_BYTES="$(cd "${REPO_DIR}" && python -m scripts.data.download_librispeech \
         --dry-run --configs ${CONFIGS} --splits ${SPLITS} \
-        --num-shards "${N_JOBS}" --shard-id 0 2>/dev/null \
+        --num-shards "${N_JOBS}" --shard-id 0 2>"${SIZING_ERR}" \
         | awk '/^shard bytes/ {print $3}' || true)"
 
     if [[ -z "${SHARD_BYTES}" ]]; then
-        WALLTIME="$(fmt_hms ${MAX_S})"
-        echo "WARNING: could not size the download (is the env active?), " \
-             "falling back to ${WALLTIME}" >&2
+        # Do NOT fall back to the partition maximum. A maximal request is not the safe
+        # choice: it queues far longer than a right-sized one, and on the first run
+        # sizing legitimately cannot work (whisper.sh counts utterances from data that
+        # is not downloaded yet). Fall back to a modest default and say what broke, so
+        # the fix is to pass WALLTIME= rather than to wait behind a 24h reservation.
+        echo "ERROR: could not size the job. Reason:" >&2
+        sed 's/^/  | /' "${SIZING_ERR}" >&2
+        echo "  Pass an explicit walltime instead, e.g. WALLTIME=01:00:00 $0" >&2
+        WALLTIME="$(fmt_hms 3600)"
+        echo "  Falling back to ${WALLTIME} (NOT the partition maximum)." >&2
     else
         EST_S=$((SHARD_BYTES / (THROUGHPUT_MB_S * 1000000)))
         WALL_S=$((OVERHEAD_S + EST_S * SAFETY))

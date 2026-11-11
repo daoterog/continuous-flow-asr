@@ -9,9 +9,12 @@
 #   SOURCE=latents CONFIGS="clean other" SPLITS=test ./jobs/submit/eval.sh
 #   WALLTIME=01:00:00 ./jobs/submit/eval.sh                 # skip the estimate
 #
-# Afterwards, on the login node (CPU only, seconds):
-#   python -m scripts.score_eval
-# which merges the per-task .partN files and prints WER against the leaderboard targets.
+# Afterwards, to merge the per-task .partN files and print WER against the leaderboard
+# targets. The exact command is echoed at the end of this script with this run's MODEL,
+# RESULTS_DIR and N_JOBS already filled in — the bare `python -m scripts.evaluation.score_eval` only
+# scores the right thing when all three were left at their defaults.
+# Cheap enough for the login node (CPU only, seconds); jobs/batch/score_eval.sh is the
+# same step as a job, for chaining with --dependency=afterok.
 #
 # Prerequisites:
 #   audio   — ./jobs/submit/eval_sets.sh   (the configs must be fully cached, because
@@ -27,7 +30,6 @@ DATASETS="${DATASETS:-ami_cleaned gigaspeech_cleaned spgispeech voxpopuli_cleane
 # latents source only (the LibriSpeech regression control); empty on the audio path.
 CONFIGS="${CONFIGS:-}"
 SPLITS="${SPLITS:-}"
-MODEL="${MODEL:-openai/whisper-large-v3}"
 N_JOBS="${N_JOBS:-8}"
 
 # 64 matches the leaderboard's run_whisper.sh. RTFx varies with batch size, so holding it
@@ -54,6 +56,12 @@ REPO_DIR="$(dirname "$(dirname "${SCRIPT_DIR}")")"
 BATCH_DIR="${REPO_DIR}/jobs/batch"
 RESULTS_DIR="${RESULTS_DIR:-${REPO_DIR}/results}"
 
+# Resolves MODEL and checks it here, on the login node, rather than letting the array
+# queue for an hour and then fail — or worse, succeed against the wrong checkpoint.
+# shellcheck disable=SC1091
+source "${REPO_DIR}/jobs/pinned_model.sh"
+require_pinned_model
+
 fmt_hms() { printf '%02d:%02d:%02d' $(($1 / 3600)) $((($1 % 3600) / 60)) $(($1 % 60)); }
 
 if [[ -n "${LIMIT}" && -z "${WALLTIME}" ]]; then
@@ -64,7 +72,7 @@ if [[ -z "${WALLTIME}" ]]; then
     # neither the audio downloaded nor a model loaded.
     # `|| true` is load-bearing: under `set -eo pipefail` a failing python would abort the
     # script instead of reaching the fallback.
-    UTTS="$(cd "${REPO_DIR}" && python -m scripts.run_eval \
+    UTTS="$(cd "${REPO_DIR}" && python -m scripts.evaluation.run_eval \
         --dry-run --env snellius --source "${SOURCE}" --model "${MODEL}" \
         ${DATASETS:+--datasets ${DATASETS}} \
         ${CONFIGS:+--configs ${CONFIGS}} \
@@ -104,3 +112,13 @@ sbatch \
     --time="${WALLTIME}" \
     --export=ALL,SOURCE="${SOURCE}",DATASETS="${DATASETS}",CONFIGS="${CONFIGS}",SPLITS="${SPLITS}",MODEL="${MODEL}",BATCH_SIZE="${BATCH_SIZE}",WARMUP_STEPS="${WARMUP_STEPS}",RESULTS_DIR="${RESULTS_DIR}",LIMIT="${LIMIT}" \
     "${BATCH_DIR}/run_eval.sh"
+
+# The scorer filters manifests by model and refuses to merge an incomplete array, so it
+# needs the same three values this run used. Printed rather than chained: scoring a
+# rehearsal or a partial run is usually a deliberate choice.
+echo
+echo "When the array finishes, score it with:"
+echo "  python -m scripts.evaluation.score_eval \\"
+echo "      --results-dir ${RESULTS_DIR} \\"
+echo "      --model ${MODEL} \\"
+echo "      --num-shards ${N_JOBS}"

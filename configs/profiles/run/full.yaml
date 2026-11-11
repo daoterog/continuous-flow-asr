@@ -1,0 +1,12 @@
+# Run: a full run — a sweep's confirmation (TIER=confirm) or a final model. Picked by
+# `--run full`, which jobs/batch/train.sh uses unless told otherwise.
+train:
+  num_epochs: 300
+  # Measured for small + micro at full latents: a val pass is 10.7 s and a sampling probe
+  # 22.2 s against ~54 s of training per epoch, so every 10 epochs keeps evaluation at ~6%.
+  # 30 readings over 300 epochs is plenty for the `_best` components and the curve.
+  check_val_every_n_epoch: 10
+sampling:
+  # Equal to check_val_every_n_epoch: see sweep.yaml.
+  every_n_epochs: 10
+  log_methods: null

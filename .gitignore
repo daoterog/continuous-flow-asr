@@ -3,6 +3,10 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+runs/
+figures/
+wandb/
+
 # C extensions
 *.so
 
@@ -218,10 +222,13 @@ __marimo__/
 .streamlit/secrets.toml
 
 # Downloaded datasets (LibriSpeech cache is ~64 GB)
-data/
+/data/
 
 # Project-local conda prefix holding the pinned FFmpeg (see README)
 .ffmpeg/
 
 # Model Results
 results/
+
+# SBU ledger written by jobs/submit/train.sh, one row per submitted job
+jobs/ledger.tsv

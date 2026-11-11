@@ -1,0 +1,353 @@
+# The paper's results, in story order. One entry per table, figure or note.
+#
+#   python -m scripts.paper.fetch            # wandb -> paper/data/*.csv (needs wandb)
+#   python -m scripts.paper.build            # data -> tables/*.tex, figures/*.png, RESULTS.md
+#
+# Everything here is the TUNING phase: compact vocabulary (V=1,193) and train.100, unless an
+# entry says otherwise. The final model (phase 6) trains on train.960 with the full Whisper
+# vocabulary.
+#
+# kind:
+#   ablation   table of a reference and the changes tried against it. From wandb (`groups`
+#              with `reference` / `ablations` runs) or typed (`data/<id>.csv`, `source: typed`).
+#   curves     sampled WER against epoch for wandb runs, one panel per group.
+#   figure     made by a builder in scripts/paper/build.py (`builder:`), or by an existing
+#              script: `command:` writes `produces:` (a repo path), which is copied in. The
+#              command only runs when `produces` is missing or `build --rerun` is given.
+#   table      a typed table, data/<id>.csv rendered as is.
+#   note       prose only: notes/<id>.md.
+# status: done | running | planned. Planned and running entries render as placeholders.
+# outcome (per ablation): adopt | reject | neutral | kept (the reference stays).
+
+entity: cont-flow-asr-
+metric: sampled_interpolant_16/wer
+budget:
+  # The Snellius accounting total since the cap was set, from `accuse` (jobs/common/budget.sh).
+  # Update by hand; the compute table compares the per-run estimate against it.
+  cap_sbu: 100000
+  spent_sbu: 61000
+  as_of: 2026-10-12
+
+phases:
+  - {id: 0, title: "Method and setup"}
+  - {id: 1, title: "Viability: can the model learn at all?", setup: "overfit harness: 64-256 utterances, val = train, canvas 96, dropout and weight decay off"}
+  - {id: 2, title: "The time reparametrization", setup: "real learning task: 4,096 utterances of train.100, held-out val, 30 epochs, tiny denoiser, stride-4 latents, sampled WER on a fixed 512-utterance slice"}
+  - {id: 3, title: "Scaling to all of train.100", setup: "full train.100, stride-4 latents; sampled WER on a 512-utterance slice unless marked full val"}
+  - {id: 4, title: "The training recipe", setup: "small denoiser (40.7M) + micro mu (1.8M), full latents, train.100, 100 epochs, seed 1, sampled WER at 16 steps on all 2,703 val utterances"}
+  - {id: 5, title: "Where to train: the schedule and the path", setup: "the phase-4 recipe (EMA, weight decay 0.01), 100 epochs, seed 1, sampled WER at 16 steps on all 2,703 val utterances"}
+  - {id: 6, title: "Regularisation, and training for the sampler", setup: "the phase-4 recipe at unit noise, 100 epochs, seed 1"}
+  - {id: 7, title: "Putting it together", setup: "the phase-4 recipe with weight decay 0.05, 100 epochs; seeds as listed"}
+  - {id: 8, title: "The final model", setup: "train.960, full Whisper vocabulary"}
+  - {id: 9, title: "Across the project"}
+
+entries:
+  # -- 0 ----------------------------------------------------------------------------------
+  - id: method
+    phase: 0
+    kind: note
+    status: done
+    question: What is being trained?
+
+  - id: tau_explained
+    phase: 0
+    kind: figure
+    status: done
+    question: How is the time reparametrization built from a recovery curve?
+    command: python -m scripts.schedule.explain_tau
+    produces: figures/tau_explained.png
+
+  # -- 1 ----------------------------------------------------------------------------------
+  - id: phase1
+    phase: 1
+    kind: ablation
+    source: typed
+    status: done
+    question: Which defaults let the model memorise a small set at all?
+
+  # -- 2 ----------------------------------------------------------------------------------
+  - id: tau_construction
+    phase: 2
+    kind: note
+    status: done
+    question: How is the schedule constructed, and why this way?
+
+  - id: phase2
+    phase: 2
+    kind: ablation
+    source: typed
+    status: done
+    question: Does the time reparametrization pay for itself, and which form of it?
+
+  - id: field_recovery
+    phase: 2
+    kind: figure
+    status: done
+    question: How much of the transcript does the interpolant alone carry, by t?
+    builder: field_recovery
+
+  # -- 3 ----------------------------------------------------------------------------------
+  - id: phase3
+    phase: 3
+    kind: ablation
+    source: typed
+    status: done
+    question: What carries over to the full training set, and how large should mu be?
+
+  # -- 4 ----------------------------------------------------------------------------------
+  - id: phase4
+    phase: 4
+    kind: ablation
+    status: done
+    question: Which training changes improve the recipe?
+    note: phase4
+    experiments_rows: [36, 37, 38]
+    groups:
+      - name: "Stage 1"
+        reference: {run: flow-asr-flm-parity/juinr9wh, label: "control (phase-3 recipe)"}
+        ablations:
+          - {run: flow-asr-flm-parity/xsjeh7zr, label: "denoiser fed u, not t", outcome: adopt}
+          - {run: flow-asr-flm-parity/cirjfdti, label: "padding loss weight 0.1", outcome: adopt}
+      - name: "Stage 2"
+        reference: {run: flow-asr-flm-parity/olc06gip, label: "control (+ both stage-1 changes)"}
+        ablations:
+          - {run: flow-asr-flm-parity/fej0bs8j, label: "logit soft-cap 30", outcome: adopt}
+          - {run: flow-asr-flm-parity/hugwhtib, label: "denoiser LR 1e-3 (from 2e-3)", outcome: reject}
+          - {run: flow-asr-flm-parity/5g4qaijz, label: "denoiser LR 4e-3", outcome: reject}
+          - {run: flow-asr-flm-parity/357zcstc, label: "stop token at full weight (pad decay 8)", outcome: reject}
+      - name: "Stage 3"
+        reference: {run: flow-asr-flm-parity/kdd1pbdh, label: "control (+ soft-cap)"}
+        ablations:
+          - {run: flow-asr-flm-parity/5v9lar7i, label: "EMA of the weights (0.999)", outcome: adopt}
+
+  - id: phase4_curves
+    phase: 4
+    kind: curves
+    status: done
+    question: Do the adopted changes help throughout training, or only at the end?
+    of: phase4
+
+  # -- 5 ----------------------------------------------------------------------------------
+  - id: tau_revisited
+    phase: 5
+    kind: note
+    status: done
+    question: Where is the remaining error, and does the schedule train there?
+
+  - id: audio_info
+    phase: 5
+    kind: figure
+    status: done
+    question: How much of the transcript does each input carry at each t, and where does the schedule draw?
+    builder: audio_info
+
+  - id: tau_strategies
+    phase: 5
+    kind: figure
+    status: done
+    question: What does each candidate schedule change, before any of them is trained?
+    command: python -m scripts.schedule.project_tau --run flow-asr-flm-parity/olc06gip
+    produces: figures/tau_projection/screen.png
+
+  - id: phase5
+    phase: 5
+    kind: ablation
+    status: done
+    question: Does moving training mass to low t help, and is a uniform floor or a lower noise scale the better way?
+    note: phase5
+    columns:
+      - {name: wer_ref, metric: sampled_interpolant_16_reference/wer, header: "WER, control's grid"}
+      - {name: loss_train, metric: denoiser_loss/train_overall, header: "train loss", digits: 3}
+      - {name: loss_val, metric: denoiser_loss/val_overall, header: "val loss", digits: 3}
+      - {name: rec_mu, metric: audio_only/val_recovery, header: "rec. t=0", digits: 2}
+      - {name: rec_no_mu, metric: audio_only/val_recovery_no_mu, header: "rec. t=0, no mu", digits: 2}
+    groups:
+      - name: "Round 1: each knob alone"
+        reference: {run: flow-asr-tau-schedule/4od17r64, label: "control (simulated tau, unit noise)"}
+        ablations:
+          - {run: flow-asr-tau-schedule/hadktphz, label: "uniform floor 0.3", outcome: reject}
+          - {run: flow-asr-tau-schedule/0fdtj29k, label: "uniform floor 0.4", outcome: reject}
+          - {run: flow-asr-tau-schedule/83xxuq4n, label: "noise scale sigma 0.7", outcome: reject}
+          - {run: flow-asr-tau-schedule/javmcaay, label: "noise scale sigma 0.5", outcome: reject}
+          - {run: flow-asr-tau-schedule/n5j9q66r, label: "noise scale sigma 0.4", outcome: adopt}
+
+  - id: phase5_curves
+    phase: 5
+    kind: curves
+    status: done
+    question: How do the floor and the noise scale train, epoch by epoch?
+    of: phase5
+    ylim: [10, 40]
+
+  # -- 6 ----------------------------------------------------------------------------------
+  - id: phase6
+    phase: 6
+    kind: ablation
+    status: done
+    question: Every run nearly memorises train.100; which regulariser helps, and does training on a corrupted draft?
+    note: phase6
+    columns:
+      - {name: loss_train, metric: denoiser_loss/train_overall, header: "train loss", digits: 3}
+      - {name: loss_val, metric: denoiser_loss/val_overall, header: "val loss", digits: 3}
+      - {name: rec_mu, metric: audio_only/val_recovery, header: "rec. t=0", digits: 2}
+    groups:
+      - name: "Regularisers"
+        reference: {run: flow-asr-tau-schedule/b867szop, label: "control (weight decay 0.01, dropout 0.1)"}
+        ablations:
+          - {run: flow-asr-tau-schedule/z0ugboi6, label: "weight decay 0.05", outcome: adopt}
+          - {run: flow-asr-tau-schedule/s3wunx7d, label: "denoiser dropout 0.2", outcome: reject}
+          - {run: flow-asr-tau-schedule/nxklsxq7, label: "latent masking (SpecAugment)", outcome: reject}
+          - {run: flow-asr-tau-schedule/u9gsgww6, label: "latent masking + dropout 0.2", outcome: reject}
+          - {run: flow-asr-tau-schedule/wj2w7gh1, label: "latent masking + uniform floor 0.3", outcome: reject}
+          - {run: flow-asr-tau-schedule/ipucu0d9, label: "audio dropped on 20% of rows", outcome: reject}
+          - {run: flow-asr-tau-schedule/h7xvrj8o, label: "audio dropped on 40% x t of rows", outcome: reject}
+      - name: "Training on a corrupted draft (weight decay 0.05)"
+        reference: {run: flow-asr-tau-schedule/z0ugboi6, label: "weight decay 0.05"}
+        ablations:
+          - {run: flow-asr-tau-schedule/86wdalgv, label: "10% of field tokens resampled uniformly", outcome: superseded}
+          - {run: flow-asr-tau-schedule/ag5zhm40, label: "10% of field tokens resampled from mu", outcome: adopt}
+
+  # -- 7 ----------------------------------------------------------------------------------
+  - id: phase7
+    phase: 7
+    kind: ablation
+    status: done
+    question: Do the winners hold on the new stack, and do they combine?
+    note: phase7
+    columns:
+      - {name: wer_ref, metric: sampled_interpolant_16_reference/wer, header: "WER, control's grid"}
+      - {name: rec_mu, metric: audio_only/val_recovery, header: "rec. t=0", digits: 2}
+      - {name: rec_no_mu, metric: audio_only/val_recovery_no_mu, header: "rec. t=0, no mu", digits: 2}
+      - {name: rec_wrong_mu, metric: audio_only/val_recovery_wrong_mu, header: "rec. t=0, wrong mu", digits: 2}
+      - {name: copies_wrong_mu, metric: audio_only/val_copies_wrong_mu, header: "copies wrong mu", digits: 2}
+    groups:
+      - name: "Noise scale (control and sigma 0.4: 2 seeds)"
+        reference: {runs: [flow-asr-tau-schedule/g8d6ey8q, flow-asr-tau-schedule/dscwkozy], label: "control (unit noise)"}
+        ablations:
+          - {runs: [flow-asr-tau-schedule/9wl6vl87, flow-asr-tau-schedule/a116d1a7], label: "noise scale sigma 0.4", outcome: confirmed}
+          - {run: flow-asr-tau-schedule/tf92l1ti, label: "noise scale sigma 0.3", outcome: neutral}
+          - {run: flow-asr-tau-schedule/a1ehednz, label: "sigma 0.4 + uniform floor 0.1", outcome: reject}
+          - {run: flow-asr-tau-schedule/xz56dnw3, label: "audio dropped on 10% x t of rows", outcome: reject}
+          - {run: flow-asr-tau-schedule/dggqyvo7, label: "measured tau (refresh every 10)", outcome: open}
+      - name: "On sigma 0.4 (seed 1)"
+        reference: {run: flow-asr-tau-schedule/9wl6vl87, label: "noise scale sigma 0.4"}
+        ablations:
+          - {run: flow-asr-tau-schedule/zfkg16e2, label: "+ draft resampled from mu (10%)", outcome: confirmed}
+          - {run: flow-asr-tau-schedule/zxnkchfz, label: "+ measured tau (refresh every 10)", outcome: open}
+
+  - id: phase7_curves
+    phase: 7
+    kind: curves
+    status: done
+    question: How do the combined arms train, epoch by epoch?
+    of: phase7
+    ylim: [8, 35]
+
+  - id: mu_reliance
+    phase: 7
+    kind: figure
+    status: done
+    question: How much of each model's answer at t = 0 comes from mu rather than the audio?
+    builder: mu_reliance
+    sources: [phase7, phase5]
+    arms:
+      - {label: "control (unit noise)", show: "control (unit noise)"}
+      - {label: "noise scale sigma 0.7", show: "sigma 0.7 (round 1)"}
+      - {label: "noise scale sigma 0.5", show: "sigma 0.5 (round 1)"}
+      - {label: "noise scale sigma 0.4", show: "sigma 0.4"}
+      - {label: "noise scale sigma 0.3", show: "sigma 0.3"}
+      - {label: "+ draft resampled from mu (10%)", show: "sigma 0.4 + mu draft"}
+      - {label: "measured tau (refresh every 10)", show: "measured tau"}
+      - {label: "+ measured tau (refresh every 10)", show: "sigma 0.4 + measured tau"}
+
+  # Data: jobs/batch/sample_trajectory.sh -> data/sampling_{steps,trajectory}.csv and
+  # data/sampling_examples.tsv. `label` is the --model label the job ran under; how each was
+  # sampled (method, guidance) comes from the run's own config and is in the rows.
+  - id: sampling_steps
+    phase: 7
+    kind: figure
+    status: done
+    question: How does WER change with the number of sampling steps, and step by step along one trajectory?
+    builder: sampling_steps
+    role: val
+    split_name: dev-clean
+    trace_steps: 64
+    trace_data: trace_long/sampling_trajectory
+    extra_steps: [trace_long/sampling_steps]
+    ylim_state: [0, 150]
+    logy: true
+    plateau: 0.05
+    plateau_lines: [ours, linear]
+    models:
+      - {label: ours, show: "Ours"}                                # y9hyu9p0
+      - {label: ours-adrop0.05, show: "Ours, audio dropout 0.05"}  # 6n9h2pko
+      - {label: linear, show: "Linear"}                            # 16keaex7
+      - {label: linear-adrop0.1, show: "Linear, audio dropout 0.1"}  # 1nz9v8pz
+    reference: {label: mu-only, show: "mu alone (one pass)"}       # txuowwbe
+
+  - id: sampling_examples
+    phase: 7
+    kind: table
+    status: done
+    question: How does one transcript form over the sampling steps?
+    builder: sampling_examples
+    # The best model only. For the final model, rerun sample_trajectory.sh on it alone with
+    # TRAJ_OUT=paper/data/<dir> and point this at <dir>/sampling_examples; the WER-over-steps
+    # figure stays on the tuning models above.
+    data: sampling_examples
+    role: val
+    steps: [1, 2, 4, 8, 16]
+    columns:
+      - {label: ours, show: "Ours"}
+
+  # -- 8----------------------------------------------------------------------------------
+  - id: main_result
+    phase: 8
+    kind: table
+    status: planned
+    question: How does the final model compare with established ASR systems?
+
+  - id: steps
+    phase: 8
+    kind: table
+    status: planned
+    question: How many integration steps does the final model need?
+
+  # -- across the project -----------------------------------------------------------------
+  - id: ladder
+    phase: 9
+    kind: figure
+    status: done
+    question: Which changes built the final recipe, and what did each buy?
+    builder: ladder
+
+  - id: iteration_speed
+    phase: 9
+    kind: table
+    status: done
+    question: What made an experiment fast and cheap enough to run this many?
+
+  - id: compute
+    phase: 9
+    kind: figure
+    status: done
+    question: How much compute did the tuning phase use, and where did it go?
+    builder: compute
+    # wandb's _runtime is corrupt for some runs; hours recorded elsewhere win.
+    runtime_overrides_h:
+      q5bsvywz: 3.6   # skilled-lake-22, EXPERIMENTS.md "Real runs"
+    # wandb project -> phase, for the compute breakdown. Unlisted projects count as "other".
+    project_phase:
+      flow-asr-overfit: 1
+      flow-asr-bisect: 1
+      flow-asr-canvas: 1
+      local-tests: 1
+      flow-asr-schedule-arms: 2
+      flow-asr-refresh: 2
+      flow-asr-fixed: 2
+      continuous-flow-asr: 3
+      flow-asr-fulldata-schedule: 3
+      flow-asr-mu-reg: 3
+      flow-asr-timing: 9
+      flow-asr-probe-chunk: 9
+      flow-asr-flm-parity: 4
+      flow-asr-tau-schedule: 5   # phases 5-7 share the project

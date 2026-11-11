@@ -1,0 +1,10 @@
+# LaTeX build output of the stub main.tex
+*.aux
+*.log
+*.out
+main.pdf
+tables/
+figures/
+all_results.tex
+RESULTS.md
+*.csv

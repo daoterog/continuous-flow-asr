@@ -1,0 +1,12 @@
+# Denoiser geometry only, layered over any variant with `--size tiny`.
+# The notebook's size, kept as the baseline every earlier result was measured at.
+#
+# mu (model.audio_decoder) is deliberately NOT scaled here: DRAX hold their
+# audio-conditioned p_mid at 28M across both model sizes, and the variant configs
+# own that field. Only the variants that use mu define it at all.
+model:
+  denoiser:
+    hidden_size: 256
+    cond_dim: 64
+    n_heads: 4
+    n_blocks: 4

@@ -1,0 +1,61 @@
+# Where: a Snellius gpu_a100 allocation (1 A100 40 GB, 18 CPUs, 160G). Picked by
+# `--where snellius`, or automatically inside a SLURM job. Every hour here bills 256 SBU
+# whether the GPU is busy or not, so this profile is about keeping it busy. Layered over
+# base.yaml and under the variant; see ../README.md.
+data:
+  env: snellius
+  # Always the full 1500 Whisper frames on the cluster: mean-pooling them (stride 4) is a
+  # laptop-only shortcut, and every cluster run up to 2026-10-10 inherited it from base.yaml
+  # by accident. Stride changes the audio sequence length, not audio_dim, so a model trained
+  # at one stride still loads at the other and silently sees a different input.
+  audio_stride: 1
+  # The knee for the fulldata recipe (small + micro, full latents, compile + bf16), A100
+  # ladder 2026-10-11: batch 32 457 utts/s | 64 500 | 128 525 | 256 545 | 512 OOM.
+  # 128 is 96% of the best, and it is the batch skilled-lake-22 validated lr 2e-3 at, so the
+  # LR carries over. Replaying one on-GPU batch reached 742 utts/s at 128: the remaining
+  # ~30% goes to moving ~490 MB of latents per step, not to the GPU.
+  batch_size: 128
+  # Copy the next batch to the GPU while the current one trains (src/data/collate.py,
+  # CudaPrefetcher). A100, batch 128, 2026-10-11: plain 643 utts/s, prefetch 736 (1.14x),
+  # the same batch held on the GPU 916. Batches are bit-identical either way.
+  gpu_prefetch: true
+  # Every run has its own 18 cores (jobs/batch/train.sh), so 17 workers leaves exactly the
+  # main process's core. A100, batch 128 + prefetch, 2026-10-11: 16 workers 711 utts/s,
+  # 17 workers 798 (+12%); a deeper prefetch_factor (4) changed nothing (712).
+  num_workers: 17
+  # One ready batch per worker instead of DataLoader's 2. At full latents a batch is ~490 MB,
+  # so 17 workers x 2 kept ~17 GB in flight per run, and with two runs plus the feature cache
+  # a job outgrew its 240G (a stage-1 run was OOM-killed). Speed is unchanged: depth 4 vs 2
+  # measured 712 vs 711 utts/s.
+  prefetch_factor: 1
+  # Val and test loaders keep their own persistent workers alive between passes; at 17 each
+  # a run held ~34 worker processes and its main process reached ~53 GB, and a stage-2 run
+  # was still OOM-killed with prefetch_factor 1. A val pass every 10 epochs needs few.
+  eval_num_workers: 4
+  # Val, test and the tau probe run under no_grad: 0.645 ms/utt at 512 against 0.836 at 32.
+  eval_batch_size: 512
+schedule:
+  # Precision of the measured tau curve is 1/sqrt(n); 8192 halves the error of 2048 at t0.
+  probe_n_utts: 8192
+train:
+  # Measured on the A100 (bench_train --suite prod, job 27839620), batch 128 audio_cond,
+  # ms/step:  as run 256.6 | train WER off 129.9 | + compile 98.7 | + bf16 70.0
+  # i.e. 3.7x every run before the profiles. DRAX already ran its blocks in bf16 and keeps
+  # its output layer fp32, so bf16-mixed mostly moves mu and the embeddings — but compare
+  # bf16 runs only with bf16 runs.
+  compile: true
+  precision: bf16-mixed
+  # TF32 for the matmuls autocast leaves in fp32 — mainly the output projection, which DRAX
+  # keeps out of autocast. Same benchmark: highest 711 utts/s, high 755 (+6%). TF32 only
+  # shortens the matmul inputs' mantissa; the accumulation and the outputs stay fp32.
+  matmul_precision: high
+metrics:
+  # Off for train: decoding 2 x 128 transcripts and scoring WER on every step costs
+  # 68.6 ms of CPU against 0.5 ms without it, ~15 s of a ~77 s epoch with the GPU idle.
+  # The train/val gap is still read from *_perr/train and *_loss/train.
+  wer_bins: {train: 0, val: 10, test: 10}
+logging:
+  # Resume files on scratch: two .ckpt plus a training state per run filled the 200 GiB home
+  # quota (2026-10-19), and two smoke runs died mid-save. Scratch purges old files, which
+  # suits them — nothing loads them; the components stay in save_dir, in home.
+  checkpoint_dir: /scratch-shared/cont-flow-asr/checkpoints

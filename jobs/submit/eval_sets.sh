@@ -40,7 +40,7 @@ if [[ -z "${WALLTIME}" ]]; then
     # Shard 0 takes ceil(n/N_JOBS) files, so it is the worst-case task.
     # `|| true` is load-bearing: under `set -eo pipefail` a failing python would abort the
     # script instead of reaching the fallback.
-    BYTES="$(cd "${REPO_DIR}" && python -m scripts.download_eval_sets \
+    BYTES="$(cd "${REPO_DIR}" && python -m scripts.data.download_eval_sets \
         --dry-run --env snellius --datasets ${DATASETS} \
         --num-shards "${N_JOBS}" --shard-id 0 2>/dev/null \
         | awk '/^bytes/ {print $2}' || true)"

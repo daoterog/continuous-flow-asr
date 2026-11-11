@@ -30,7 +30,7 @@ set -eo pipefail
 source "${REPO_HOME:-$HOME/continuous-flow-asr}/jobs/batch/_env.sh"
 
 # ── run ──────────────────────────────────────────────────────────────────────
-python -m scripts.download_eval_sets \
+python -m scripts.data.download_eval_sets \
     --env snellius \
     --datasets ${DATASETS} \
     --num-shards "${SLURM_ARRAY_TASK_COUNT}" \

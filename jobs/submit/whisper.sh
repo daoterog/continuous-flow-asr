@@ -6,7 +6,7 @@
 #   ./jobs/submit/whisper.sh                                # train.100, 7 tasks
 #   N_JOBS=14 ./jobs/submit/whisper.sh                      # one task per shard
 #   SPLITS="validation" ./jobs/submit/whisper.sh            # small run first
-#   MODEL=openai/whisper-small ./jobs/submit/whisper.sh
+#   ALLOW_MODEL=1 MODEL=openai/whisper-small ./jobs/submit/whisper.sh   # off the pin
 #   WALLTIME=02:00:00 ./jobs/submit/whisper.sh              # skip the estimate
 #
 # train.clean.100 is 28,539 utterances across 14 shards, ~46 GB of trimmed float16
@@ -16,7 +16,6 @@ set -eo pipefail
 
 CONFIGS="${CONFIGS:-clean}"
 SPLITS="${SPLITS:-train.100}"
-MODEL="${MODEL:-openai/whisper-large-v3}"
 N_JOBS="${N_JOBS:-7}"
 
 # Batch size. Measured: 1.19 GiB of fp16 encoder weights + ~45 MiB of activations per
@@ -41,23 +40,39 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$(dirname "${SCRIPT_DIR}")")"
 BATCH_DIR="${REPO_DIR}/jobs/batch"
 
+# Resolves MODEL and checks it here, on the login node, rather than letting the array
+# queue and then write a second checkpoint's features into the cache.
+# shellcheck disable=SC1091
+source "${REPO_DIR}/jobs/pinned_model.sh"
+require_pinned_model
+
 fmt_hms() { printf '%02d:%02d:%02d' $(($1 / 3600)) $((($1 % 3600) / 60)) $(($1 % 60)); }
+
+SIZING_ERR="$(mktemp)"
+trap 'rm -f "${SIZING_ERR}"' EXIT
 
 if [[ -z "${WALLTIME}" ]]; then
     # Shard 0 takes ceil(n/N_JOBS) shards, so it is the worst-case task. --dry-run
     # reports the utterance count without loading the model.
     # `|| true` is load-bearing: under `set -eo pipefail` a failing python would abort
     # the script instead of reaching the fallback.
-    UTTS="$(cd "${REPO_DIR}" && python -m scripts.precompute_whisper \
+    UTTS="$(cd "${REPO_DIR}" && python -m scripts.data.precompute_whisper \
         --dry-run --env snellius --model "${MODEL}" \
         --configs ${CONFIGS} --splits ${SPLITS} \
-        --num-shards "${N_JOBS}" --shard-id 0 2>/dev/null \
+        --num-shards "${N_JOBS}" --shard-id 0 2>"${SIZING_ERR}" \
         | awk '/^utterances/ {print $2}' || true)"
 
     if [[ -z "${UTTS}" ]]; then
-        WALLTIME="$(fmt_hms ${MAX_S})"
-        echo "WARNING: could not size the job (is the env active? is the data downloaded?)," \
-             "falling back to ${WALLTIME}" >&2
+        # Do NOT fall back to the partition maximum. A maximal request is not the safe
+        # choice: it queues far longer than a right-sized one, and on the first run
+        # sizing legitimately cannot work (whisper.sh counts utterances from data that
+        # is not downloaded yet). Fall back to a modest default and say what broke, so
+        # the fix is to pass WALLTIME= rather than to wait behind a 24h reservation.
+        echo "ERROR: could not size the job. Reason:" >&2
+        sed 's/^/  | /' "${SIZING_ERR}" >&2
+        echo "  Pass an explicit walltime instead, e.g. WALLTIME=01:00:00 $0" >&2
+        WALLTIME="$(fmt_hms 3600)"
+        echo "  Falling back to ${WALLTIME} (NOT the partition maximum)." >&2
     else
         EST_S=$(awk -v u="${UTTS}" -v r="${UTTS_PER_SEC}" 'BEGIN{printf "%d", u/r}')
         WALL_S=$((OVERHEAD_S + EST_S * SAFETY))

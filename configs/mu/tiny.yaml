@@ -1,0 +1,20 @@
+# mu_psi geometry only, layered over a variant with `--mu tiny`.
+# What configs/audio_cond.yaml has used for every experiment so far, kept so the
+# earlier results stay reproducible.
+#
+# dropout is stated rather than inherited from AudioDecoder's 0.0 default, because
+# the default is a finding: mu carried NO regularisation while the denoiser ran at
+# 0.1, and scaling mu up without it drove mu's own loss from 0.61 (micro) to 0.07
+# (small) while validation WER rose. 0.0 is kept here so every run measured so far
+# still reproduces; raise it on the command line to test the fix, e.g.
+#   model.audio_decoder.dropout=0.1
+# Note it reaches the attention weights only — the feed-forward path has none.
+#
+# Only the variants that actually use mu (a non-null flow.gamma) read this; on
+# configs/linear.yaml it would build a decoder the flow never consults.
+model:
+  audio_decoder:
+    hidden: 256
+    n_heads: 4
+    n_blocks: 2
+    dropout: 0.0

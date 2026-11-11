@@ -1,0 +1,22 @@
+# Where: this machine (a 6 GB laptop GPU, 6 cores, local NVMe). Picked by `--where local`,
+# or automatically when no SLURM job is detected. Layered over base.yaml and under the
+# variant, so a variant that pins one of these keeps its value; see ../README.md.
+data:
+  env: local
+  # Mean-pool the Whisper frames 4x: a local-only shortcut that keeps a 6 GB card and a
+  # laptop's RAM workable. The cluster always uses the full latents (where/snellius.yaml).
+  audio_stride: 4
+  # base.yaml's own measurement: a 6-core laptop wants 4.
+  num_workers: 4
+  # null follows data.batch_size, which a 6 GB card already fits.
+  eval_batch_size: null
+schedule:
+  probe_n_utts: 2048
+train:
+  # ~40 s of warmup that a short local run never earns back.
+  compile: false
+  precision: null
+metrics:
+  # Local runs are the overfit harness and small subsets, where train WER is the readout
+  # and its CPU cost per step is small next to the run.
+  wer_bins: {train: 10, val: 10, test: 10}

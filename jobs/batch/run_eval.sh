@@ -32,9 +32,8 @@
 # only one that yields a comparable RTFx. SOURCE=latents decodes the cached encoder
 # output instead, skipping the encoder — the LibriSpeech control that reproduced the
 # published numbers. Latents must have been precomputed with NO_TRIM=1: Whisper's decoder
-# cross-attends over all 1500 frames and emits repeated <|en|> from a trimmed cache, and
-# run_eval.py
-# refuses a trimmed cache rather than scoring an approximation.
+# cross-attends over all 1500 frames and emits repeated <|en|> from a trimmed cache, so
+# run_eval.py refuses a trimmed cache rather than scoring an approximation.
 #
 # Decoding is autoregressive and therefore far slower per utterance than encoding was;
 # more array tasks help here much more than a bigger batch.
@@ -44,8 +43,12 @@ set -eo pipefail
 
 source "${REPO_HOME:-$HOME/continuous-flow-asr}/jobs/batch/_env.sh"
 
+# MODEL is resolved by _env.sh; refuse anything but the pinned checkpoint so a stale
+# export cannot drop a second model's manifests into the same results directory.
+require_pinned_model
+
 # ── run ──────────────────────────────────────────────────────────────────────
-python -m scripts.run_eval \
+python -m scripts.evaluation.run_eval \
     --env snellius \
     --model "${MODEL}" \
     --source "${SOURCE:-audio}" \
@@ -53,7 +56,7 @@ python -m scripts.run_eval \
     --shard-id "${SLURM_ARRAY_TASK_ID}" \
     --batch-size "${BATCH_SIZE:-64}" \
     --warmup-steps "${WARMUP_STEPS:-10}" \
-    --results-dir "${RESULTS_DIR:-$HOME/continuous-flow-asr/results}" \
+    --results-dir "${RESULTS_DIR:-${REPO_HOME}/results}" \
     ${DATASETS:+--datasets ${DATASETS}} \
     ${CONFIGS:+--configs ${CONFIGS}} \
     ${SPLITS:+--splits ${SPLITS}} \

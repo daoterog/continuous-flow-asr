@@ -1,0 +1,110 @@
+# Recipe: what a full-data audio_cond run trains — the model, the data, the optimisation and
+# the schedule — written out rather than inherited, so a cluster run is exactly the one meant.
+#
+#   python train.py --config configs/recipes/fulldata.yaml --where snellius --run sweep
+#
+# Recipes say *what* is trained; the profiles (configs/profiles/) say *where* and *how long*.
+# A recipe must never set a key a profile owns — data.env / num_workers / eval_batch_size /
+# audio_stride / batch_size, schedule.probe_n_utts, train.num_epochs / compile / precision /
+# check_val_every_n_epoch, metrics.wer_bins, sampling.every_n_epochs / log_methods — because
+# the recipe layer sits above the profiles and would silently win (flow_mapping.yaml's
+# `num_epochs: 50` once made `--run full` train 50 epochs while the sweep priced 300).
+#
+# The defaults here are skilled-lake-22's (wandb continuous-flow-asr/q5bsvywz, 18.70% sampled
+# WER), the best full-data run on record. The 29 cluster runs between it and 2026-10-10 did
+# NOT train this: they inherited base.yaml's tiny denoiser and audio_cond.yaml's 256x2 mu.
+_base_: ../audio_cond.yaml
+
+recipe: fulldata
+# The variant this recipe instantiates; keeps wandb groups and manifests as they were.
+variant: audio_cond
+size: small
+mu_size: micro
+
+data:
+  splits:
+    train: {configs: [clean], splits: [train.100]}
+    val:   {configs: [clean], splits: [validation]}
+    test:  {configs: [clean], splits: [test]}
+  subset_n: {train: null, val: null, test: null}
+  canvas_len: 224
+  compact_vocab: true
+
+model:
+  # configs/sizes/small.yaml, ~40.7M parameters.
+  denoiser:
+    hidden_size: 512
+    cond_dim: 128
+    n_heads: 8
+    n_blocks: 8
+    # 0.2 lost in the reg1 screen: 17.0 sampled WER against 15.3, behind at every epoch.
+    dropout: 0.1
+    # Logits soft-capped by 30*tanh(x/30), as FLM does. Stage 2 (flow-asr-flm-parity):
+    # 15.29 sampled WER against the stack's 15.49 — neutral, kept because it is free and
+    # bounds the logits the loss can push on.
+    logit_cap: 30
+  # configs/mu/micro.yaml, ~1.8M. Small enough that it cannot memorise the training set:
+  # EXPERIMENTS row 13 measured its train/val accuracy gap at 0.036 against 0.510 for
+  # `small`, and row 14 found dropout 0.1 made it worse (16.06 -> 29.53).
+  audio_decoder:
+    hidden: 256
+    n_heads: 4
+    n_blocks: 1
+    dropout: 0.0
+
+flow:
+  # One t draw per 1/B slice of the batch instead of B independent ones: same expected
+  # objective, lower variance, no cost (FLM's "antithetic" sampling, which is stratified).
+  stratified_t: true
+  # One weighted mean over every token in the batch. Identical to `sequence` at
+  # pad_loss_weight 1.0 (every row is canvas_len long); once pads are down-weighted it keeps
+  # every real token at the same weight whatever its utterance's length, matching the
+  # corpus-level WER the runs are scored on.
+  loss_reduction: token
+  # Stage-1 screen (flow-asr-flm-parity, 100 epochs, seed 1): control 17.99 sampled WER,
+  # uniform time 15.17, pad 0.1 14.94. Both adopted.
+  # The denoiser sees the uniform draw u rather than t = tau^-1(u), as FLM and FMLM do.
+  time_input: uniform
+  # Down-weight padding to 0.1 (the stop token's run included); under the token-level
+  # reduction above, every real token keeps the same weight whatever the utterance length.
+  pad_loss_weight: 0.1
+  # Noise at 0.4 (1 - t), so x_0 ~ N(mu, 0.16 I): mu shows through, the field carries data
+  # earlier, and the simulated curve moves left as mu learns. tau-schedule, 100 epochs, wd
+  # 0.05: 11.7 / 12.5 sampled WER on two seeds against the unit-noise control's 13.8 / 14.7,
+  # ahead at every epoch. 0.5 and 0.7 lost (17.7, 17.3) and 0.3 tied (12.1).
+  alpha: {type: linear_down, scale: 0.4}
+
+train:
+  denoiser_lr: 2.0e-3
+  audio_decoder_lr: 1.0e-3
+  # reg1 screen (flow-asr-tau-schedule, 100 epochs, seed 1): 14.2 sampled WER against the
+  # control's 15.3 at 0.01, ahead at every sampling epoch. The one regulariser that helped:
+  # every arm nearly memorises train.100 at the transition, and dropout 0.2 and latent
+  # masking both lost (17.0, 32.5).
+  weight_decay: 0.05
+  grad_clip: 1.0
+  # Validate, sample and save an EMA of the weights, as FLM does (half-life ~700 steps).
+  # Stage 3 (flow-asr-flm-parity, 100 epochs, seed 1): 14.77 sampled WER against the
+  # control's 16.10. Under the 2-point bar at epoch 99, but ahead at every sampling epoch
+  # from 19 on, by 2-7 points mid-run, at no cost in time — adopted.
+  ema_decay: 0.999
+  # The field is built from a draft with 10% of its real tokens resampled from mu, the loss
+  # still on the truth: training otherwise never shows the denoiser a field that is wrong,
+  # which sampling always does (src/data/augment.py). tau-schedule on sigma 0.4, sampled val
+  # WER by dose: 0 -> 13.6, 0.1 -> 10.7, 0.2 -> 9.7 (seed 3); then on seed 4, 0.2 -> 10.6
+  # and 0.3 -> 9.0 (9.3 on test-clean), ahead at every sampling epoch, while 0.4 and 0.5
+  # were already behind by epoch 69 (15.9, 29.5 against 10.6). 0.3 is past the knee's top.
+  draft_corruption: {p: 0.3, source: mu}
+
+schedule:
+  enabled: true
+  refresh_curve_from: simulated
+  refresh_every_n_epochs: 5
+  # Row 17: read mu's accuracy on train, where the field is actually built from.
+  refresh_split: train
+  mu_accuracy: 0.0
+  # Stated here because base.yaml says 0.8, which every stage screen inherited unawares.
+  # Row 16 preferred 0.0 (16.25 vs 23.90) on the old tiny/stride-4 model; on this stack
+  # the replay in scripts/schedule/project_tau.py finds 0.0 and 0.8 within 0.01 of each
+  # other in every quantile, so it is the cheaper choice rather than a measured win.
+  mu_accuracy_momentum: 0.0

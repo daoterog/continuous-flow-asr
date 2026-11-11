@@ -36,7 +36,7 @@ set -eo pipefail
 source "${REPO_HOME:-$HOME/continuous-flow-asr}/jobs/batch/_env.sh"
 
 # ── run ──────────────────────────────────────────────────────────────────────
-python -m scripts.download_librispeech \
+python -m scripts.data.download_librispeech \
     --env snellius \
     --configs ${CONFIGS} \
     --splits ${SPLITS} \

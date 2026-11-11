@@ -1,0 +1,16 @@
+# Run: a sweep's screening run. Ranks arms, nothing more: in the flm-parity runs the WER
+# ranking at epoch 100 already matched the final one exactly. Picked by `--run sweep`
+# (TIER=screen in jobs/common/sweep.sh). Only comparable to other runs at this length,
+# which is why a screen carries its own control.
+train:
+  num_epochs: 100
+  # Validate every 10 epochs: 10 readings over the run, the last at epoch 100, which is all a
+  # screen is read for (plus mu's train/val gap). Each pass is a full val split with WER
+  # decoded on the CPU — about a third of an epoch once compile + bf16 made the step fast.
+  check_val_every_n_epoch: 10
+sampling:
+  # Equal to check_val_every_n_epoch. The probe runs inside the validation epoch, so a
+  # probe epoch without validation never fires; and sampled WER picks the checkpoints, so a
+  # validation without the probe would leave the .ckpt on val loss (train.build_trainer).
+  every_n_epochs: 10
+  log_methods: null

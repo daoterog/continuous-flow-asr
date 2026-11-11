@@ -1,0 +1,13 @@
+# Denoiser geometry only, layered over any variant with `--size base`.
+# FMLM's `small` geometry. Nearly the same budget as `flash` but deep-and-narrow,
+# so the pair is a depth-vs-width test at fixed cost.
+#
+# mu (model.audio_decoder) is deliberately NOT scaled here: DRAX hold their
+# audio-conditioned p_mid at 28M across both model sizes, and the variant configs
+# own that field. Only the variants that use mu define it at all.
+model:
+  denoiser:
+    hidden_size: 768
+    cond_dim: 128
+    n_heads: 12
+    n_blocks: 12

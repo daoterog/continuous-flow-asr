@@ -20,7 +20,7 @@ set -eo pipefail
 
 source "${REPO_HOME:-$HOME/continuous-flow-asr}/jobs/batch/_env.sh"
 
-python -m scripts.check_eval \
+python -m scripts.evaluation.check_eval \
     --results-dir "${RESULTS_DIR}" \
     --num-shards "${NUM_SHARDS}" \
     --expect-total "${EXPECT_TOTAL}" \

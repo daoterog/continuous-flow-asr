@@ -1,0 +1,30 @@
+# Recipe: the audio decoder on its own, at the size of the whole flow model — the baseline
+# that shows what the flow adds (src/mu_only.py).
+#
+#   python train.py --config configs/recipes/mu_only.yaml --where snellius --run sweep
+#
+# Everything but the model is fulldata.yaml's: the data, the token-level objective with pads
+# at 0.1, EMA, wd 0.05, the eval cadences, and `_best` by sampled WER — which for mu is its
+# argmax, scored by the same probe on the same utterances. So the two differ in the model
+# alone: one parallel pass from audio, against the flow's denoiser iterating over a field.
+_base_: fulldata.yaml
+
+recipe: mu_only
+mu_only: true
+mu_size: matched
+
+model:
+  # 512 x 10 is 43.7M at V=1,193, against the flow system's 42.5M (a 40.7M denoiser plus a
+  # 1.8M mu). Dropout 0.1, as the denoiser has: at this size mu memorises train.100 the way
+  # the denoiser does, and the micro mu's dropout result (row 14) does not transfer to it.
+  audio_decoder:
+    hidden: 512
+    n_heads: 8
+    n_blocks: 10
+    dropout: 0.1
+
+sampling:
+  # mu decodes in one pass, so the probe's "sample" is its argmax: one step, keyed
+  # sampled_argmax_1/wer, which is also what `_best` is chosen on.
+  method: argmax
+  num_steps: 1

@@ -1,0 +1,426 @@
+# Defaults shared by every run. The variant files next to this one set `_base_: base.yaml`
+# and override only what differs. Anything here is also settable on the command line:
+#   python train.py --config configs/linear.yaml train.num_epochs=10 data.batch_size=16
+
+seed: 0
+
+# Which variant this is, uploaded as a hyperparameter so runs group and filter by it.
+# Left null it is filled in from the config file's stem.
+variant: null
+
+# Which entry of configs/sizes/ shaped the denoiser, filled in by `--size`. A hyperparameter
+# like `variant`, so a size sweep is filterable in wandb; null means the geometry came from
+# model.denoiser below rather than from a size file.
+size: null
+
+# The same for mu_psi, filled in by `--mu` from configs/mu/. Independent of `size`: DRAX
+# hold mu fixed across both their model sizes, so the two are separate axes to ablate.
+mu_size: null
+
+data:
+  # `local` -> ./data, `snellius` -> /scratch-shared/cont-flow-asr/data. data_root wins.
+  env: local
+  data_root: null
+  # The checkpoint the features were precomputed with; names the cache directory.
+  model: openai/whisper-large-v3
+
+  # Wide enough for the whole corpus: measured over clean/{train.100,validation,test},
+  # tokens per utterance run mean 67, p99 113, max 215 — and train.100 is the longest
+  # split (mean 71.5), so a short canvas costs training data first. 96 dropped 8.4% of all
+  # utterances; 128 keeps 99.75%; 224 keeps everything.
+  #
+  # Anything over canvas_len is filtered out, so this also silently decides how much of
+  # test is scored. Padding is a real target the model learns to emit, but it is 70% of
+  # the field here, and the binned metrics count pad positions in their denominator — so
+  # P_e and the binned loss are NOT comparable across different canvas_len values.
+  canvas_len: 224
+  # mean-pool the 1500 Whisper frames: stride 4 makes them 80 ms and cuts the
+  # cross-attention keys 4x.
+  audio_stride: 4
+  batch_size: 32
+  # Batch for val, test and the measured tau probe. All three run under no_grad, so none
+  # of the activations that size the training batch are allocated and a much larger batch
+  # both fits and pays. On an A100-40GB, one probe at the 512x8 denoiser
+  # (scripts/diagnostics/bench_probe.py):
+  #
+  #     chunk      32    128    256    512   1024   2048
+  #     ms/utt  0.836  0.688  0.660  0.645  0.638  0.636
+  #     peak     0.67   1.68   3.03   5.74  11.15  21.96    GiB
+  #
+  # 24% off between 32 and 512, then flat — the card has more to saturate than a 32-wide
+  # (B, canvas_len, vocab_size) field keeps busy. 512 takes all but 1% of that for 5.7 GiB,
+  # which sits alongside training; 2048 wants 22 GiB to save a further 1%.
+  #
+  # ms/utt is identical at every probe_n from 2,048 to 32,768 — 1,024 loop iterations cost
+  # no more per utterance than 2 — so the probe costs exactly what it forwards and
+  # `schedule.probe_n_utts` can be chosen on precision alone.
+  #
+  # null follows batch_size, which is the portable default: 5.7 GiB does not coexist with
+  # training on a 6 GiB laptop card. Set it explicitly on the cluster.
+  eval_batch_size: null
+  # null means one epoch is one pass over the training subset. Set it to make an epoch a
+  # fixed number of steps instead, sampling with replacement — worth it on small subsets,
+  # where the per-epoch fixed cost otherwise dominates.
+  steps_per_epoch: null
+  compact_vocab: true
+  # 16 on an A100 node with 16 cores: measured 849 -> 952 -> 1058 utts/s at 4 -> 8 -> 16
+  # workers. Loading, not the step, is what bounds throughput here, so this is the single
+  # largest lever. A 6-core laptop wants 4; match it to the cores you actually have.
+  num_workers: 16
+  # Utterances each worker reads at once. 1 is one after another, so a job has num_workers
+  # reads in flight; off GPFS a read waits on latency, and more in flight is more data.
+  # The batches are identical either way (src/data/datamodule.py, ThreadedSubset).
+  read_threads: 1
+  # Train without DataLoader workers: read each batch straight into pinned memory with
+  # read_threads threads (src/data/direct.py). Only for features on a local disk — on GPFS a
+  # plain read skips the page cache — so the train.960 recipe sets it with SCRATCH_NODE=1.
+  direct_read: false
+
+  # One role = configs x splits, the same cross product the precompute scripts take.
+  # Overridable as --train-configs / --train-splits / --val-configs / ... on the CLI.
+  splits:
+    train: {configs: [clean], splits: [train.100]}
+    val:   {configs: [clean], splits: [validation]}
+    test:  {configs: [clean], splits: [test]}
+
+  # Cap per role, applied after the canvas-length filter. null means all of it.
+  subset_n:
+    train: null
+    val: null
+    test: null
+
+model:
+  denoiser:
+    hidden_size: 256
+    cond_dim: 64
+    n_heads: 4
+    n_blocks: 4
+    dropout: 0.1
+    # whisper_dim defaults to the large-v3 encoder width (1280).
+  # null drops mu entirely; the audio-conditioned variants fill this in.
+  audio_decoder: null
+
+flow:
+  # I_t = alpha(t) x0 + beta(t) x1 [+ gamma(t) mu]
+  alpha: linear_down          # 1 - t
+  beta: linear_up             # t
+  gamma: null                 # linear_down, or {type: parabola, c: 0.5}
+  stop_grad_mu: true
+  # How hard mu's own cross-entropy is trained, NOT how much mu enters the flow (that is
+  # gamma). At 1.0 the auxiliary loss dominates the objective and starves the denoiser:
+  # measured on 64 memorised utterances, 1.0 gave 41% sampled WER and 0.1 gave 0.00%,
+  # with mu itself perfect either way. mu converges easily and does not need the weight.
+  mu_loss_weight: 0.1
+
+  # How much a padding position counts in the cross-entropy, before a weighted mean.
+  # 1.0 is a plain mean over the canvas, where ~70% of the terms are "emit end-of-text" at
+  # canvas_len 224 over ~67-token utterances. Lowering it both drops padding's share of the
+  # gradient and, since the denominator shrinks too, scales up what each real token
+  # contributes — so part of any speed-up is an effective LR increase on content and the
+  # two have to be swept together. Never set it to 0 without checking length control:
+  # emitting end-of-text is how a non-autoregressive sample knows where to stop.
+  pad_loss_weight: 1.0
+
+  # Length scale, in tokens, over which a padding position decays from full weight to
+  # pad_loss_weight as it gets further from the end of the transcript. 0 or null weighs
+  # every pad the same. The point is that the first pad is the stop decision and the rest
+  # are free, so a decay of a few tokens keeps length control at full strength while
+  # dropping the tail that dilutes the objective. Inert while pad_loss_weight is 1.0.
+  pad_decay: 0.0
+
+  # How the batch's per-token cross-entropy becomes one number. `sequence` averages each
+  # row, then the rows; `token` (FLM's) averages every token in the batch at once. Identical
+  # while pad_loss_weight is 1.0, since every row is canvas_len long. Below that, `sequence`
+  # gives a short utterance's real tokens more weight each than a long one's.
+  loss_reduction: sequence
+
+  # What the denoiser's time embedding is fed. `reparametrized` is the flow time t itself.
+  # `uniform` is the draw u that t = tau^-1(u) came from, as FLM does: the useful t sits in
+  # a narrow band near 1 at large V, and u spans [0, 1]. u follows the live tau, so a
+  # refresh relabels which t a given u means; whether that hurts is part of what the
+  # comparison measures. The curve is saved with each checkpoint (tau_<variant>.npz) so
+  # sampling pairs u with t the way training last did. Identical when schedule.enabled is
+  # false, since then u = t.
+  time_input: reparametrized
+
+  # One t draw in each 1/B slice of [0, 1] rather than B independent ones. FLM calls this
+  # "antithetic", but it is stratified sampling (antithetic would pair u with 1-u).
+  stratified_t: false
+
+schedule:
+  # Draw t through tau^-1 rather than uniformly. Off, ~65% of every batch lands below the
+  # dead zone where x_t carries nothing.
+  enabled: true
+  # `measured` only: how many uniform bins the denoiser sweep's readings are pooled into.
+  # Its precision is set by probe_n_utts together with this, not by the epoch — see the
+  # note there. At probe_n_utts 2048 and 150 bins each bin pools ~1,000 real tokens, for a
+  # per-bin recovery std of ~0.016.
+  #
+  # `simulated` no longer has an equivalent. Its curve is integrated rather than sampled
+  # (src/flow/recovery.py), so resolution is not a precision tradeoff and there is nothing
+  # to tune: schedule.EXACT_GRID_POINTS fixes how finely tau^-1 is interpolated between
+  # knots, at 1e-6 in t for a few tens of milliseconds. scripts/schedule/ablate_tau_bins.py
+  # measured the old sweep's discretisation error and is now only of historical interest.
+  num_bins: 150
+
+  # Utterances the `measured` sweep draws per refresh, redrawn each time. With num_bins
+  # they fix the curve's precision: a bin pools mean_tokens * probe_n_utts / num_bins real
+  # tokens, and the recovery it reports has std ~ sqrt(0.25 / that). At 2048 and 150 bins
+  # that is ~1,000 tokens and std ~0.016; halving it to 1024 gives ~500 and ~0.022.
+  #
+  # The cost is ceil(probe_n_utts / 32) forward passes per refresh — 64 here, against a
+  # refresh every refresh_every_n_epochs epochs, so it is noise next to training. Raise it
+  # before lowering num_bins if the curve looks ragged.
+  probe_n_utts: 2048
+
+  # How accurate mu is assumed to be while tau is measured. Only used when flow.gamma is
+  # set; a refresh under `simulated` replaces the assumption with mu's measured accuracy.
+  #
+  # 0.0 because tau is built BEFORE training, when mu_nn is at init and its output really
+  # does carry nothing. This is not a pessimistic guess — it is the state of the model at
+  # the moment the measurement is taken. The corruption sweep agrees: an accuracy-0 mu
+  # emits a confident one-hot on a random token, whose gamma(t)~1 spike loses to the noise
+  # maximum alpha*sqrt(2 ln V)~3.8, so its P_e curve sits on top of the no-mu path — see
+  # scripts/schedule/plot_mu_sweep.py, where 0% and "no mu" coincide.
+  #
+  # The previous default of 1.0 assumed a perfect mu from step one and put the training
+  # mass where a perfect mu would have carried the signal. Measured mu accuracy on
+  # train.100 is 0.39-0.57, never close to 1.
+  mu_accuracy: 0.0
+  # Smoothing on mu's measured accuracy before tau is rebuilt from it. The average updates
+  # at the end of every training epoch while tau is rebuilt only every
+  # refresh_every_n_epochs, so the lag is m/(1-m) epochs whatever the refresh cadence.
+  # 0.0 uses the latest reading. Measured over six runs, only ~65% of epochs improved mu's
+  # error and the jitter about the trend was as large as the average step; 0.8 cuts that
+  # 3.6x for a 0.016 lag, biased toward *under*-stating mu, which is the safe direction.
+  # The smoothed value is logged as tau/mu_accuracy_ema; the raw reading it averages is
+  # the mu_perr/{split}_overall metric.
+  mu_accuracy_momentum: 0.8
+
+  # Which split's numbers rebuild tau. `train`, because tau decides which t the next
+  # epochs are trained on, so measuring it on `val` would let held-out data steer training
+  # — and because the training path really is built from mu's output on training audio.
+  # The cost is that a memorising mu reports near-perfect accuracy (measured: 1.000 on
+  # train against 0.490 on val for --mu small) and tau is then built on a fiction. Compare
+  # mu_perr/train_overall against mu_perr/val_overall; at --mu micro they agree to 0.036.
+  refresh_split: train
+
+  # Which P_e curve a refresh rebuilds tau from.
+  #
+  #   simulated — the model-free interpolant curve at mu's measured accuracy: the chance
+  #               that plain argmax on the field recovers the token, no trained model in
+  #               the loop. Integrated in closed form, so it is exact and deterministic.
+  #               What Eq. 25 is about. Without flow.gamma nothing in it can move, so the
+  #               refresh is skipped and the curve built at startup stands for the run.
+  #   measured  — the denoiser's own binned P_e.
+  #   warmup    — simulated until the denoiser clears measured_min_recovery, then measured,
+  #               and sticky from there. `measured` already keeps the startup prior while
+  #               the model is too weak to invert, but keeps it frozen at mu_accuracy 0.0;
+  #               this rebuilds it at mu's current accuracy each refresh instead, which on
+  #               a gamma path is a long way from where it started — tau clears 1e-3 at
+  #               t=0.199 for a mu that knows nothing and t=0.029 for one at 0.9. Watch
+  #               `tau/source_measured` for when the handover happened.
+  #
+  # They disagree sharply. On a converged run the interpolant is 0.964 wrong in the lowest
+  # t bin where the denoiser is 0.251 wrong, because the denoiser can read the audio and
+  # the field cannot. So `simulated` gives that region ~10% of the training mass and
+  # `measured` gives it ~86%. Sampling starts at low t, so `measured` may be what sampled
+  # WER wants — but the denoiser's low-t skill comes from the audio rather than from t, so
+  # tau then credits t with progress it did not cause. Untested; every result so far was
+  # measured under `simulated`.
+  refresh_curve_from: simulated
+
+
+  # Re-derive tau every N training epochs, replacing the corruption-sweep prior. 0
+  # disables it. Counted in training epochs, not validations: keyed off validation the
+  # real cadence would be the overlap of the two, silently dropping refreshes whenever
+  # check_val_every_n_epoch does not divide this. Epoch 0 is skipped, since the metrics a
+  # refresh reads are still empty, so the schedule moves at the start of epochs N, 2N, ...
+  # The bins move with it, so histograms are not comparable across a refresh — the
+  # underlying t-distribution genuinely changed.
+  refresh_every_n_epochs: 0
+
+  # `measured` only: recovery the best bin must reach before its curve is worth inverting.
+  # Below this the model is too weak to anchor tau — normalising by the curve's own worst
+  # error would put t0 near 1 and starve every t beneath it — so the refresh is skipped
+  # and the schedule it already has is kept. A weak model is the normal state at the first
+  # refresh, not an error, which is why this skips rather than failing the run. Raising it
+  # delays the first refresh until the denoiser can actually recover something.
+  measured_min_recovery: 0.05
+
+  # `measured` and `warmup`: how concentrated the schedule a curve produces may be before
+  # the refresh is refused. An early measured curve recovers nothing until t is nearly 1
+  # and everything after, which inverts to a schedule drawing its whole batch from that
+  # last sliver — training where the model already wins. Measured on full data at
+  # refresh-every-epoch, the median drawn t was 0.9931-0.9998 at epoch 1 against
+  # 0.805-0.873 from epoch 2, across five runs, so the two regimes are cleanly separated
+  # and 0.9 sits between them with room on both sides.
+  #
+  # This is the gate that does the work. measured_min_recovery reads rec.max(), which is
+  # the top of the curve at t ~ 1 where the field is already almost clean — high for any
+  # model from epoch 1, so it never fires on full data. Raising it is not the fix: the
+  # degenerate curve has a high peak, that is exactly its problem.
+  measured_max_median_t: 0.9
+
+  # `simulated` only: let a degenerate prior tau through. Off, a run whose simulated curve
+  # starts above t=0, or (without uniform_floor) draws 80% of every batch within less than
+  # 0.15 of t, stops before training (schedule.degenerate_tau). That is what a small sigma
+  # does: at sigma 0.05 over the full vocabulary the curve starts at t=0.29 and squeezes 80%
+  # of training into t in [0.476, 0.522], so the source state mu + sigma*eps is never
+  # trained and sampling starts from a state training never showed the model — a
+  # 2026-10-21 run that learned like compact for 7 epochs, then stalled behind sigma 0.4.
+  # Use schedule.enabled=false or a uniform_floor instead; this is for deliberate tests.
+  allow_degenerate_tau: false
+
+sampling:
+  # Integrate from noise on a fixed slice of val and score the result. This is the only
+  # metric that reflects inference — the binned ones score one denoising step from an x_t
+  # built out of the target, which at high t largely measures the input.
+  enabled: true
+  # How the ODE is integrated from noise.
+  #
+  #   interpolant — rebuild x_t = alpha(t) x0 + beta(t) x1_hat + gamma(t) mu at each step
+  #                 with x0 held fixed, and read the transcript off the denoiser's last
+  #                 prediction. No 1/(1-t) anywhere, and for three_term it uses the exact
+  #                 gamma(t+h) rather than a first-order expansion of it.
+  #   euler       — Algorithm 6 of the paper: x_{n+1} = x_n + (t_{n+1} - t_n) b_n with
+  #                 b = (D - x)/(1-t) [+ 4c(1-t) mu for three_term], decoding the final
+  #                 state. The reference formulation, so use it to reproduce the paper.
+  #
+  # The two are algebraically identical on linear and audio_cond — the mu term cancels in
+  # the drift — and differ at O(h^2) on three_term.
+  method: interpolant
+  # Integrators scored every sampling epoch. Every cell is logged as
+  # sampled_<method>_<steps>/wer — named in full, so a key always says what produced it.
+  # null scores `method` alone. Every method in an epoch integrates the same x0 (seeded by
+  # `seed`), so the gap between them is the integrator and nothing else.
+  log_methods: null
+  seed: 0
+  num_steps: 16
+  # Equal to train.check_val_every_n_epoch: sampled WER picks the checkpoints, so every
+  # validation has to sample (see configs/profiles/run/sweep.yaml).
+  every_n_epochs: 10
+  # null means the whole validation split. A subset makes sampled WER depend on which
+  # utterances it took: two runs with identical configs but different slices differed by
+  # 5.4 points, where two sharing a slice differed by 0.6. Comparability is worth the
+  # ~5% of walltime this costs on a long run.
+  n_utts: null
+  # Utterances integrated at once. n_utts decides how many are scored, this decides peak
+  # memory: the integrator holds several (B, canvas_len, vocab_size) fields, which is
+  # 11 GiB for 256 utterances over Whisper's full vocabulary. null follows data.batch_size,
+  # which training already fits while also holding gradients.
+  batch_size: null
+  # Seed the first state's endpoint term with mu. The tau grid does not start at 0 — it
+  # starts at the edge of the dead zone, ~0.19 on a converged compact run — so training's
+  # state there already carries beta(t0) * x1, roughly 19% of the endpoint term. Left
+  # false the sampler drops it entirely and begins from a state weaker in signal than
+  # anything training showed the model, at the one step whose errors propagate furthest.
+  # With gamma = 1 - t, true makes the first state alpha(t0) * x0 + mu exactly.
+  init_from_mu: false
+
+  # Feed back a one-hot argmax instead of the softmax between integration steps.
+  #
+  # Training builds the interpolant from F.one_hot(tokens), a vertex of the simplex, so
+  # true is arguably the closer match — but x_t carries the previous prediction forward,
+  # so a hard feed may also let the model reinforce its own guess instead of revising it.
+  # Untested: the one attempt to measure it ran against a sampler that was exiting after
+  # a single step, so both arms were really 1-step samples.
+  hard: false
+
+metrics:
+  loss_bins: 10
+  perr_bins: 10
+  # WER needs a decode per batch, so it is off on train by default.
+  wer_bins: {train: 10, val: 10, test: 10}
+  # Token error of argmax(x_t) — the interpolant with no model in the loop. Against
+  # denoiser_perr it shows what the denoiser adds over its own input, and across variants
+  # it shows how much mu actually contributes to the field. One argmax, so it is cheap.
+  input_perr_bins: 10
+
+train:
+  num_epochs: 50
+  # End the fit at the first validation past this step, without shortening the LR schedule
+  # (train.py, StopAtStep): a cheaper run that stays comparable to a full-length one.
+  stop_at_step: null
+  # 1e-2 came from the notebook and is far too hot: on the overfit check it sat at
+  # loss 1.86 where 1e-3 reached 0.014. The optimum moves with the step count, since
+  # OneCycleLR derives its schedule from the total, so re-check it if epochs change a lot.
+  denoiser_lr: 1.0e-3
+  audio_decoder_lr: 1.0e-3
+  # torch.optim.AdamW's own default, which is what the notebook ran under by not passing
+  # one. Set 0.0 to turn decay off.
+  weight_decay: 0.01
+  # Warmup length in OPTIMIZER STEPS, not a fraction: a fraction rescales with the epoch
+  # count, so the same 0.3 means 6,660 steps at 100 epochs and 26,640 at 400. null keeps
+  # OneCycleLR's default of 0.3. DRAX use 2,500 steps at batch 240.
+  warmup_steps: null
+
+  grad_clip: 1.0
+  accelerator: auto
+  devices: 1
+  precision: null
+  fast_dev_run: false
+  log_every_n_steps: 50
+  # Validation costs a decode per batch when WER is on, and with sampling.every_n_epochs
+  # (equal to it) a full integration too, so every 10 epochs keeps runs fast.
+  check_val_every_n_epoch: 10
+  # Lightning's own .ckpt: a pickle of the whole module, loadable only back into the same
+  # class. Off by default because save_components below covers what it was kept for, in a
+  # form a student model can read. Turn it on for `trainer.test(ckpt_path="best")`, which
+  # needs a real Lightning checkpoint.
+  checkpoint: false
+
+  # Write runs/<run_id>/components/: per-model state_dicts, the manifest needed to rebuild
+  # them, the vocabulary map, and the optimizer state for resuming a cut-short run. Small
+  # enough to keep for every run; see src/checkpointing/.
+  save_components: true
+
+  # Stop as soon as a metric reaches its target — e.g. `sampled_interpolant_16/wer` at 0
+  # for an overfit
+  # check, where everything after that is wasted compute. null disables it. Only the
+  # target stops the run; a plateau does not.
+  early_stop_on: null
+  early_stop_threshold: 0.0
+  early_stop_mode: min
+
+  # TF32 for fp32 matmuls. Measured on a 3060 at batch 32, ms/step:
+  #   16-mixed  highest 38.5 | high 43.4      <- under AMP the matmuls are already fp16,
+  #   32-true   highest 47.9 | high 43.0         so TF32 only slows the fp32 tail
+  # So: leave `highest` with 16-mixed, switch to `high` if you run 32-true. Lightning
+  # prints an info line recommending `high` whenever this is `highest`; it is advice for
+  # fp32 training and is measurably wrong for this model under AMP.
+  matmul_precision: highest
+
+  # Moderate reproducibility: seed_everything(workers=True) fixes init, data order, the
+  # t draws and each worker's RNG, so runs line up. Bit-exact GPU reductions would need
+  # deterministic=true, which measured ~7-10% slower for no benefit we need.
+  deterministic: false
+  # Only tunes convolution algorithms, and neither model has a conv layer — inert here.
+  benchmark: false
+
+  # One fused CUDA kernel for the whole AdamW update instead of a launch per parameter
+  # tensor: +28% throughput, since these models are small enough that launch overhead
+  # dominates the update. It unscales gradients inside its own kernel, so it CANNOT be
+  # combined with grad_clip — set grad_clip: null to use it. Ignored on CPU.
+  fused_optimizer: false
+
+  # torch.compile the two models. The largest single win measured (+64% at batch 64),
+  # paid for with a one-off warmup: ~40s at "default", ~6 min at "max-autotune-no-cudagraphs".
+  # Worth it for a long run, not for a smoke test.
+  compile: false
+  compile_mode: default
+
+logging:
+  # The wandb team runs belong to. Pinned rather than left to the account default, so a
+  # run from another machine or a CI job lands in the same place.
+  entity: cont-flow-asr-
+  project: continuous-flow-asr
+  # null lets wandb generate the run name; the variant is carried in `variant` above.
+  name: null
+  # Runs of the same variant share a group, so repeats and seeds sit together.
+  group: null
+  offline: false              # or pass --offline
+  save_dir: runs
+  # Lightning's .ckpt and training_state.pt, under <checkpoint_dir>/<run_id>/; null keeps
+  # them in save_dir. Only resuming needs them.
+  checkpoint_dir: null

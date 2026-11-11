@@ -1,0 +1,17 @@
+# Run: the train.960 runs (configs/recipes/train960*.yaml). Picked by `--run big`.
+train:
+  # Sized by optimizer steps, not epochs: provisional, set from the smoke jobs' measured
+  # steps/s against the budget. The screens ran 22.3k steps (100 train.100 epochs at batch
+  # 128) and were still improving; one train.960 epoch is ~2.2k. OneCycle stretches its
+  # schedule over this total (trainer.estimated_stepping_batches honours max_steps).
+  max_steps: 200000
+  # Only a ceiling, never reached before max_steps.
+  num_epochs: 1000
+  # A val pass and a sampling probe cost what they did on train.100 (~33 s, the val split is
+  # the same), against ~10x the training per epoch, so every 2 epochs keeps evaluation near
+  # the ~6% that every 10 was on train.100 — and gives 50 readings for `_best`.
+  check_val_every_n_epoch: 2
+sampling:
+  # Equal to check_val_every_n_epoch: see sweep.yaml.
+  every_n_epochs: 2
+  log_methods: null

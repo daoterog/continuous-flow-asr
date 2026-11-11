@@ -28,11 +28,23 @@ export PATH="${CONDA_ENV_PATH}/bin:${PATH}"
 export LD_LIBRARY_PATH="${CONDA_ENV_PATH}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 # HF_TOKEN for authenticated Hub requests (higher rate limits on model/dataset pulls).
-if [[ -f .env ]]; then
+#
+# An absolute path, not a bare `.env`: a filename with no slash is looked up in $PATH,
+# and only bash falls back to the current directory. `sbatch --wrap` runs its script
+# under /bin/sh, where that fallback does not exist — so a bare `source .env` fails with
+# "file not found" immediately after `-f` confirmed the file is there.
+if [[ -f "${REPO_HOME}/.env" ]]; then
     set -a
     # shellcheck disable=SC1091
-    source .env
+    source "${REPO_HOME}/.env"
     set +a
 else
-    echo "WARNING: no .env found; Hub requests will be unauthenticated" >&2
+    echo "WARNING: no ${REPO_HOME}/.env found; Hub requests will be unauthenticated" >&2
 fi
+
+# Last, so it sees the final MODEL: .env is sourced under `set -a`, which exports every
+# name it defines, so a MODEL left in there would otherwise slip past the guard.
+# Defines PINNED_MODEL, resolves MODEL, and provides require_pinned_model — which the
+# jobs that load a checkpoint call for themselves; the download jobs do not.
+# shellcheck disable=SC1091
+source "${REPO_HOME}/jobs/pinned_model.sh"
