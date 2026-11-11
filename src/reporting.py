@@ -21,6 +21,7 @@ from transformers import WhisperTokenizerFast
 from src.data import VocabMap
 from src.flow.sampling_probe import SamplingProbe
 from src.flow.schedule import TimeReparametrization
+from src.flow.source import SourceNoise
 from src.flow.tau_base import TauScheduler
 from src.metrics.base import TimeBinnedMetric
 from src.metrics.utils import (
@@ -50,6 +51,8 @@ class MetricReporting:
     names: tuple[str, ...]
     sampling_probe: SamplingProbe
     tau_scheduler: TauScheduler
+    source: SourceNoise
+    noise_tau_sigma: float
 
     def init_metrics(
         self,
@@ -222,6 +225,35 @@ class MetricReporting:
                         self.log(f"{key}/wer", wer, batch_size=n_utts)
                         self.log(f"{key}/cfg", w, batch_size=n_utts)
 
+    def log_noise(self, noise: dict, split: str, batch_size: int) -> float:
+        """Log how a learned sigma sits on one batch; return its mean.
+
+        `noise` is the flow step's record under `flow.learned_noise`: the (B, L, V) sigma,
+        the real-token mask, and the KL that holds sigma to sigma_0. Over real positions
+        only — pads carry no target. `noise_at_floor` is the share within 1% of
+        `min_scale`, which says whether that floor ever binds.
+        """
+        vals = noise["sigma"][noise["real"]].float().flatten()
+        # torch.quantile refuses inputs past 2^24 elements; a fixed-stride subsample is
+        # plenty for two percentiles.
+        sub = vals[:: max(1, vals.numel() // 200_000)]
+        floor = self.source.min_scale
+        stats = {
+            "kl": noise["kl"],
+            "sigma_mean": vals.mean(),
+            "sigma_p10": torch.quantile(sub, 0.1),
+            "sigma_p90": torch.quantile(sub, 0.9),
+            "at_floor": (vals <= 1.01 * floor).float().mean() if floor > 0 else vals.new_zeros(()),
+        }
+        for key, value in stats.items():
+            self.log(f"noise_{key}/{split}", value, on_step=False, on_epoch=True,
+                     batch_size=batch_size)
+        return float(stats["sigma_mean"])
+
+    def log_noise_tau_sigma(self) -> None:
+        """The sigma the next simulated tau is built at: the last epoch's mean."""
+        self.log("noise_tau_sigma", self.noise_tau_sigma)
+
     def reset_audio_only(self) -> None:
         """Clear the audio-only tally; `update_audio_only` says what each slot counts."""
         self._audio_only = torch.zeros(6, device=self.device)
@@ -253,10 +285,11 @@ class MetricReporting:
         real = tokens != self.pad_id
 
         t0 = torch.zeros(tokens.size(0), device=self.device)
-        noise = self.alpha_fn(t0)[:, None, None] * torch.randn(
+        mu_logits, sigma = self.mu_and_sigma(audio)
+        noise = (self.alpha_fn(t0)[:, None, None] * sigma) * torch.randn(
             *tokens.shape, self.vocab_size, device=self.device
         )
-        mu = F.softmax(self.mu_nn(audio), dim=-1)
+        mu = F.softmax(mu_logits, dim=-1)
         # A mu that knows nothing: the field at t=0 then carries no hint at all.
         uniform = torch.full_like(noise, 1.0 / self.vocab_size)
         wrong = mu.roll(1, dims=0)

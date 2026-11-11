@@ -5,6 +5,13 @@ from collections.abc import Callable
 from omegaconf import DictConfig, OmegaConf
 
 
+def as_spec(spec: DictConfig | dict | str) -> dict:
+    """A schedule from the config as a plain dict: `linear_down` -> {"type": "linear_down"}."""
+    if isinstance(spec, str):
+        return {"type": spec}
+    return OmegaConf.to_container(spec) if isinstance(spec, DictConfig) else dict(spec)
+
+
 def make_schedule(spec: DictConfig | dict | str | None) -> Callable | None:
     """Turn a named coefficient schedule into alpha_fn / beta_fn / gamma_fn.
 
@@ -17,9 +24,7 @@ def make_schedule(spec: DictConfig | dict | str | None) -> Callable | None:
     """
     if spec is None:
         return None
-    if isinstance(spec, str):
-        spec = {"type": spec}
-    spec = OmegaConf.to_container(spec) if isinstance(spec, DictConfig) else dict(spec)
+    spec = as_spec(spec)
     kind = spec.pop("type")
 
     # `scale` matters most on gamma. At scale 1 the audio_cond schedule has gamma == alpha
@@ -51,9 +56,8 @@ def waypoint_strength(spec: DictConfig | dict | str | None) -> float:
     """
     if spec is None:
         return 0.0
-    if isinstance(spec, str):
-        spec = {"type": spec}
-    spec = OmegaConf.to_container(spec) if isinstance(spec, DictConfig) else dict(spec)
+    spec = as_spec(spec)
     if spec.pop("type") != "parabola":
         return 0.0
     return float(spec.pop("scale", 1.0)) * 4.0 * float(spec.pop("c", 0.5))
+

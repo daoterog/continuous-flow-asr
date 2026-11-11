@@ -54,11 +54,20 @@
 #   notau      schedule.enabled=false       t drawn uniformly. For a sigma too small for the
 #                                           simulated curve, which collapses to a step at
 #                                           t = 0.5 once the field decodes deterministically
+#   lvar<l>    flow.learned_noise           the source's sigma learned per position and token
+#                                           off mu's trunk, held to its target by a KL of
+#                                           weight l (0: none, the paper's collapse). Target
+#                                           1 as in the paper; carries uniform_floor 0.01, so
+#                                           the tau rebuilt at a shrunken sigma still starts
+#                                           at t = 0
+#   lvartarget<x>                           that target sigma_0; put it after lvar<l>
 #
 # Arms join knobs with `+` (sigma0.5+floor0.1); `control` is the recipe as is.
 #
 # Round 1, each knob alone (6 runs, 3 jobs):
 #   control floor0.3 floor0.4 sigma0.7 sigma0.5 sigma0.4
+# Learned source variance (the control is why-control-e100-s5, y9hyu9p0, at seed 5):
+#   ROUND=lvar1 SEEDS=5 ARMS="lvar0.1 lvar0.1+lvartarget0.7 lvar0.1+lvartarget0.4 lvar0+lvartarget0.4" SUBMIT=1 ...
 # Regularisation screen:
 #   ROUND=reg1 ARMS="control drop0.2 mask mask+drop0.2 adrop0.2 adroplin0.4" SUBMIT=1 ...
 # Round 2, the winners combined, e.g. with sigma 0.5 and floor 0.3 winning:
@@ -123,6 +132,8 @@ knob_override() {
         draft*)  echo "train.draft_corruption={\"p\":${1#draft},\"source\":\"uniform\"}" ;;
         adroplin*) echo "train.audio_dropout={\"p\":${1#adroplin},\"schedule\":\"linear\"}" ;;
         adrop*)  echo "train.audio_dropout={\"p\":${1#adrop},\"schedule\":\"constant\"}" ;;
+        lvartarget*) echo "flow.learned_noise.target_scale=${1#lvartarget}" ;;
+        lvar*)   echo "flow.learned_noise={\"kl_weight\":${1#lvar},\"target_scale\":1.0,\"min_scale\":0.05} schedule.uniform_floor=0.01" ;;
         mask)    echo "train.audio_mask={\"time_masks\":2,\"time_width\":0.1,\"feature_masks\":2,\"feature_width\":0.1}" ;;
         *) echo "unknown knob: $1" >&2; exit 1 ;;
     esac

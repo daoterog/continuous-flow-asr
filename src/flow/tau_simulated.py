@@ -81,9 +81,12 @@ class SimulatedTau(TauScheduler):
         del datamodule
         if model.gamma_fn is not None and self.mu_accuracy is None:
             return None, "tau refresh skipped: the simulated curve needs mu's accuracy"
+        # The whole noise coefficient, sigma * alpha(t), at the sigma the source has now
+        # (`FlowMatching.tau_noise_fn`). A flow map folds sigma into its alpha.
+        alpha_fn = model.tau_noise_fn() if hasattr(model, "tau_noise_fn") else model.alpha_fn
         return TimeReparametrization.exact(
             model.vocab_size,
-            alpha_fn=model.alpha_fn,
+            alpha_fn=alpha_fn,
             beta_fn=model.beta_fn,
             gamma_fn=model.gamma_fn,
             mu_accuracy=0.0 if self.mu_accuracy is None else self.mu_accuracy,

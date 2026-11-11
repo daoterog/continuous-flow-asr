@@ -186,12 +186,18 @@ def sample_tokens(
     time_grid: np.ndarray | list[float] | None = None,
     cfg_strength: float = 1.0,
     trace: list | None = None,
+    sigma: float | torch.Tensor = 1.0,
 ) -> torch.Tensor:
     """Integrate from noise to (B, canvas_len) token ids.
 
     `time_grid` is what the denoiser's time input reads at each point of `grid`; None
     feeds it `grid` itself. See `denoiser_times`. `cfg_strength` guides every step; see
     `guided_logits`. `trace` collects every step's reading; see `_record`.
+
+    `alpha_fn` is the noise term's time shape and `sigma` the source's scale
+    (`src.flow.source`): a float, or a learned (B, L, V) tensor. The state's noise term is
+    `(alpha(t) * sigma) * x0` with x0 ~ N(0, I), so a fixed sigma gives the numbers it gave
+    when it was folded into alpha, and callers that still fold it there pass sigma = 1.
 
     `waypoint` is unused — this integrator never forms the drift, it rebuilds the
     interpolant from gamma_fn directly — and is accepted only so the two samplers share one
@@ -203,7 +209,7 @@ def sample_tokens(
     )
 
     def state(t: float, x1: torch.Tensor | None) -> torch.Tensor:
-        out = alpha_fn(t) * x0
+        out = (alpha_fn(t) * sigma) * x0
         if x1 is not None:
             out = out + beta_fn(t) * x1
         if gamma_fn is not None and mu is not None:
@@ -254,10 +260,13 @@ def sample_tokens_euler(
     time_grid: np.ndarray | list[float] | None = None,
     cfg_strength: float = 1.0,
     trace: list | None = None,
+    sigma: float | torch.Tensor = 1.0,
 ) -> torch.Tensor:
     """Algorithm 6: Euler-step the drift, then decode the final state.
 
-    `time_grid`, `cfg_strength` and `trace` as in `sample_tokens`.
+    `time_grid`, `cfg_strength`, `trace`, `alpha_fn` and `sigma` as in `sample_tokens`.
+    The drift (D - x)/(1 - t) holds per coordinate whatever sigma is, so a learned one
+    changes only the starting state.
 
     Differs from `sample_tokens` in both halves of the loop. The state is advanced by
     `x + (t_next - t) b` instead of being rebuilt from x0 at the new time, and the
@@ -271,7 +280,7 @@ def sample_tokens_euler(
     )
     times = [float(t) for t in grid]
 
-    x_t = alpha_fn(times[0]) * x0
+    x_t = (alpha_fn(times[0]) * sigma) * x0
     if x1_init is not None:
         x_t = x_t + beta_fn(times[0]) * x1_init
     if gamma_fn is not None and mu is not None:

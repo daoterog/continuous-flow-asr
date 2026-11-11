@@ -21,6 +21,7 @@ from src.flow.coefficients import make_schedule, waypoint_strength
 from src.flow.sampler import sample_tokens, sample_tokens_euler
 from src.flow.sampling_probe import SamplingProbe
 from src.flow.schedule import TimeReparametrization, degenerate_tau
+from src.flow.source import SourceNoise
 from src.metrics.utils import is_binned
 from src.models import build_audio_decoder, build_denoiser
 from src.reporting import MetricReporting
@@ -114,15 +115,23 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
             val_every=int(cfg.train.get("check_val_every_n_epoch", 1)),
         )
 
+        flow = cfg.flow
+        # sigma lives here and nowhere else; alpha below is the time shape alone.
+        self.source = SourceNoise(flow)
         self.denoiser = build_denoiser(cfg.model.denoiser, vocab_size)
         self.mu_nn = (
-            build_audio_decoder(cfg.model.audio_decoder, vocab_size, canvas_len)
+            build_audio_decoder(
+                cfg.model.audio_decoder, vocab_size, canvas_len,
+                noise_head=self.source.learned,
+            )
             if cfg.model.get("audio_decoder") is not None
             else None
         )
+        # The epoch's mean sigma, which the next simulated tau is built at.
+        self.noise_tau_sigma = self.source.sigma0
+        self._sigma_sum, self._sigma_n = 0.0, 0
 
-        flow = cfg.flow
-        self.alpha_fn = make_schedule(flow.get("alpha", "linear_down"))
+        self.alpha_fn = self.source.shape
         self.beta_fn = make_schedule(flow.get("beta", "linear_up"))
         self.gamma_fn = make_schedule(flow.get("gamma"))
         # The 4c of the drift's waypoint term, 0 for the variants without one.
@@ -153,6 +162,22 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
                 "flow.gamma is set but model.audio_decoder is absent — the third "
                 "interpolant term needs a mu to weight"
             )
+        if self.source.learned:
+            if self.mu_nn is None:
+                raise ValueError(
+                    "flow.learned_noise reads sigma off mu's network, but "
+                    "model.audio_decoder is absent"
+                )
+            # A learned sigma can shrink, and a simulated tau rebuilt at a small sigma
+            # starts above t = 0 and squeezes the draw into a sliver (configs/base.yaml,
+            # `allow_degenerate_tau`): the source state would stop being trained. Mixing in
+            # a uniform floor restarts the draw at 0 at any sigma.
+            if cfg.schedule.enabled and float(cfg.schedule.get("uniform_floor", 0.0)) <= 0.0:
+                raise ValueError(
+                    "flow.learned_noise needs schedule.uniform_floor > 0 (0.01 is enough): "
+                    "the tau rebuilt at a shrunken sigma would otherwise start above t = 0 "
+                    "and the source state would stop being trained"
+                )
 
         if cfg.train.get("compile"):
             mode = cfg.train.get("compile_mode", "default")
@@ -179,6 +204,29 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
     def components(self) -> tuple[str, ...]:
         """What `save_components` writes: both trained models, `mu_nn` when there is one."""
         return COMPONENTS
+
+    def mu_and_sigma(
+        self, audio: torch.Tensor
+    ) -> tuple[torch.Tensor | None, float | torch.Tensor]:
+        """The logits of mu (None without an audio decoder), and the source's sigma.
+
+        sigma is the fixed float, or under `flow.learned_noise` the (B, L, V) tensor read
+        off mu's noise head (`SourceNoise.sigma`) in the same trunk pass as the logits.
+        """
+        if self.mu_nn is None:
+            return None, self.source.sigma()
+        if not self.source.learned:
+            return self.mu_nn(audio), self.source.sigma()
+        logits, z = self.mu_nn(audio, with_noise=True)
+        return logits, self.source.sigma(z)
+
+    def tau_noise_fn(self):  # noqa: ANN201 - a schedule callable
+        """The noise coefficient sigma * alpha(t) the simulated tau is built at.
+
+        sigma_0 for a fixed source; for a learned one, the last epoch's mean sigma, so the
+        curve follows where the source has moved.
+        """
+        return self.source.coefficient(self.noise_tau_sigma)
 
     def on_fit_start(self) -> None:
         """Declare the histogram panels' step metric before anything is logged."""
@@ -236,6 +284,12 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
         loss, out, t = self.flow_step(batch)
         self._check_finite(loss, out, split)
         self.log_losses(loss, out, split, batch_size=batch["tokens"].size(0))
+        noise = out.pop("noise", None)
+        if noise is not None:
+            mean_sigma = self.log_noise(noise, split, batch_size=batch["tokens"].size(0))
+            if split == "train":
+                self._sigma_sum += mean_sigma
+                self._sigma_n += 1
         self.update_metrics(out, batch["tokens"], t, split)
         return loss
 
@@ -250,8 +304,8 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
 
         out = {}
         mu = None
-        if self.mu_nn is not None:
-            mu_logits = self.mu_nn(audio)
+        mu_logits, sigma = self.mu_and_sigma(audio)
+        if mu_logits is not None:
             mu = F.softmax(mu_logits, dim=-1)
             mu_loss, mu_loss_per_seq = self.sequence_ce(mu_logits, tokens)
             out["mu"] = {
@@ -277,6 +331,11 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
                 draft_logits = torch.where(
                     dropped[:, None, None], torch.zeros_like(mu_logits), mu_logits
                 )
+            if self.source.learned:
+                # sigma is read off the audio too, so a dropped row takes sigma_0.
+                sigma = torch.where(
+                    dropped[:, None, None], torch.full_like(sigma, self.source.sigma0), sigma
+                )
 
         field_x1 = x1
         if self.training:
@@ -287,7 +346,7 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
                 self.cfg.train.get("draft_corruption"),
                 mu_logits=draft_logits,
             )
-        i_t = self.make_interpolant(x1=field_x1, t=t, mu=prior)
+        i_t = self.make_interpolant(x1=field_x1, t=t, mu=prior, sigma=sigma)
 
         # `uniform` hands the denoiser the draw itself, as FLM does: at large V the t that
         # matters sits in a narrow band near 1, where a sinusoidal embedding barely moves.
@@ -306,6 +365,14 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
         loss = out["denoiser"]["loss"]
         if self.mu_nn is not None:
             loss = loss + self.mu_loss_weight * out["mu"]["loss"]
+        if self.source.learned:
+            kl = self.source.kl(sigma)
+            loss = loss + self.source.kl_weight * kl
+            out["noise"] = {
+                "kl": kl.detach(),
+                "sigma": sigma.detach(),
+                "real": tokens != self.pad_id,
+            }
         return loss, out, t
 
     def sequence_ce(
@@ -352,11 +419,23 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
         return u[torch.randperm(n, device=self.device)]
 
     def make_interpolant(
-        self, x1: torch.Tensor, t: torch.Tensor, mu: torch.Tensor | None = None
+        self,
+        x1: torch.Tensor,
+        t: torch.Tensor,
+        mu: torch.Tensor | None = None,
+        sigma: float | torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """I_t = alpha(t) x0 + beta(t) x1 [+ gamma(t) mu], broadcast over (B, L, V)."""
+        """I_t = alpha(t) (sigma x0) + beta(t) x1 [+ gamma(t) mu], broadcast over (B, L, V).
+
+        x0 ~ N(0, I). `sigma` is the source's (`mu_and_sigma`): a float, or a learned
+        (B, L, V) tensor; None takes sigma_0. It is folded into alpha(t) before x0, as
+        `src.flow.source` describes.
+        """
+        if sigma is None:
+            sigma = self.source.sigma0
         x0 = torch.randn_like(x1)
-        i_t = self.alpha_fn(t)[:, None, None] * x0 + self.beta_fn(t)[:, None, None] * x1
+        noise_coef = self.alpha_fn(t)[:, None, None] * sigma
+        i_t = noise_coef * x0 + self.beta_fn(t)[:, None, None] * x1
         if self.gamma_fn is not None and mu is not None:
             if self.stop_grad_mu:
                 mu = mu.detach()
@@ -373,6 +452,10 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
         self.log_metrics("train")
         self.tau_scheduler.observe_mu(self.metrics)
         self.log_mu_accuracy()
+        if self._sigma_n:
+            self.noise_tau_sigma = self._sigma_sum / self._sigma_n
+            self._sigma_sum, self._sigma_n = 0.0, 0
+            self.log_noise_tau_sigma()
 
     def on_validation_epoch_start(self) -> None:
         """Clear the val accumulators before the pass fills them."""
@@ -465,8 +548,10 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
         if cfg_strength is None:
             cfg_strength = float(self.cfg.get("sampling", {}).get("cfg_strength", 1.0))
         mu = None
-        if self.mu_nn is not None:
-            mu = F.softmax(self.mu_nn(audio), dim=-1)
+        mu_logits, sigma = self.mu_and_sigma(audio)
+        if mu_logits is not None:
+            mu = F.softmax(mu_logits, dim=-1)
+
         if init_from_mu is None:
             init_from_mu = bool(self.cfg.get("sampling", {}).get("init_from_mu", False))
 
@@ -503,6 +588,7 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
             time_grid=u_grid if self.time_input == "uniform" else None,
             cfg_strength=cfg_strength,
             trace=trace,
+            sigma=sigma,
         )
 
     def reference_reparam(self) -> TimeReparametrization:
@@ -518,7 +604,7 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
             accuracy = float(self.cfg.schedule.get("mu_accuracy", 0.0))
         return TimeReparametrization.exact(
             self.vocab_size,
-            alpha_fn=make_schedule("linear_down"),
+            alpha_fn=self.source.coefficient(1.0),
             beta_fn=self.beta_fn,
             gamma_fn=self.gamma_fn,
             mu_accuracy=accuracy,

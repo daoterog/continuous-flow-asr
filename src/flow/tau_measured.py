@@ -195,12 +195,9 @@ class MeasuredTau(TauScheduler):
                 tokens = tokens_all[i : i + chunk].to(model.device)
                 t = t_all[i : i + chunk].to(model.device)
                 x1 = F.one_hot(tokens, model.vocab_size).float()
-                mu = (
-                    F.softmax(model.mu_nn(audio), dim=-1)
-                    if model.mu_nn is not None
-                    else None
-                )
-                i_t = model.make_interpolant(x1=x1, t=t, mu=mu)
+                mu_logits, sigma = model.mu_and_sigma(audio)
+                mu = F.softmax(mu_logits, dim=-1) if mu_logits is not None else None
+                i_t = model.make_interpolant(x1=x1, t=t, mu=mu, sigma=sigma)
                 # The sweep picks t, not u, so a `uniform` denoiser is fed u back off the
                 # curve it is currently trained against.
                 time = (

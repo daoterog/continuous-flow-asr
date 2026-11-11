@@ -30,10 +30,13 @@ class AudioDecoder(nn.Module):
         n_blocks: int,
         d_ff: int | None = None,
         dropout: float = 0.0,
+        noise_head: bool = False,
     ) -> None:
         """Build the learned canvas queries and the self/cross/FF stack over them.
 
-        d_ff defaults to 4 * hidden, the usual transformer ratio.
+        d_ff defaults to 4 * hidden, the usual transformer ratio. `noise_head` adds a second
+        head off the same trunk for `flow.learned_noise`: one raw value per canvas position
+        and token, from which the flow sets the source's noise scale there.
         """
         super().__init__()
         d_ff = d_ff if d_ff is not None else 4 * hidden
@@ -74,9 +77,25 @@ class AudioDecoder(nn.Module):
         )
         self.norm_out = nn.LayerNorm(hidden)
         self.head = nn.Linear(hidden, vocab_size)
+        self.noise_head = None
+        if noise_head:
+            # Zero output, so the scale starts at exactly its target and the run starts as
+            # the fixed-sigma one. Only this last layer is zeroed: its weight's gradient is
+            # the error times the trunk's features, which are not zero, so it learns from
+            # the first step.
+            self.noise_head = nn.Linear(hidden, vocab_size)
+            nn.init.zeros_(self.noise_head.weight)
+            nn.init.zeros_(self.noise_head.bias)
 
-    def forward(self, audio: torch.Tensor) -> torch.Tensor:
-        """(B, frames, audio_dim) -> (B, canvas_len, vocab_size) logits."""
+    def forward(
+        self, audio: torch.Tensor, with_noise: bool = False
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """(B, frames, audio_dim) -> (B, canvas_len, vocab_size) logits.
+
+        `with_noise` also returns the noise head's raw output, of the same shape, from the
+        same trunk pass. A flag rather than a second method so `torch.compile`, which wraps
+        `forward`, covers it.
+        """
         a = self.audio_proj(audio)
         x = self.queries.expand(audio.size(0), -1, -1)
         for b in self.blocks:
@@ -85,11 +104,14 @@ class AudioDecoder(nn.Module):
             h = b["n2"](x)
             x = x + b["d2"](b["xa"](h, a, a, need_weights=False)[0])
             x = x + b["d3"](b["ff"](b["n3"](x)))
-        return self.head(self.norm_out(x))
+        h = self.norm_out(x)
+        if with_noise:
+            return self.head(h), self.noise_head(h)
+        return self.head(h)
 
 
 def build_audio_decoder(
-    cfg: DictConfig | dict, vocab_size: int, canvas_len: int
+    cfg: DictConfig | dict, vocab_size: int, canvas_len: int, noise_head: bool = False
 ) -> AudioDecoder:
     """Build mu_psi from the `model.audio_decoder` node of the config.
 
@@ -122,4 +144,5 @@ def build_audio_decoder(
         n_blocks=cfg.n_blocks,
         d_ff=cfg.d_ff,
         dropout=cfg.dropout,
+        noise_head=noise_head,
     )

@@ -42,6 +42,7 @@ from src.data.spec import resolve_role
 from src.flops import FlopCount
 from src.flow.coefficients import make_schedule
 from src.flow.schedule import TimeReparametrization, degenerate_tau
+from src.flow.source import SourceNoise
 from src.flow_mapping import DISTILL_GROUPS, FlowMapping
 from src.flow_matching import FlowMatching
 from src.mu_only import MuOnly
@@ -318,7 +319,7 @@ def build_time_reparam(dm: AudioFeatureDataModule, cfg: DictConfig) -> TimeRepar
     gamma_fn = make_schedule(cfg.flow.get("gamma"))
     reparam = TimeReparametrization.exact(
         dm.vocab_size,
-        alpha_fn=make_schedule(cfg.flow.get("alpha", "linear_down")),
+        alpha_fn=SourceNoise(cfg.flow).coefficient(),
         beta_fn=make_schedule(cfg.flow.get("beta", "linear_up")),
         gamma_fn=gamma_fn,
         mu_accuracy=float(cfg.schedule.get("mu_accuracy", 0.0)),

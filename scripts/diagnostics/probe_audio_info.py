@@ -112,7 +112,8 @@ def probe(model: FlowMatching, loader: Iterable[dict], n_utts: int, seed: int) -
         tally.reals += float(real.sum())
         x1 = F.one_hot(tokens, model.vocab_size).float()
 
-        mu = F.softmax(model.mu_nn(audio).float(), dim=-1)
+        mu_logits, source_sigma = model.mu_and_sigma(audio)
+        mu = F.softmax(mu_logits.float(), dim=-1)
         tally.add("mu", mu.argmax(-1), tokens, real)
         peak += float(mu.max(-1).values[real].sum())
         on_target += float(mu.gather(-1, tokens[..., None]).squeeze(-1)[real].sum())
@@ -129,7 +130,7 @@ def probe(model: FlowMatching, loader: Iterable[dict], n_utts: int, seed: int) -
         for t in TS:
             tt = torch.full((tokens.size(0),), t, device=model.device)
             time = model.time_reparam.u_of(tt) if model.time_input == "uniform" else tt
-            a, b = model.alpha_fn(t), model.beta_fn(t)
+            a, b = model.alpha_fn(t) * source_sigma, model.beta_fn(t)
             g = model.gamma_fn(t) if model.gamma_fn is not None else 0.0
             for name, prior in (
                 ("denoiser", mu),
