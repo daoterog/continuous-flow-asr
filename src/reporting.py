@@ -225,30 +225,47 @@ class MetricReporting:
                         self.log(f"{key}/wer", wer, batch_size=n_utts)
                         self.log(f"{key}/cfg", w, batch_size=n_utts)
 
-    def log_noise(self, noise: dict, split: str, batch_size: int) -> float:
-        """Log how a learned sigma sits on one batch; return its mean.
+    def log_noise(self, noise: dict, split: str, batch_size: int) -> torch.Tensor:
+        """Log how the learned presets sit on one batch; return the mean sigma, on the GPU.
 
-        `noise` is the flow step's record under `flow.learned_noise`: the (B, L, V) sigma,
-        the real-token mask, and the KL that holds sigma to sigma_0. Over real positions
-        only — pads carry no target. `noise_at_floor` is the share within 1% of
-        `min_scale`, which says whether that floor ever binds.
+        `noise` is the flow step's record under `flow.learned_noise`, over real positions
+        only (pads carry no target):
+          * `noise_preset_<s>` the share of positions on preset s — how the choice spreads;
+          * `noise_sigma_mean` the mean sigma they chose;
+          * `noise_entropy` the head's mean entropy, in nats: near 0 a settled choice, near
+            log K one it has not made;
+          * `noise_kl` the expected KL that holds the choice to sigma_0.
+        Nothing here reads back to the host: every value stays a tensor until the epoch end.
         """
-        vals = noise["sigma"][noise["real"]].float().flatten()
-        # torch.quantile refuses inputs past 2^24 elements; a fixed-stride subsample is
-        # plenty for two percentiles.
-        sub = vals[:: max(1, vals.numel() // 200_000)]
-        floor = self.source.min_scale
+        real = noise["real"]
+        n = real.float().sum().clamp_min(1.0)
+        probs = noise["probs"][real]
         stats = {
             "kl": noise["kl"],
-            "sigma_mean": vals.mean(),
-            "sigma_p10": torch.quantile(sub, 0.1),
-            "sigma_p90": torch.quantile(sub, 0.9),
-            "at_floor": (vals <= 1.01 * floor).float().mean() if floor > 0 else vals.new_zeros(()),
+            "sigma_mean": noise["sigma"].squeeze(-1)[real].float().mean(),
+            "entropy": -(probs * probs.clamp_min(1e-12).log()).sum(dim=-1).mean(),
         }
+        chosen = noise["preset"][real]
+        for k, scale in enumerate(self.source.scales):
+            stats[f"preset_{scale:g}"] = (chosen == k).float().sum() / n
         for key, value in stats.items():
             self.log(f"noise_{key}/{split}", value, on_step=False, on_epoch=True,
                      batch_size=batch_size)
-        return float(stats["sigma_mean"])
+        # A tensor, not a float: reading it back every step would stall the GPU on a sync.
+        return stats["sigma_mean"]
+
+    def log_schedule(self, schedule: dict, split: str, batch_size: int) -> None:
+        """Log where per-utterance flow times land: their quantiles over the batch's rows.
+
+        `tau/rows_t_q*` is comparable to the run-wide curve's `tau/t_q*`, and
+        `tau/rows_t_std` is how far apart the utterances' curves put their draws.
+        """
+        t = schedule["t"].float()
+        stats = {f"rows_t_q{int(q * 100)}": torch.quantile(t, q) for q in (0.1, 0.5, 0.9)}
+        stats["rows_t_std"] = t.std()
+        for key, value in stats.items():
+            self.log(f"tau/{key}_{split}", value, on_step=False, on_epoch=True,
+                     batch_size=batch_size)
 
     def log_noise_tau_sigma(self) -> None:
         """The sigma the next simulated tau is built at: the last epoch's mean."""

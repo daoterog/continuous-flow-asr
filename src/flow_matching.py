@@ -22,6 +22,7 @@ from src.flow.sampler import sample_tokens, sample_tokens_euler
 from src.flow.sampling_probe import SamplingProbe
 from src.flow.schedule import TimeReparametrization, degenerate_tau
 from src.flow.source import SourceNoise
+from src.flow.tau_table import TauTable
 from src.metrics.utils import is_binned
 from src.models import build_audio_decoder, build_denoiser
 from src.reporting import MetricReporting
@@ -29,6 +30,13 @@ from src.reporting import MetricReporting
 SAMPLERS = {"interpolant": sample_tokens, "euler": sample_tokens_euler}
 TIME_INPUTS = ("reparametrized", "uniform")
 LOSS_REDUCTIONS = ("sequence", "token")
+
+
+def _interp(t: torch.Tensor, ts: torch.Tensor, rows: torch.Tensor) -> torch.Tensor:
+    """(B,) each row of `rows`, sampled on the grid `ts`, read at the scalar t."""
+    hi = torch.searchsorted(ts, t.reshape(1)).clamp(1, ts.numel() - 1)
+    w = ((t - ts[hi - 1]) / (ts[hi] - ts[hi - 1])).clamp(0.0, 1.0)
+    return rows[:, hi - 1].squeeze(1) * (1 - w) + rows[:, hi].squeeze(1) * w
 
 
 def token_weights(
@@ -122,7 +130,8 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
         self.mu_nn = (
             build_audio_decoder(
                 cfg.model.audio_decoder, vocab_size, canvas_len,
-                noise_head=self.source.learned,
+                noise_presets=self.source.num_presets if self.source.learned else 0,
+                noise_init=self.source.init_index,
             )
             if cfg.model.get("audio_decoder") is not None
             else None
@@ -162,22 +171,33 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
                 "flow.gamma is set but model.audio_decoder is absent — the third "
                 "interpolant term needs a mu to weight"
             )
-        if self.source.learned:
-            if self.mu_nn is None:
-                raise ValueError(
-                    "flow.learned_noise reads sigma off mu's network, but "
-                    "model.audio_decoder is absent"
-                )
-            # A learned sigma can shrink, and a simulated tau rebuilt at a small sigma
-            # starts above t = 0 and squeezes the draw into a sliver (configs/base.yaml,
-            # `allow_degenerate_tau`): the source state would stop being trained. Mixing in
-            # a uniform floor restarts the draw at 0 at any sigma.
-            if cfg.schedule.enabled and float(cfg.schedule.get("uniform_floor", 0.0)) <= 0.0:
-                raise ValueError(
-                    "flow.learned_noise needs schedule.uniform_floor > 0 (0.01 is enough): "
-                    "the tau rebuilt at a shrunken sigma would otherwise start above t = 0 "
-                    "and the source state would stop being trained"
-                )
+        if self.source.learned and self.mu_nn is None:
+            raise ValueError(
+                "flow.learned_noise reads sigma off mu's network, but "
+                "model.audio_decoder is absent"
+            )
+        # One time curve per utterance, from its own sigma presets and mu's confidence
+        # (`src.flow.tau_table`), in place of the run-wide simulated tau.
+        self.per_utterance = bool(cfg.schedule.get("per_utterance", False))
+        self.floor = float(cfg.schedule.get("uniform_floor", 0.0))
+        self.tau_table = None
+        if self.per_utterance:
+            if self.mu_nn is None or self.gamma_fn is None:
+                raise ValueError("schedule.per_utterance reads mu's confidence; it needs mu")
+            self.tau_table = TauTable(
+                vocab_size, self.alpha_fn, self.beta_fn, self.gamma_fn, self.source.scales
+            )
+        # A small sigma's curve starts above t = 0 and squeezes the draw into a sliver
+        # (configs/base.yaml, `allow_degenerate_tau`), and the source state stops being
+        # trained. A learned sigma can pick the smallest preset, and a per-utterance curve
+        # can be any row's; mixing in a uniform floor restarts the draw at 0 either way.
+        if (self.source.learned or self.per_utterance) and cfg.schedule.enabled \
+                and self.floor <= 0.0:
+            raise ValueError(
+                "flow.learned_noise and schedule.per_utterance need schedule.uniform_floor "
+                "> 0 (0.01 is enough): a curve at a small sigma would otherwise start above "
+                "t = 0 and the source state would stop being trained"
+            )
 
         if cfg.train.get("compile"):
             mode = cfg.train.get("compile_mode", "default")
@@ -193,7 +213,11 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
             tokenizer,
             pad_id,
             vocab_map,
-            time_reparam=self.time_reparam,
+            # Per-utterance flow times share no quantiles; those runs bin on u instead,
+            # whose edges are uniform (`flow_step`).
+            time_reparam=(
+                TimeReparametrization.identity() if self.per_utterance else self.time_reparam
+            ),
             loss_bins=cfg.metrics.get("loss_bins", 10),
             perr_bins=cfg.metrics.get("perr_bins", 10),
             wer_bins=OmegaConf.to_container(cfg.metrics.get("wer_bins", {})) or None,
@@ -205,20 +229,53 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
         """What `save_components` writes: both trained models, `mu_nn` when there is one."""
         return COMPONENTS
 
+    def mu_and_noise(
+        self, audio: torch.Tensor
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """The logits of mu and of the noise head's presets, from one trunk pass.
+
+        Either is None when the run has no audio decoder or no learned noise.
+        """
+        if self.mu_nn is None:
+            return None, None
+        if not self.source.learned:
+            return self.mu_nn(audio), None
+        return self.mu_nn(audio, with_noise=True)
+
+    def choose_sigma(
+        self, noise_logits: torch.Tensor | None, shape: tuple[int, int], training: bool
+    ) -> tuple[float | torch.Tensor, torch.Tensor]:
+        """(sigma, (B, L) preset index): the learned choice, or sigma_0 on preset 0."""
+        if noise_logits is None:
+            return self.source.sigma(), torch.zeros(shape, dtype=torch.long, device=self.device)
+        sigma, onehot = self.source.choose(noise_logits, training)
+        return sigma, onehot.argmax(dim=-1)
+
     def mu_and_sigma(
         self, audio: torch.Tensor
     ) -> tuple[torch.Tensor | None, float | torch.Tensor]:
         """The logits of mu (None without an audio decoder), and the source's sigma.
 
-        sigma is the fixed float, or under `flow.learned_noise` the (B, L, V) tensor read
-        off mu's noise head (`SourceNoise.sigma`) in the same trunk pass as the logits.
+        sigma is the fixed float, or under `flow.learned_noise` the (B, L, 1) tensor of
+        each position's most likely preset — what inference samples from.
         """
-        if self.mu_nn is None:
-            return None, self.source.sigma()
-        if not self.source.learned:
-            return self.mu_nn(audio), self.source.sigma()
-        logits, z = self.mu_nn(audio, with_noise=True)
-        return logits, self.source.sigma(z)
+        mu_logits, noise_logits = self.mu_and_noise(audio)
+        if noise_logits is None:
+            return mu_logits, self.source.sigma()
+        return mu_logits, self.source.choose(noise_logits, training=False)[0]
+
+    def utterance_curves(self, mu: torch.Tensor, preset: torch.Tensor) -> torch.Tensor:
+        """(B, T) per-utterance u = tau_i(t) on the table's t grid (`src.flow.tau_table`).
+
+        `mu` is mu's probabilities, already computed by the caller. Over the positions mu
+        predicts are real — before its first pad — so the curve is a function of the audio
+        alone, the same in training as at inference.
+        """
+        table = self.tau_table.to(self.device)
+        conf, top = mu.max(dim=-1)
+        real = (top != self.pad_id).cumprod(dim=1).bool()
+        real[:, 0] = True
+        return table.curves(table.recovery(preset, conf, real), self.floor)
 
     def tau_noise_fn(self):  # noqa: ANN201 - a schedule callable
         """The noise coefficient sigma * alpha(t) the simulated tau is built at.
@@ -241,7 +298,8 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
         it, or the new edges would be applied to counts gathered under the old ones.
         """
         super().on_train_epoch_start()
-        if self.tau_scheduler.is_due(self):
+        # Per-utterance curves are computed every step; there is no run-wide one to refresh.
+        if not self.per_utterance and self.tau_scheduler.is_due(self):
             self._ema_in()
             try:
                 new, skipped = self.tau_scheduler.refresh(
@@ -281,20 +339,28 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
         return self._step(batch, "train")
 
     def _step(self, batch: dict, split: str) -> torch.Tensor:
-        loss, out, t = self.flow_step(batch)
+        loss, out, binned_on = self.flow_step(batch)
         self._check_finite(loss, out, split)
-        self.log_losses(loss, out, split, batch_size=batch["tokens"].size(0))
+        size = batch["tokens"].size(0)
+        self.log_losses(loss, out, split, batch_size=size)
         noise = out.pop("noise", None)
         if noise is not None:
-            mean_sigma = self.log_noise(noise, split, batch_size=batch["tokens"].size(0))
+            mean_sigma = self.log_noise(noise, split, batch_size=size)
             if split == "train":
                 self._sigma_sum += mean_sigma
                 self._sigma_n += 1
-        self.update_metrics(out, batch["tokens"], t, split)
+        schedule = out.pop("schedule", None)
+        if schedule is not None:
+            self.log_schedule(schedule, split, batch_size=size)
+        self.update_metrics(out, batch["tokens"], binned_on, split)
         return loss
 
     def flow_step(self, batch: dict) -> tuple[torch.Tensor, dict, torch.Tensor]:
-        """One forward pass: the objective, the per-model records, and the t that drew it."""
+        """One forward pass: the objective, the per-model records, and the value it bins on.
+
+        That is the flow time t, or under `schedule.per_utterance` the draw u: each row's t
+        then comes off its own curve, and only u means the same thing across rows.
+        """
         audio = batch["audio"].float()
         if self.training:
             # mu sees the masked audio too: the mask is part of the data, not of the model.
@@ -304,7 +370,9 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
 
         out = {}
         mu = None
-        mu_logits, sigma = self.mu_and_sigma(audio)
+        mu_logits, noise_logits = self.mu_and_noise(audio)
+        # One preset per position: a Gumbel-softmax sample in training, the argmax in eval.
+        sigma, preset = self.choose_sigma(noise_logits, tokens.shape, self.training)
         if mu_logits is not None:
             mu = F.softmax(mu_logits, dim=-1)
             mu_loss, mu_loss_per_seq = self.sequence_ce(mu_logits, tokens)
@@ -315,7 +383,13 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
             }
 
         u = self.draw_u(tokens.size(0))
-        t = self.time_reparam.t_of(u)
+        if self.per_utterance:
+            # Each row's t off its own curve, built from the very presets that make its
+            # field below. Off the undropped mu: a dropped row's curve is not rebuilt.
+            with torch.no_grad():
+                t = self.tau_table.invert(self.utterance_curves(mu, preset), u)
+        else:
+            t = self.time_reparam.t_of(u)
 
         heard, prior = audio, mu
         draft_logits = mu_logits if self.mu_nn is not None else None
@@ -366,14 +440,19 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
         if self.mu_nn is not None:
             loss = loss + self.mu_loss_weight * out["mu"]["loss"]
         if self.source.learned:
-            kl = self.source.kl(sigma)
+            real = tokens != self.pad_id
+            kl = self.source.kl(noise_logits, real)
             loss = loss + self.source.kl_weight * kl
             out["noise"] = {
                 "kl": kl.detach(),
                 "sigma": sigma.detach(),
-                "real": tokens != self.pad_id,
+                "preset": preset,
+                "probs": noise_logits.detach().float().softmax(dim=-1),
+                "real": real,
             }
-        return loss, out, t
+        if self.per_utterance:
+            out["schedule"] = {"t": t.detach()}
+        return loss, out, (u if self.per_utterance else t)
 
     def sequence_ce(
         self, logits: torch.Tensor, tokens: torch.Tensor
@@ -453,7 +532,8 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
         self.tau_scheduler.observe_mu(self.metrics)
         self.log_mu_accuracy()
         if self._sigma_n:
-            self.noise_tau_sigma = self._sigma_sum / self._sigma_n
+            # The one read back to the host per epoch; the steps only add on the GPU.
+            self.noise_tau_sigma = float(self._sigma_sum / self._sigma_n)
             self._sigma_sum, self._sigma_n = 0.0, 0
             self.log_noise_tau_sigma()
 
@@ -548,20 +628,34 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
         if cfg_strength is None:
             cfg_strength = float(self.cfg.get("sampling", {}).get("cfg_strength", 1.0))
         mu = None
-        mu_logits, sigma = self.mu_and_sigma(audio)
+        mu_logits, noise_logits = self.mu_and_noise(audio)
+        sigma, preset = self.choose_sigma(
+            noise_logits, (audio.size(0), self.canvas_len), training=False
+        )
         if mu_logits is not None:
             mu = F.softmax(mu_logits, dim=-1)
 
         if init_from_mu is None:
             init_from_mu = bool(self.cfg.get("sampling", {}).get("init_from_mu", False))
 
-        if grid == "live":
+        if grid not in ("live", "reference"):
+            raise ValueError(f"sampling grid must be live or reference, got {grid!r}")
+        if self.per_utterance:
+            # Each row on its own curve: equal steps in u, so step k reads u = k/N for every
+            # utterance while its flow time is that utterance's own. The reference grid
+            # keeps the control's shared t and reads each row's own u off its curve.
+            u_rows = self.utterance_curves(mu, preset)
+            if grid == "live":
+                gen_grid, u_grid = self.tau_table.grid(u_rows, num_steps)
+            else:
+                gen_grid, _ = self.reference_reparam().sampling_grid(num_steps)
+                gen_grid = torch.as_tensor(gen_grid, dtype=torch.float32, device=self.device)
+                u_grid = torch.stack([_interp(t, self.tau_table.ts, u_rows) for t in gen_grid], 1)
+        elif grid == "live":
             gen_grid, u_grid = self.time_reparam.sampling_grid(num_steps)
-        elif grid == "reference":
+        else:
             gen_grid, _ = self.reference_reparam().sampling_grid(num_steps)
             u_grid = np.asarray(self.time_reparam.u_of(gen_grid))
-        else:
-            raise ValueError(f"sampling grid must be live or reference, got {grid!r}")
 
         # Algorithm 6 of the paper, or the equivalent-for-affine-gamma rebuild. They agree
         # exactly on linear and audio_cond and differ at O(h^2) on three_term.

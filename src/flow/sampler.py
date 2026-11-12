@@ -61,10 +61,32 @@ def drift(
     variants without the term, so the whole drift is these three lines with no gamma and
     no derivative of it anywhere.
     """
-    velocity = (denoised - x_t) / max(1.0 - t, eps)
+    # Per-row t (a (B, 1, 1) tensor, see `_times`) clamps elementwise; a float as before.
+    gap = (1.0 - t).clamp_min(eps) if torch.is_tensor(t) else max(1.0 - t, eps)
+    velocity = (denoised - x_t) / gap
     if waypoint and mu is not None:
         velocity = velocity + waypoint * (1.0 - t) * mu
     return velocity
+
+
+def _times(grid: np.ndarray | list[float] | torch.Tensor) -> list:
+    """The grid's points: floats for a shared 1-D grid, (B, 1, 1) tensors for a per-row one.
+
+    A (B, N+1) tensor grid gives every row its own flow times (`src.flow.tau_table`).
+    Shaped (B, 1, 1), each point broadcasts through the coefficient functions, the noise
+    scale and the state exactly as a float does, so the samplers' arithmetic is unchanged
+    and a 1-D grid keeps its float path bit for bit.
+    """
+    if torch.is_tensor(grid) and grid.dim() == 2:
+        return [grid[:, k].float().view(-1, 1, 1) for k in range(grid.size(1))]
+    return [float(t) for t in grid]
+
+
+def _time_input(value: float | torch.Tensor, batch: int, device: torch.device) -> torch.Tensor:
+    """The denoiser's (B,) time input from one grid point, shared or per row."""
+    if torch.is_tensor(value):
+        return value.reshape(-1).to(device=device, dtype=torch.float32)
+    return torch.full((batch,), value, device=device, dtype=torch.float32)
 
 
 def denoiser_times(
@@ -77,7 +99,11 @@ def denoiser_times(
     """
     if time_grid is None:
         return times
-    inputs = [float(v) for v in time_grid]
+    if torch.is_tensor(time_grid) and time_grid.dim() == 2:
+        # Per-row inputs: each row's own u at the shared step (`_time_input` takes it).
+        inputs = [time_grid[:, k] for k in range(time_grid.size(1))]
+    else:
+        inputs = [float(v) for v in time_grid]
     if len(inputs) != len(times):
         raise ValueError(
             f"time_grid has {len(inputs)} points but the grid has {len(times)}"
@@ -162,7 +188,7 @@ def _record(trace: list, t: float, x_t: torch.Tensor, logits: torch.Tensor) -> N
     itself reads as before the step is taken. Both are (B, L) ids on the host.
     """
     trace.append({
-        "t": float(t),
+        "t": float(t.mean()) if torch.is_tensor(t) else float(t),
         "pred": logits.argmax(dim=-1).cpu(),
         "state": x_t.argmax(dim=-1).cpu(),
     })
@@ -172,7 +198,7 @@ def _record(trace: list, t: float, x_t: torch.Tensor, logits: torch.Tensor) -> N
 def sample_tokens(
     denoiser: torch.nn.Module,
     audio: torch.Tensor,
-    grid: np.ndarray | list[float],
+    grid: np.ndarray | list[float] | torch.Tensor,
     vocab_size: int,
     canvas_len: int,
     alpha_fn: Callable,
@@ -190,9 +216,11 @@ def sample_tokens(
 ) -> torch.Tensor:
     """Integrate from noise to (B, canvas_len) token ids.
 
-    `time_grid` is what the denoiser's time input reads at each point of `grid`; None
-    feeds it `grid` itself. See `denoiser_times`. `cfg_strength` guides every step; see
-    `guided_logits`. `trace` collects every step's reading; see `_record`.
+    `grid` is 1-D, shared by every row, or a (B, N+1) tensor of per-row flow times (one
+    time curve per utterance, `src.flow.tau_table`). `time_grid` is what the denoiser's
+    time input reads at each point; None feeds it `grid` itself. See `denoiser_times`.
+    `cfg_strength` guides every step; see `guided_logits`. `trace` collects every step's
+    reading; see `_record`.
 
     `alpha_fn` is the noise term's time shape and `sigma` the source's scale
     (`src.flow.source`): a float, or a learned (B, L, V) tensor. The state's noise term is
@@ -216,12 +244,12 @@ def sample_tokens(
             out = out + gamma_fn(t) * mu
         return out
 
-    times = [float(t) for t in grid]
+    times = _times(grid)
     inputs = denoiser_times(times, time_grid)
     x_t = state(times[0], x1_init)
     logits = None
     for step, (t, t_next) in enumerate(pairwise(times)):
-        time = torch.full((batch,), inputs[step], device=audio.device, dtype=torch.float32)
+        time = _time_input(inputs[step], batch, audio.device)
         logits = guided_logits(
             denoiser, x_t, time, audio, cfg_strength,
             _uncond_offset(gamma_fn, mu, t, vocab_size),
@@ -245,7 +273,7 @@ def sample_tokens(
 def sample_tokens_euler(
     denoiser: torch.nn.Module,
     audio: torch.Tensor,
-    grid: np.ndarray | list[float],
+    grid: np.ndarray | list[float] | torch.Tensor,
     vocab_size: int,
     canvas_len: int,
     alpha_fn: Callable,
@@ -278,7 +306,7 @@ def sample_tokens_euler(
     x0 = torch.randn(
         batch, canvas_len, vocab_size, device=audio.device, generator=generator
     )
-    times = [float(t) for t in grid]
+    times = _times(grid)
 
     x_t = (alpha_fn(times[0]) * sigma) * x0
     if x1_init is not None:
@@ -288,7 +316,7 @@ def sample_tokens_euler(
 
     inputs = denoiser_times(times, time_grid)
     for step, (t, t_next) in enumerate(pairwise(times)):
-        time = torch.full((batch,), inputs[step], device=audio.device, dtype=torch.float32)
+        time = _time_input(inputs[step], batch, audio.device)
         logits = guided_logits(
             denoiser, x_t, time, audio, cfg_strength,
             _uncond_offset(gamma_fn, mu, t, vocab_size),

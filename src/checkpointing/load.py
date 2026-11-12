@@ -71,10 +71,17 @@ def load_components(
                 raise ValueError(
                     f"{path.name} exists but the manifest has no model.audio_decoder"
                 )
-            # A run with flow.learned_noise saved mu with its noise head; the weights say so.
+            # A run with flow.learned_noise saved mu with its noise head; the weights say so,
+            # and how many presets it chose between.
+            presets = int(state["noise_head.weight"].size(0)) if "noise_head.weight" in state else 0
+            if presets and presets == manifest.vocab_size:
+                raise ValueError(
+                    f"{path} has a noise head over the vocabulary ({presets} outputs): the "
+                    f"per-coordinate learned sigma, which this code no longer builds"
+                )
             model = build_audio_decoder(
                 model_cfg.audio_decoder, manifest.vocab_size, manifest.canvas_len,
-                noise_head="noise_head.weight" in state,
+                noise_presets=presets,
             )
         elif name == "two_time_denoiser":
             # The same `model.denoiser` node as the one-time model: a two-time denoiser is

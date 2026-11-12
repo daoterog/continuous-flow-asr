@@ -8,10 +8,15 @@ with alpha(t) = 1 - t a pure shape, and sigma owned here. Two kinds of source:
 
   * fixed    sigma is a float, `flow.alpha.scale` (1 when unset). Every run before
              `flow.learned_noise` is this one.
-  * learned  sigma is a (B, L, V) tensor read off mu's network,
-             sigma = sigma_0 (m + (1 - m) exp(z / 2)), m = min_scale / sigma_0, so it starts
-             at exactly sigma_0 when the head's raw output z is 0, never falls to min_scale,
-             and is held to sigma_0 by a variance-only KL (`kl`).
+  * learned  each canvas position picks one of K preset scales (`learned_noise.scales`)
+             from logits off mu's network: a Gumbel-softmax sample in training (hard
+             forward, the softmax's gradient backward), the most likely preset at
+             inference. sigma is (B, L, 1), one value per position, broadcast over the
+             vocabulary. A variance-only KL (`kl`) holds the choice to `target_scale`.
+
+Presets rather than a continuous scale: every position's sigma is then exactly one of K
+values, so its recovery curve is exactly a row of a pre-built table (`src.flow.tau_table`),
+and each utterance's time curve is exact rather than read off an averaged sigma.
 
 Everything that draws the noise — training's interpolant, both samplers, the audio-only
 probe — takes sigma from here and multiplies it into the time coefficient before the draw,
@@ -23,13 +28,16 @@ was folded into alpha. Code that reads the path's noise coefficient as one funct
 from collections.abc import Callable
 
 import torch
+import torch.nn.functional as F
 from omegaconf import DictConfig
 
 from src.flow.coefficients import as_spec, make_schedule
 
+DEFAULT_SCALES = (0.1, 0.2, 0.4, 0.7, 1.0)
+
 
 class SourceNoise:
-    """sigma for a run: a fixed float, or a learned per-coordinate tensor with its KL."""
+    """sigma for a run: a fixed float, or one learned preset per canvas position."""
 
     def __init__(self, flow: DictConfig | dict) -> None:
         """Read the source from the `flow` node; see the module docstring for the two kinds."""
@@ -42,30 +50,62 @@ class SourceNoise:
         self.learned = bool(spec)
         if not self.learned:
             self.sigma0 = fixed_sigma
+            self.scales = (fixed_sigma,)
+            self.init_index = 0
             return
-        self.sigma0 = float(spec.get("target_scale", 1.0))
-        self.kl_weight = float(spec.get("kl_weight", 0.1))
-        self.min_scale = float(spec.get("min_scale", 0.05))
-        if not 0.0 <= self.min_scale < self.sigma0:
+        self.scales = tuple(float(s) for s in (spec.get("scales") or DEFAULT_SCALES))
+        self.sigma0 = float(spec.get("target_scale", 0.4))
+        if self.sigma0 not in self.scales:
             raise ValueError(
-                f"flow.learned_noise.min_scale must be in [0, target_scale), got "
-                f"{self.min_scale} against {self.sigma0}"
+                f"flow.learned_noise.target_scale {self.sigma0} must be one of the scales "
+                f"{list(self.scales)}: the run starts on it"
             )
+        if list(self.scales) != sorted(set(self.scales)) or self.scales[0] <= 0.0:
+            raise ValueError(f"flow.learned_noise.scales must be positive and increasing, got "
+                             f"{list(self.scales)}")
+        self.init_index = self.scales.index(self.sigma0)
+        self.kl_weight = float(spec.get("kl_weight", 0.1))
+        self.temperature = float(spec.get("temperature", 1.0))
+        ratio2 = torch.tensor(self.scales).div(self.sigma0).square()
+        # The variance-only KL(N(mu, s_k^2) || N(mu, sigma_0^2)) of each preset.
+        self._preset_kl = 0.5 * (ratio2 - 1.0 - ratio2.log())
 
-    def sigma(self, z: torch.Tensor | None = None) -> float | torch.Tensor:
-        """The source's sigma: the fixed float, or the learned tensor from the head's `z`."""
-        if not self.learned:
-            return self.sigma0
-        m = self.min_scale / self.sigma0
-        return self.sigma0 * (m + (1.0 - m) * torch.exp(0.5 * z.float().clamp(max=4.0)))
+    @property
+    def num_presets(self) -> int:
+        """K, the presets a position chooses between; 1 for a fixed source."""
+        return len(self.scales)
 
-    def kl(self, sigma: torch.Tensor) -> torch.Tensor:
-        """KL(N(mu, sigma^2) || N(mu, sigma_0^2)), averaged per coordinate.
+    def sigma(self) -> float:
+        """sigma_0: the fixed source's sigma, or the learned source's target."""
+        return self.sigma0
 
-        Variance only: both share mu, so the mean is left free to move toward the target.
+    def choose(
+        self, logits: torch.Tensor, training: bool
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """((B, L, 1) sigma, (B, L, K) one-hot choice) from the head's (B, L, K) logits.
+
+        Training samples the choice by Gumbel-softmax with `hard=True`: the forward pass
+        sees one preset, the backward pass the softmax's gradient. Inference takes the most
+        likely preset, so a sampled transcript does not depend on a coin.
         """
-        ratio2 = (sigma / self.sigma0).square()
-        return 0.5 * (ratio2 - 1.0 - torch.log(ratio2)).mean()
+        logits = logits.float()
+        if training:
+            onehot = F.gumbel_softmax(logits, tau=self.temperature, hard=True)
+        else:
+            onehot = F.one_hot(logits.argmax(dim=-1), self.num_presets).float()
+        scales = torch.tensor(self.scales, device=logits.device)
+        return (onehot * scales).sum(dim=-1, keepdim=True), onehot
+
+    def kl(self, logits: torch.Tensor, real: torch.Tensor) -> torch.Tensor:
+        """The expected preset KL under the head's softmax, averaged over real positions.
+
+        Differentiable through the probabilities, and bounded below by the smallest
+        preset, which is as far as the choice can collapse.
+        """
+        p = logits.float().softmax(dim=-1)
+        per_pos = (p * self._preset_kl.to(p.device)).sum(dim=-1)
+        mask = real.float()
+        return (per_pos * mask).sum() / mask.sum().clamp_min(1.0)
 
     def coefficient(self, sigma: float | None = None) -> Callable:
         """The noise coefficient as one function of t, sigma * alpha(t), at a scalar sigma.

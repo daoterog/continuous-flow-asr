@@ -30,13 +30,15 @@ class AudioDecoder(nn.Module):
         n_blocks: int,
         d_ff: int | None = None,
         dropout: float = 0.0,
-        noise_head: bool = False,
+        noise_presets: int = 0,
+        noise_init: int = 0,
     ) -> None:
         """Build the learned canvas queries and the self/cross/FF stack over them.
 
-        d_ff defaults to 4 * hidden, the usual transformer ratio. `noise_head` adds a second
-        head off the same trunk for `flow.learned_noise`: one raw value per canvas position
-        and token, from which the flow sets the source's noise scale there.
+        d_ff defaults to 4 * hidden, the usual transformer ratio. `noise_presets` K > 0 adds a
+        second head off the same trunk for `flow.learned_noise`: K logits per canvas
+        position, over the preset noise scales that position's source can take
+        (`flow.source.SourceNoise`). `noise_init` is the preset it starts on.
         """
         super().__init__()
         d_ff = d_ff if d_ff is not None else 4 * hidden
@@ -78,22 +80,24 @@ class AudioDecoder(nn.Module):
         self.norm_out = nn.LayerNorm(hidden)
         self.head = nn.Linear(hidden, vocab_size)
         self.noise_head = None
-        if noise_head:
-            # Zero output, so the scale starts at exactly its target and the run starts as
-            # the fixed-sigma one. Only this last layer is zeroed: its weight's gradient is
-            # the error times the trunk's features, which are not zero, so it learns from
-            # the first step.
-            self.noise_head = nn.Linear(hidden, vocab_size)
+        if noise_presets:
+            # Every position starts on `noise_init` with probability ~0.97 (at K = 5), so the
+            # run starts as the fixed-sigma one. Only this last layer is set: its weight's
+            # gradient is the error times the trunk's features, which are not zero, so it
+            # learns from the first step.
+            self.noise_head = nn.Linear(hidden, noise_presets)
             nn.init.zeros_(self.noise_head.weight)
-            nn.init.zeros_(self.noise_head.bias)
+            with torch.no_grad():
+                self.noise_head.bias.zero_()
+                self.noise_head.bias[noise_init] = 5.0
 
     def forward(
         self, audio: torch.Tensor, with_noise: bool = False
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """(B, frames, audio_dim) -> (B, canvas_len, vocab_size) logits.
 
-        `with_noise` also returns the noise head's raw output, of the same shape, from the
-        same trunk pass. A flag rather than a second method so `torch.compile`, which wraps
+        `with_noise` also returns the noise head's (B, canvas_len, K) logits, from the same
+        trunk pass. A flag rather than a second method so `torch.compile`, which wraps
         `forward`, covers it.
         """
         a = self.audio_proj(audio)
@@ -111,7 +115,11 @@ class AudioDecoder(nn.Module):
 
 
 def build_audio_decoder(
-    cfg: DictConfig | dict, vocab_size: int, canvas_len: int, noise_head: bool = False
+    cfg: DictConfig | dict,
+    vocab_size: int,
+    canvas_len: int,
+    noise_presets: int = 0,
+    noise_init: int = 0,
 ) -> AudioDecoder:
     """Build mu_psi from the `model.audio_decoder` node of the config.
 
@@ -144,5 +152,6 @@ def build_audio_decoder(
         n_blocks=cfg.n_blocks,
         d_ff=cfg.d_ff,
         dropout=cfg.dropout,
-        noise_head=noise_head,
+        noise_presets=noise_presets,
+        noise_init=noise_init,
     )

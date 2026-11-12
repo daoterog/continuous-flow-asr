@@ -4,7 +4,9 @@ from typing import TYPE_CHECKING
 
 import torch
 from omegaconf import DictConfig
+from torch.utils.data import Subset
 
+from src.data.collate import make_loader
 from src.metrics import score_samples
 
 if TYPE_CHECKING:
@@ -164,12 +166,22 @@ class SamplingProbe:
             hard = bool(self.cfg.get("hard", False))
             generator = torch.Generator(device=model.device)
             generator.manual_seed(int(self.cfg.get("seed", 0)))
+            # The slice's chunks, in order, read and collated by the eval loader's workers
+            # while the GPU samples the previous one. Collated on the main process, each
+            # chunk of full latents left the GPU idle for as long as it took to read.
+            loader = make_loader(
+                Subset(subset, indices),
+                batch_size=chunk,
+                shuffle=False,
+                collate_fn=datamodule.collate_fn,
+                num_workers=datamodule.eval_num_workers,
+                pin_memory=datamodule.pin_memory,
+            )
             preds, targets = [], []
-            for i in range(0, len(indices), chunk):
-                batch = datamodule.collate_fn([subset[j] for j in indices[i : i + chunk]])
+            for batch in loader:
                 preds.append(
                     model.sample(
-                        batch["audio"].to(model.device).float(),
+                        batch["audio"].to(model.device, non_blocking=True).float(),
                         num_steps,
                         hard=hard,
                         method=method,
