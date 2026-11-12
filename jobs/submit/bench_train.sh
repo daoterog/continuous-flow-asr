@@ -13,6 +13,8 @@ set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$(dirname "${SCRIPT_DIR}")")"
+# shellcheck source=../common/slurm_guard.sh
+source "${REPO_DIR}/jobs/common/slurm_guard.sh"
 # shellcheck source=../common/budget.sh
 source "${REPO_DIR}/jobs/common/budget.sh"
 
@@ -27,7 +29,7 @@ EST="$(job_sbu "${EXPECTED_S}" 2)"
 echo "expected  : ${EXPECTED_S}s on ${GPUS} GPUs (${CPUS} CPUs, ${MEM_G}G) = ${EST} SBU"
 budget_gate "${EST}"
 
-JOBID="$(cd "${REPO_DIR}" && sbatch --parsable --gpus="${GPUS}" --cpus-per-task="${CPUS}" --mem="${MEM_G}G" \
+JOBID="$(cd "${REPO_DIR}" && guarded_sbatch --parsable --gpus="${GPUS}" --cpus-per-task="${CPUS}" --mem="${MEM_G}G" \
     --export=ALL "${REPO_DIR}/jobs/batch/bench_train.sh")"
 JOBID="${JOBID%%;*}"
 echo "submitted : job ${JOBID} (output in slurm_bench_train_${JOBID}.out)"

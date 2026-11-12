@@ -4,8 +4,8 @@
 #SBATCH --job-name=whisper_feats
 #SBATCH --ntasks=1
 #SBATCH --gpus=1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=18
+#SBATCH --mem=120G
 #SBATCH --time=04:00:00
 # Worst case: one task over all 14 shards of train.clean.100 at the locally measured
 # 8.9 utts/s. An A100 with 16 decode workers is much faster; submit/whisper.sh

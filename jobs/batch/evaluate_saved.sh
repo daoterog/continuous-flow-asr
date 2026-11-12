@@ -14,7 +14,7 @@
 # (scripts/evaluation/evaluate_saved.py): `_best` and `_final` sampled on val and test. A few
 # minutes of sampling, at most ~64 SBU at the 30 min limit.
 #
-#   sbatch --export=ALL,COMPONENTS=runs/<id>/components jobs/batch/evaluate_saved.sh
+#   ./jobs/sbatch.sh --export=ALL,COMPONENTS=runs/<id>/components jobs/batch/evaluate_saved.sh
 #
 # The reloaded `_final` on val must equal the sampled WER the run logged at its last
 # sampling epoch; that is the check this exists for.

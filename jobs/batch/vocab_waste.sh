@@ -4,8 +4,8 @@
 #SBATCH --job-name=vocab_waste
 #SBATCH --ntasks=1
 #SBATCH --gpus=1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=18
+#SBATCH --mem=120G
 #SBATCH --time=00:30:00
 #SBATCH --output=slurm_output_%j.out
 #SBATCH --mail-type=BEGIN,END,FAIL
@@ -14,8 +14,8 @@
 # Measure how much of a full-vocabulary model's output lands on tokens the corpus can
 # never produce. Forward passes only — no training, no sampling — so it is minutes.
 #
-#   sbatch --export=ALL,COMPONENTS=runs/<id>/components jobs/batch/vocab_waste.sh
-#   sbatch --export=ALL,CKPT=runs/.../last.ckpt        jobs/batch/vocab_waste.sh
+#   ./jobs/sbatch.sh --export=ALL,COMPONENTS=runs/<id>/components jobs/batch/vocab_waste.sh
+#   ./jobs/sbatch.sh --export=ALL,CKPT=runs/.../last.ckpt        jobs/batch/vocab_waste.sh
 #
 # Optional env vars:
 #   EVAL_CONFIG   — YAML for the data pipeline (default configs/audio_cond.yaml)

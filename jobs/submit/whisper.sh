@@ -40,6 +40,8 @@ MAX_S=86400                       # 24 h, the gpu partition limit
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$(dirname "${SCRIPT_DIR}")")"
 BATCH_DIR="${REPO_DIR}/jobs/batch"
+# shellcheck source=../common/slurm_guard.sh
+source "${REPO_DIR}/jobs/common/slurm_guard.sh"
 
 # Resolves MODEL and checks it here, on the login node, rather than letting the array
 # queue and then write a second checkpoint's features into the cache.
@@ -94,7 +96,7 @@ echo "trim      : $([[ -n "${NO_TRIM}" ]] && echo "off (full 1500 frames)" || ec
 echo "walltime  : ${WALLTIME}"
 
 # --time here overrides the #SBATCH directive in precompute_whisper.sh.
-sbatch \
+guarded_sbatch \
     --array="0-$((N_JOBS - 1))" \
     --time="${WALLTIME}" \
     ${DEPENDENCY:+--dependency="${DEPENDENCY}"} \

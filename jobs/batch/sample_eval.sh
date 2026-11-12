@@ -4,8 +4,8 @@
 #SBATCH --job-name=step_sweep
 #SBATCH --ntasks=1
 #SBATCH --gpus=1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=18
+#SBATCH --mem=120G
 #SBATCH --time=00:45:00
 #SBATCH --output=slurm_output_%j.out
 #SBATCH --mail-type=BEGIN,END,FAIL
@@ -15,8 +15,8 @@
 # this is minutes rather than hours — the point is that `sampling.num_steps` was inherited
 # from the toy and has never been swept on real data.
 #
-#   sbatch --export=ALL,COMPONENTS=runs/<id>/components jobs/batch/sample_eval.sh
-#   sbatch --export=ALL,CKPT=runs/.../last.ckpt        jobs/batch/sample_eval.sh
+#   ./jobs/sbatch.sh --export=ALL,COMPONENTS=runs/<id>/components jobs/batch/sample_eval.sh
+#   ./jobs/sbatch.sh --export=ALL,CKPT=runs/.../last.ckpt        jobs/batch/sample_eval.sh
 #
 # Runs up to `skilled-lake-22` wrote a Lightning .ckpt and no components; later ones the
 # reverse. Both load: the checkpoint carries its own config, so an older run is rescored

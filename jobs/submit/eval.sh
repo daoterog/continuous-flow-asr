@@ -54,6 +54,8 @@ MAX_S=86400                       # 24 h
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$(dirname "${SCRIPT_DIR}")")"
 BATCH_DIR="${REPO_DIR}/jobs/batch"
+# shellcheck source=../common/slurm_guard.sh
+source "${REPO_DIR}/jobs/common/slurm_guard.sh"
 RESULTS_DIR="${RESULTS_DIR:-${REPO_DIR}/results}"
 
 # Resolves MODEL and checks it here, on the login node, rather than letting the array
@@ -107,7 +109,7 @@ echo "results   : ${RESULTS_DIR}"
 echo "walltime  : ${WALLTIME}"
 
 # --time here overrides the #SBATCH directive in run_eval.sh.
-sbatch \
+guarded_sbatch \
     --array="0-$((N_JOBS - 1))" \
     --time="${WALLTIME}" \
     --export=ALL,SOURCE="${SOURCE}",DATASETS="${DATASETS}",CONFIGS="${CONFIGS}",SPLITS="${SPLITS}",MODEL="${MODEL}",BATCH_SIZE="${BATCH_SIZE}",WARMUP_STEPS="${WARMUP_STEPS}",RESULTS_DIR="${RESULTS_DIR}",LIMIT="${LIMIT}" \

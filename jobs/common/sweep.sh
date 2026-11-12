@@ -12,8 +12,9 @@
 #   screen   --run sweep   100 epochs, 1 seed, 2 runs per job    the default: ranks arms
 #   confirm  --run full    300 epochs, 2 seeds, 2 runs per job   only the screen's winner(s)
 #
-# A job of PACK runs gives each its own GPU. Two runs cost what one does, since a job is
-# billed for 2 GPUs either way (jobs/common/budget.sh), so an odd run out wastes a GPU.
+# A job of PACK runs gives each its own GPU, one whole share each. A run staged on NVMe
+# fits one share; one read off GPFS needs 160G, 2 shares, so it only goes out paired
+# (jobs/common/budget.sh, jobs/common/slurm_guard.sh).
 #
 # EPOCHS here only prices the sweep and names its runs. Set it explicitly to change the
 # length: tier_defaults then sets EPOCH_OVERRIDE, which a sweep adds to its runs.
@@ -64,7 +65,7 @@ flush_runs() {
         jobs=$((jobs + 1))
     done
     echo "plan      : ${n} runs in ${jobs} GPU jobs, expected ${total} SBU"
-    echo "            (${SEC_PER_EPOCH} s/epoch + ${JOB_OVERHEAD_S} s, one GPU per run, ${SBU_PER_GPU_HOUR} SBU/GPU-h, a job billed >=2 GPUs)"
+    echo "            (${SEC_PER_EPOCH} s/epoch + ${JOB_OVERHEAD_S} s, one GPU per run, ${SBU_PER_GPU_HOUR} SBU/GPU-h, staged runs one share each)"
 
     if [[ -n "${SUBMIT}" ]]; then
         budget_gate "${total}" || exit 1

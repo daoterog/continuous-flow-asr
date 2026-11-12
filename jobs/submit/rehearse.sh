@@ -26,6 +26,8 @@ DATASETS="${DATASETS:-ami_cleaned gigaspeech_cleaned spgispeech voxpopuli_cleane
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$(dirname "${SCRIPT_DIR}")")"
 BATCH_DIR="${REPO_DIR}/jobs/batch"
+# shellcheck source=../common/slurm_guard.sh
+source "${REPO_DIR}/jobs/common/slurm_guard.sh"
 REHEARSAL_DIR="${REHEARSAL_DIR:-/scratch-shared/cont-flow-asr/rehearsal}"
 CHECK_PARTITION="${CHECK_PARTITION:-rome}"
 
@@ -47,7 +49,7 @@ fi
 
 echo
 echo "=== chaining verification (runs only if all ${N_JOBS} tasks succeed) ==="
-VERIFY_JOB="$(sbatch --parsable \
+VERIFY_JOB="$(guarded_sbatch --parsable \
     --dependency=afterok:"${ARRAY_JOB}" \
     --partition="${CHECK_PARTITION}" \
     --output="${REHEARSAL_DIR}/verify_%j.out" \

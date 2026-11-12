@@ -6,9 +6,20 @@ runs, and `common/` holds what they share.
 ## Budget standards
 
 The budget is **100k SBU counted from 25-08-2026**. An A100 hour is **128 SBU**, but a job
-is billed for the largest of its node shares (1 GPU, 18 cores or 120 GiB each). A training
-job needs 160G for the feature cache, which is 2 shares, so **every job is billed as 2
-GPUs**. Jobs therefore carry two runs, each on its own GPU, for the price of one.
+is billed for the largest of its node shares (on gpu_a100 1 GPU, 18 cores or 120 GiB each;
+gpu_h100 16 cores, memory free; gpu_mig 9 cores, 60 GiB). **Ask for whole slices**: what a
+job pays for, it should use — GPUs, cores and memory.
+
+- **Every submission goes through `guarded_sbatch`** (`jobs/common/slurm_guard.sh`), and
+  direct ones through `./jobs/sbatch.sh` in place of `sbatch`. A GPU job billed for more
+  GPUs than it asks for is refused, with the whole-slice flags both ways (fit the GPUs
+  asked for, or use the GPUs paid for); one asking for less than its slices notes what the
+  same price buys.
+- **Training stages its features onto node-local NVMe by default** whenever they fit the
+  slice the job gets (1.6 TB per A100 GPU): train.100 always, train.960 on one GPU. Staged,
+  a run needs no page cache and fits one share, so a lone run costs one GPU. Read off GPFS
+  it needs 160G — 2 shares — and is refused unless it carries a second run (`::`) or
+  `MEM_G=120`. `SCRATCH_NODE=0` opts out of staging, `=1` forces it.
 
 Cluster runs train `configs/recipes/fulldata.yaml` (denoiser small + mu micro, full
 1500-frame latents) under the snellius profile: compile + bf16, batch 128, the next batch

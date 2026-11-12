@@ -4,8 +4,8 @@
 #SBATCH --job-name=asr_eval
 #SBATCH --ntasks=1
 #SBATCH --gpus=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
+#SBATCH --cpus-per-task=18
+#SBATCH --mem=120G
 #SBATCH --time=02:00:00
 # Worst case: one task over all 5559 eval utterances. submit/eval.sh overrides this with
 # a --time derived from the actual selection and task count.

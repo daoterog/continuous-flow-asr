@@ -32,6 +32,8 @@ MAX_S=28800                       # 8 h, the staging partition limit
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$(dirname "${SCRIPT_DIR}")")"
 BATCH_DIR="${REPO_DIR}/jobs/batch"
+# shellcheck source=../common/slurm_guard.sh
+source "${REPO_DIR}/jobs/common/slurm_guard.sh"
 
 fmt_hms() { printf '%02d:%02d:%02d' $(($1 / 3600)) $((($1 % 3600) / 60)) $(($1 % 60)); }
 
@@ -76,7 +78,7 @@ echo "tasks     : ${N_JOBS}"
 echo "walltime  : ${WALLTIME}"
 
 # --time here overrides the #SBATCH directive in download_librispeech.sh.
-sbatch \
+guarded_sbatch \
     --array="0-$((N_JOBS - 1))" \
     --time="${WALLTIME}" \
     --export=ALL,CONFIGS="${CONFIGS}",SPLITS="${SPLITS}" \

@@ -4,10 +4,10 @@
 #SBATCH --job-name=bench_probe
 #SBATCH --ntasks=1
 #SBATCH --gpus=1
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=18
 # No dataset: the probe is timed against synthetic tensors of the right shape, so none of
 # the 160G the training job needs for the feature cache applies here.
-#SBATCH --mem=32G
+#SBATCH --mem=120G
 #SBATCH --time=00:25:00
 #SBATCH --output=slurm_output_%j.out
 #SBATCH --mail-type=END,FAIL
@@ -16,7 +16,7 @@
 # How much does the measured-tau probe cost on an A100, and does the chunk matter once the
 # probe is large?
 #
-#   sbatch jobs/batch/bench_probe.sh
+#   ./jobs/sbatch.sh jobs/batch/bench_probe.sh
 #   PROBE_N="2048 32768" CHUNKS="32 1024" sbatch jobs/batch/bench_probe.sh
 #
 # jobs/sweeps/probe_chunk.sh already asked this through five full training runs and could

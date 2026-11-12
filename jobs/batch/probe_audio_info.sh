@@ -14,7 +14,7 @@
 # flow times (scripts/diagnostics/probe_audio_info.py). Forward passes only, ~10-15 min,
 # so at most ~64 SBU at the 30 min limit.
 #
-#   sbatch --export=ALL,COMPONENTS=runs/5v9lar7i/components jobs/batch/probe_audio_info.sh
+#   ./jobs/sbatch.sh --export=ALL,COMPONENTS=runs/5v9lar7i/components jobs/batch/probe_audio_info.sh
 #
 # Optional env vars:
 #   PROBE_N_UTTS     — utterances per role               (default 4096)

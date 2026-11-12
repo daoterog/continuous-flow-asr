@@ -18,8 +18,8 @@
 # model in MODELS. Guidance follows each run's own training: unguided and guided for a run
 # trained with audio dropout, unguided only otherwise.
 #
-#   sbatch jobs/batch/sample_trajectory.sh
-#   sbatch --export=ALL,MODELS="ours:runs/<id>/components" jobs/batch/sample_trajectory.sh
+#   ./jobs/sbatch.sh jobs/batch/sample_trajectory.sh
+#   ./jobs/sbatch.sh --export=ALL,MODELS="ours:runs/<id>/components" jobs/batch/sample_trajectory.sh
 #
 # Optional env vars:
 #   MODELS          — space-separated label:components_dir[@w,...]

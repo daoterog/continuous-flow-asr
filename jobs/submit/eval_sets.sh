@@ -33,6 +33,8 @@ MAX_S=28800                       # 8 h, the staging partition limit
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$(dirname "${SCRIPT_DIR}")")"
 BATCH_DIR="${REPO_DIR}/jobs/batch"
+# shellcheck source=../common/slurm_guard.sh
+source "${REPO_DIR}/jobs/common/slurm_guard.sh"
 
 fmt_hms() { printf '%02d:%02d:%02d' $(($1 / 3600)) $((($1 % 3600) / 60)) $(($1 % 60)); }
 
@@ -66,7 +68,7 @@ echo "tasks     : ${N_JOBS}"
 echo "walltime  : ${WALLTIME}"
 
 # --time here overrides the #SBATCH directive in download_eval_sets.sh.
-ARRAY_JOB="$(sbatch --parsable \
+ARRAY_JOB="$(guarded_sbatch --parsable \
     --array="0-$((N_JOBS - 1))" \
     --time="${WALLTIME}" \
     --export=ALL,DATASETS="${DATASETS}" \
@@ -74,7 +76,7 @@ ARRAY_JOB="$(sbatch --parsable \
 
 # Single task, and only if every download succeeded: a partial download would build a
 # cache over missing shards.
-CACHE_JOB="$(sbatch --parsable \
+CACHE_JOB="$(guarded_sbatch --parsable \
     --dependency=afterok:"${ARRAY_JOB}" \
     --export=ALL,REPO_HOME="${REPO_DIR}",DATASETS="${DATASETS}" \
     "${BATCH_DIR}/build_eval_cache.sh")"

@@ -56,6 +56,8 @@ MAX_S=432000                      # 5 days, the gpu_a100 limit
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$(dirname "${SCRIPT_DIR}")")"
 BATCH_DIR="${REPO_DIR}/jobs/batch"
+# shellcheck source=../common/slurm_guard.sh
+source "${REPO_DIR}/jobs/common/slurm_guard.sh"
 
 # shellcheck source=../common/budget.sh
 source "${REPO_DIR}/jobs/common/budget.sh"
@@ -111,12 +113,44 @@ if [[ -z "${WALLTIME}" ]]; then
     echo "estimate  : ${EST_S}s at ${STEPS_PER_SEC} steps/s, x${SAFETY} + ${OVERHEAD_S}s overhead"
 fi
 
+# Node-local NVMe whenever the features fit the slice this job gets: a share of the node's
+# disk per GPU (budget.sh, NVME_PER_GPU_GB). Reading off GPFS is the slow path (see
+# STAGE_DATA in jobs/batch/train.sh), and staging also drops the 160G page-cache floor, so a
+# lone run fits one GPU share instead of paying for two. SCRATCH_NODE=1 forces it, =0 opts
+# out. The size is the files `train.py --print-data-dirs` lists, the ones the job copies.
+features_bytes() {
+    local listing
+    # shellcheck disable=SC2086
+    listing="$(cd "${REPO_DIR}" && python train.py --config "${CONFIG}" --where snellius \
+        --run "${TRAIN_RUN:-full}" ${OVERRIDES} --print-data-dirs 2>/dev/null)" || return 0
+    mapfile -t dirs < <(awk '$1 == "dir" {print $2}' <<< "${listing}")
+    ((${#dirs[@]})) || return 0
+    find "${dirs[@]}" -maxdepth 1 -type f -printf "%s\n" 2>/dev/null | awk '{s += $1} END {if (s) print s}'
+}
+STAGED=""
+NVME_GB=$((${#RUNS[@]} * NVME_PER_GPU_GB))
+case "${SCRATCH_NODE:-auto}" in
+    1) STAGED=1; STAGE_WHY="SCRATCH_NODE=1" ;;
+    0) STAGE_WHY="SCRATCH_NODE=0, reading off GPFS" ;;
+    *)
+        FEAT_BYTES="$(features_bytes)"
+        if [[ -z "${FEAT_BYTES}" ]]; then
+            STAGE_WHY="features not on scratch yet, so their size is unknown; reading off GPFS"
+        elif ((FEAT_BYTES < NVME_GB * 1000000000 * 9 / 10)); then
+            STAGED=1
+            STAGE_WHY="$((FEAT_BYTES / 2**30)) GiB of features fit the ${NVME_GB} GB NVMe slice"
+        else
+            STAGE_WHY="$((FEAT_BYTES / 2**30)) GiB of features do not fit the ${NVME_GB} GB NVMe slice of ${#RUNS[@]} GPU(s); a second run (::) doubles it. Reading off GPFS"
+        fi ;;
+esac
+
 echo "config    : ${CONFIG}"
 for i in "${!RUNS[@]}"; do
     echo "run ${i}     : ${RUNS[$i]:-(no overrides)}"
 done
 echo "profile   : --where snellius --run ${TRAIN_RUN:-full}"
-echo "partition : ${PARTITION}${SCRATCH_NODE:+ (scratch-node: features copied to local NVMe)}"
+echo "partition : ${PARTITION}"
+echo "staging   : $([[ -n "${STAGED}" ]] && echo "node-local NVMe" || echo "none"), ${STAGE_WHY}"
 echo "walltime  : ${WALLTIME}"
 
 # What this job is expected to cost: the caller's figure, else the step-count estimate,
@@ -170,14 +204,15 @@ export TRAIN_N="${#RUNS[@]}"
 for i in "${!RUNS[@]}"; do
     export "TRAIN_OVERRIDES_${i}=${RUNS[$i]}"
 done
-# SCRATCH_NODE=1: a node with local NVMe, and the job copies the features onto it before
-# training (STAGE_DATA in jobs/batch/train.sh). Count the copy in OVERHEAD_S.
+# Staged: a node with local NVMe, and the job copies the features onto it before training
+# (STAGE_DATA in jobs/batch/train.sh). Count the copy in OVERHEAD_S.
 CONSTRAINT=()
-if [[ -n "${SCRATCH_NODE}" ]]; then
+if [[ -n "${STAGED}" ]]; then
     CONSTRAINT=(--constraint=scratch-node)
     export STAGE_DATA=1
 fi
-JOBID="$(sbatch --parsable \
+export GUARD_HINT="From here: MEM_G=$((GPUS * MEM_PER_RUN_G)) to fit (less page cache, slower off GPFS), or a second run after :: to use both GPUs."
+JOBID="$(guarded_sbatch --parsable \
     --partition="${PARTITION}" --time="${WALLTIME}" "${CONSTRAINT[@]}" \
     --gpus="${GPUS}" --cpus-per-task="${CPUS}" --mem="${MEM_G}G" \
     --export=ALL \

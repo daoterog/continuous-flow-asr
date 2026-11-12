@@ -14,7 +14,7 @@ uv sync && source .venv/bin/activate     # local
 git submodule update --init --recursive
 ```
 
-Snellius: `./uv_to_conda.sh` then `sbatch jobs/batch/install_env.sh`.
+Snellius: `./uv_to_conda.sh` then `./jobs/sbatch.sh jobs/batch/install_env.sh`.
 Jobs use `~/.conda/envs/flow_asr` directly — **not** `conda activate`, which silently
 no-ops in batch shells.
 
