@@ -232,3 +232,8 @@ results/
 
 # SBU ledger written by jobs/submit/train.sh, one row per submitted job
 jobs/ledger.tsv
+
+# Slurm logs (slurm_output_*.out and friends) and tab-separated outputs: sample_eval's
+# --examples, the ledger, scratch tables.
+*.out
+*.tsv
