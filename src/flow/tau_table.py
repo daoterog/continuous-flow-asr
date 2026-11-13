@@ -71,10 +71,8 @@ class TauTable:
             setattr(self, name, getattr(self, name).to(device))
         return self
 
-    def recovery(
-        self, preset: torch.Tensor, a_pos: torch.Tensor, real: torch.Tensor
-    ) -> torch.Tensor:
-        """(B, T) field recovery per utterance: its real positions' curves, averaged.
+    def recovery_tokens(self, preset: torch.Tensor, a_pos: torch.Tensor) -> torch.Tensor:
+        """(B, L, T) field recovery per token: its preset's row at mu's confidence there.
 
         `preset` is each position's chosen preset index, (B, L); `a_pos` mu's top
         probability there. The preset picks its row exactly; the confidence is linear
@@ -84,33 +82,52 @@ class TauTable:
         j = (torch.searchsorted(self.accs, a.contiguous(), right=True) - 1)
         j = j.clamp(0, self.accs.numel() - 2)
         w = ((a - self.accs[j]) / (self.accs[j + 1] - self.accs[j]))[..., None]
-        curves = (1 - w) * self.table[preset, j] + w * self.table[preset, j + 1]
+        return (1 - w) * self.table[preset, j] + w * self.table[preset, j + 1]
+
+    def recovery(
+        self, preset: torch.Tensor, a_pos: torch.Tensor, real: torch.Tensor
+    ) -> torch.Tensor:
+        """(B, T) field recovery per utterance: its real positions' curves, averaged."""
         mask = real[..., None].float()
+        curves = self.recovery_tokens(preset, a_pos)
         return (curves * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1.0)
 
     def curves(self, recovery: torch.Tensor, floor: float = 0.0) -> torch.Tensor:
-        """(B, T) u = tau_i(t) on the table's t grid, from per-utterance recovery.
+        """The curve u = tau(t) on the table's t grid, from recovery over its last axis.
 
-        tau = 1 - P_e(t) / P_e(0), as `schedule.tau_from_recovery` with the path's own
-        error at t = 0, then the uniform floor u' = (1 - w) tau + w t.
+        Per utterance, (B, T), or per token, (B, L, T). tau = 1 - P_e(t) / P_e(0), as
+        `schedule.tau_from_recovery` with the path's own error at t = 0, then the uniform
+        floor u' = (1 - w) tau + w t, which also keeps a token mu already has right (P_e(0)
+        near 0) on a curve that still reaches t = 1 at u = 1.
         """
         p_e = 1.0 - recovery
-        tau = (1.0 - p_e / p_e[:, :1].clamp_min(1e-12)).clamp(0.0, 1.0)
-        tau = torch.cummax(tau, dim=1).values
+        tau = (1.0 - p_e / p_e[..., :1].clamp_min(1e-12)).clamp(0.0, 1.0)
+        tau = torch.cummax(tau, dim=-1).values
         return (1.0 - floor) * tau + floor * self.ts
 
     def invert(self, u_rows: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
-        """The t with tau_i(t) = u, per row. `u` is (B,) or (B, K); the result has its shape."""
-        want = (u if u.dim() == 2 else u[:, None]).contiguous()
-        hi = torch.searchsorted(u_rows.contiguous(), want).clamp(1, self.ts.numel() - 1)
-        u0, u1 = u_rows.gather(1, hi - 1), u_rows.gather(1, hi)
+        """The t with tau(t) = u, for each curve in `u_rows` (..., T).
+
+        `u` is one value per curve, shaped like `u_rows` without its last axis, or K per
+        curve, (..., K); the result has `u`'s shape.
+        """
+        lead, n_t = u_rows.shape[:-1], self.ts.numel()
+        many = u.dim() == u_rows.dim()
+        rows = u_rows.reshape(-1, n_t).contiguous()
+        want = (u if many else u[..., None]).reshape(rows.size(0), -1).contiguous()
+        hi = torch.searchsorted(rows, want).clamp(1, n_t - 1)
+        u0, u1 = rows.gather(1, hi - 1), rows.gather(1, hi)
         w = ((want - u0) / (u1 - u0).clamp_min(1e-12)).clamp(0.0, 1.0)
         t = self.ts[hi - 1] + w * (self.ts[hi] - self.ts[hi - 1])
-        return t if u.dim() == 2 else t[:, 0]
+        return t.reshape(*lead, -1) if many else t.reshape(lead)
 
     def grid(self, u_rows: torch.Tensor, num_steps: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """((B, N+1) flow times, (N+1,) u) for an N-step sampler: equal steps in u per row."""
+        """((..., N+1) flow times, (N+1,) u) for an N-step sampler: equal steps in u.
+
+        One row of times per curve: (B, N+1) for per-utterance curves, (B, L, N+1) for
+        per-token ones, every curve reaching the same u at the same step.
+        """
         u = torch.linspace(0.0, 1.0, num_steps + 1, device=u_rows.device)
-        t = self.invert(u_rows, u.expand(u_rows.size(0), -1).contiguous())
-        t[:, 0], t[:, -1] = 0.0, 1.0
+        t = self.invert(u_rows, u.expand(*u_rows.shape[:-1], -1).contiguous())
+        t[..., 0], t[..., -1] = 0.0, 1.0
         return t, u

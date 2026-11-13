@@ -4,6 +4,8 @@ Everything that reports numbers to a logger lives in `src.reporting`, and the me
 it owns is built by `src.metrics.utils`.
 """
 
+from collections.abc import Callable
+
 import lightning.pytorch as pl
 import numpy as np
 import torch
@@ -29,14 +31,15 @@ from src.reporting import MetricReporting
 
 SAMPLERS = {"interpolant": sample_tokens, "euler": sample_tokens_euler}
 TIME_INPUTS = ("reparametrized", "uniform")
+TIME_CURVES = ("global", "row", "token")
 LOSS_REDUCTIONS = ("sequence", "token")
 
 
 def _interp(t: torch.Tensor, ts: torch.Tensor, rows: torch.Tensor) -> torch.Tensor:
-    """(B,) each row of `rows`, sampled on the grid `ts`, read at the scalar t."""
-    hi = torch.searchsorted(ts, t.reshape(1)).clamp(1, ts.numel() - 1)
+    """Each curve of `rows` (..., T), sampled on the grid `ts`, read at the scalar t."""
+    hi = int(torch.searchsorted(ts, t.reshape(1)).clamp(1, ts.numel() - 1))
     w = ((t - ts[hi - 1]) / (ts[hi] - ts[hi - 1])).clamp(0.0, 1.0)
-    return rows[:, hi - 1].squeeze(1) * (1 - w) + rows[:, hi].squeeze(1) * w
+    return rows[..., hi - 1] * (1 - w) + rows[..., hi] * w
 
 
 def token_weights(
@@ -176,14 +179,29 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
                 "flow.learned_noise reads sigma off mu's network, but "
                 "model.audio_decoder is absent"
             )
-        # One time curve per utterance, from its own sigma presets and mu's confidence
-        # (`src.flow.tau_table`), in place of the run-wide simulated tau.
-        self.per_utterance = bool(cfg.schedule.get("per_utterance", False))
+        # Where the time curve comes from (`src.flow.tau_table`):
+        #   global  the run-wide simulated tau, refreshed every few epochs
+        #   row     one curve per utterance, its positions' preset curves averaged
+        #   token   one curve per canvas position: each token sits at its own t, the one
+        #           that decodes it to the row's progress u, which is all the denoiser sees
+        # `schedule.per_utterance: true` is the older spelling of `row`.
+        legacy = "row" if cfg.schedule.get("per_utterance", False) else "global"
+        self.time_curve = str(cfg.schedule.get("time_curve") or legacy)
+        if self.time_curve not in TIME_CURVES:
+            raise ValueError(
+                f"schedule.time_curve must be one of {TIME_CURVES}, got {self.time_curve!r}"
+            )
+        self.per_utterance = self.time_curve != "global"
         self.floor = float(cfg.schedule.get("uniform_floor", 0.0))
         self.tau_table = None
+        if self.time_curve == "token" and self.time_input != "uniform":
+            raise ValueError(
+                "schedule.time_curve=token puts every token at its own t, so the denoiser "
+                "can only be told the row's progress: it needs flow.time_input=uniform"
+            )
         if self.per_utterance:
             if self.mu_nn is None or self.gamma_fn is None:
-                raise ValueError("schedule.per_utterance reads mu's confidence; it needs mu")
+                raise ValueError("a row or token time curve reads mu's confidence; it needs mu")
             self.tau_table = TauTable(
                 vocab_size, self.alpha_fn, self.beta_fn, self.gamma_fn, self.source.scales
             )
@@ -194,7 +212,7 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
         if (self.source.learned or self.per_utterance) and cfg.schedule.enabled \
                 and self.floor <= 0.0:
             raise ValueError(
-                "flow.learned_noise and schedule.per_utterance need schedule.uniform_floor "
+                "flow.learned_noise and a row or token time curve need schedule.uniform_floor "
                 "> 0 (0.01 is enough): a curve at a small sigma would otherwise start above "
                 "t = 0 and the source state would stop being trained"
             )
@@ -272,10 +290,23 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
         alone, the same in training as at inference.
         """
         table = self.tau_table.to(self.device)
-        conf, top = mu.max(dim=-1)
-        real = (top != self.pad_id).cumprod(dim=1).bool()
+        conf, _ = mu.max(dim=-1)
+        return table.curves(table.recovery(preset, conf, self.mu_real(mu)), self.floor)
+
+    def token_curves(self, mu: torch.Tensor, preset: torch.Tensor) -> torch.Tensor:
+        """(B, L, T) per-token u = tau(t): each position's preset row at mu's confidence.
+
+        Every position gets one, pads included: a pad is a token like any other, and mu is
+        usually surest of it.
+        """
+        table = self.tau_table.to(self.device)
+        return table.curves(table.recovery_tokens(preset, mu.max(dim=-1).values), self.floor)
+
+    def mu_real(self, mu: torch.Tensor) -> torch.Tensor:
+        """(B, L) the positions mu predicts are real: before its first pad, at least one."""
+        real = (mu.argmax(dim=-1) != self.pad_id).cumprod(dim=1).bool()
         real[:, 0] = True
-        return table.curves(table.recovery(preset, conf, real), self.floor)
+        return real
 
     def tau_noise_fn(self):  # noqa: ANN201 - a schedule callable
         """The noise coefficient sigma * alpha(t) the simulated tau is built at.
@@ -358,8 +389,9 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
     def flow_step(self, batch: dict) -> tuple[torch.Tensor, dict, torch.Tensor]:
         """One forward pass: the objective, the per-model records, and the value it bins on.
 
-        That is the flow time t, or under `schedule.per_utterance` the draw u: each row's t
-        then comes off its own curve, and only u means the same thing across rows.
+        That is the flow time t, or under a row or token time curve the draw u: t then
+        comes off each row's or token's own curve, and only u means the same thing across
+        them.
         """
         audio = batch["audio"].float()
         if self.training:
@@ -383,19 +415,28 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
             }
 
         u = self.draw_u(tokens.size(0))
-        if self.per_utterance:
+        if self.time_curve == "token":
+            # Every token at the t that decodes it to the row's progress u, off its own
+            # curve: its preset, at mu's confidence there. (B, L).
+            with torch.no_grad():
+                curves = self.token_curves(mu, preset)
+                t = self.tau_table.invert(curves, u[:, None].expand_as(preset).contiguous())
+        elif self.time_curve == "row":
             # Each row's t off its own curve, built from the very presets that make its
             # field below. Off the undropped mu: a dropped row's curve is not rebuilt.
             with torch.no_grad():
                 t = self.tau_table.invert(self.utterance_curves(mu, preset), u)
         else:
             t = self.time_reparam.t_of(u)
+        # What the row-level augmentations read as "how far along": t is one per row
+        # except under per-token curves, where the progress they share is u.
+        row_t = u if t.dim() == 2 else t
 
         heard, prior = audio, mu
         draft_logits = mu_logits if self.mu_nn is not None else None
         audio_dropout = self.cfg.train.get("audio_dropout") or {}
         if self.training and audio_dropout.get("p", 0.0) > 0.0:
-            dropped = audio_drop(t, self.cfg.train.get("audio_dropout"))
+            dropped = audio_drop(row_t, self.cfg.train.get("audio_dropout"))
             heard = audio * (~dropped)[:, None, None]
             if mu is not None:
                 uniform = torch.full_like(mu, 1.0 / self.vocab_size)
@@ -415,7 +456,7 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
         if self.training:
             field_x1 = corrupt_draft(
                 x1,
-                t,
+                row_t,
                 tokens != self.pad_id,
                 self.cfg.train.get("draft_corruption"),
                 mu_logits=draft_logits,
@@ -451,7 +492,7 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
                 "real": real,
             }
         if self.per_utterance:
-            out["schedule"] = {"t": t.detach()}
+            out["schedule"] = {"t": t.detach(), "real": tokens != self.pad_id}
         return loss, out, (u if self.per_utterance else t)
 
     def sequence_ce(
@@ -506,19 +547,24 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
     ) -> torch.Tensor:
         """I_t = alpha(t) (sigma x0) + beta(t) x1 [+ gamma(t) mu], broadcast over (B, L, V).
 
-        x0 ~ N(0, I). `sigma` is the source's (`mu_and_sigma`): a float, or a learned
-        (B, L, V) tensor; None takes sigma_0. It is folded into alpha(t) before x0, as
-        `src.flow.source` describes.
+        x0 ~ N(0, I). `t` is one flow time per row, (B,), or per token, (B, L). `sigma` is
+        the source's (`mu_and_sigma`): a float, or a learned (B, L, 1) tensor; None takes
+        sigma_0. It is folded into alpha(t) before x0, as `src.flow.source` describes.
         """
         if sigma is None:
             sigma = self.source.sigma0
+
+        def coef(fn: Callable) -> torch.Tensor:
+            v = fn(t)
+            return v[..., None] if t.dim() == 2 else v[:, None, None]
+
         x0 = torch.randn_like(x1)
-        noise_coef = self.alpha_fn(t)[:, None, None] * sigma
-        i_t = noise_coef * x0 + self.beta_fn(t)[:, None, None] * x1
+        noise_coef = coef(self.alpha_fn) * sigma
+        i_t = noise_coef * x0 + coef(self.beta_fn) * x1
         if self.gamma_fn is not None and mu is not None:
             if self.stop_grad_mu:
                 mu = mu.detach()
-            i_t = i_t + self.gamma_fn(t)[:, None, None] * mu
+            i_t = i_t + coef(self.gamma_fn) * mu
         return i_t
 
     def on_train_epoch_end(self) -> None:
@@ -641,16 +687,24 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
         if grid not in ("live", "reference"):
             raise ValueError(f"sampling grid must be live or reference, got {grid!r}")
         if self.per_utterance:
-            # Each row on its own curve: equal steps in u, so step k reads u = k/N for every
-            # utterance while its flow time is that utterance's own. The reference grid
-            # keeps the control's shared t and reads each row's own u off its curve.
-            u_rows = self.utterance_curves(mu, preset)
+            # Each row, or each token, on its own curve: equal steps in u, so step k reads
+            # u = k/N everywhere while each flow time is that row's or token's own. The
+            # reference grid keeps the control's shared t and reads each row's own u off
+            # its curve — under per-token curves, the mean over mu's real positions.
+            if self.time_curve == "token":
+                u_rows = self.token_curves(mu, preset)
+            else:
+                u_rows = self.utterance_curves(mu, preset)
             if grid == "live":
                 gen_grid, u_grid = self.tau_table.grid(u_rows, num_steps)
             else:
                 gen_grid, _ = self.reference_reparam().sampling_grid(num_steps)
                 gen_grid = torch.as_tensor(gen_grid, dtype=torch.float32, device=self.device)
-                u_grid = torch.stack([_interp(t, self.tau_table.ts, u_rows) for t in gen_grid], 1)
+                ts = self.tau_table.ts
+                u_grid = torch.stack([_interp(t, ts, u_rows) for t in gen_grid], -1)
+                if self.time_curve == "token":
+                    real = self.mu_real(mu)[..., None].float()
+                    u_grid = (u_grid * real).sum(1) / real.sum(1)
         elif grid == "live":
             gen_grid, u_grid = self.time_reparam.sampling_grid(num_steps)
         else:

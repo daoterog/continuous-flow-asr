@@ -255,14 +255,27 @@ class MetricReporting:
         return stats["sigma_mean"]
 
     def log_schedule(self, schedule: dict, split: str, batch_size: int) -> None:
-        """Log where per-utterance flow times land: their quantiles over the batch's rows.
+        """Log where row- or token-level flow times land.
 
-        `tau/rows_t_q*` is comparable to the run-wide curve's `tau/t_q*`, and
-        `tau/rows_t_std` is how far apart the utterances' curves put their draws.
+        `tau/rows_t_q*` are the quantiles of the t drawn, comparable to the run-wide
+        curve's `tau/t_q*`; per token, over real positions. `tau/rows_t_std` is their
+        spread over the batch. Per token, `tau/tokens_t_std` is the mean spread within an
+        utterance: how differently its tokens are mixed at one progress u.
         """
         t = schedule["t"].float()
-        stats = {f"rows_t_q{int(q * 100)}": torch.quantile(t, q) for q in (0.1, 0.5, 0.9)}
-        stats["rows_t_std"] = t.std()
+        if t.dim() == 2:
+            real = schedule["real"]
+            flat = t[real]
+            mask = real.float()
+            n = mask.sum(1).clamp_min(1.0)
+            mean = (t * mask).sum(1) / n
+            within = (((t - mean[:, None]).square() * mask).sum(1) / n).sqrt().mean()
+        else:
+            flat = t
+        stats = {f"rows_t_q{int(q * 100)}": torch.quantile(flat, q) for q in (0.1, 0.5, 0.9)}
+        stats["rows_t_std"] = flat.std()
+        if t.dim() == 2:
+            stats["tokens_t_std"] = within
         for key, value in stats.items():
             self.log(f"tau/{key}_{split}", value, on_step=False, on_epoch=True,
                      batch_size=batch_size)

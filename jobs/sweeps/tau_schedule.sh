@@ -58,21 +58,25 @@
 #                                           0.1 0.2 0.4 0.7 1.0 off mu's trunk (Gumbel-
 #                                           softmax in training, argmax at inference), held
 #                                           to sigma_0 = 0.4 by an expected KL of weight l.
-#                                           With the per-utterance curve (perutt), which a
+#                                           With the per-token curve (pertoken), which a
 #                                           learned sigma needs: one run-wide curve cannot
 #                                           match a mix of presets (lvar1, 2026-11)
 #   lvartarget<x>                           that sigma_0, one of the presets; after lvar<l>
-#   perutt     schedule.per_utterance       each utterance draws its t off its own curve,
+#   perutt     schedule.time_curve=row      each utterance draws its t off its own curve,
 #                                           from its presets and mu's confidence
 #                                           (src/flow/tau_table.py), in sampling too. With
 #                                           uniform_floor 0.01, so every curve starts at 0
+#   pertoken   schedule.time_curve=token    each token sits at its own t, the one that
+#                                           decodes it to the row's progress u — all the
+#                                           denoiser sees (time_input uniform)
 #
 # Arms join knobs with `+` (sigma0.5+floor0.1); `control` is the recipe as is.
 #
 # Round 1, each knob alone (6 runs, 3 jobs):
 #   control floor0.3 floor0.4 sigma0.7 sigma0.5 sigma0.4
 # Learned source variance (the control is why-control-e100-s5, y9hyu9p0, at seed 5):
-#   ROUND=lvar2 SEEDS=5 ARMS="perutt lvar0.1 lvar0.1+lvartarget0.7 lvar1" SUBMIT=1 ...
+#   ROUND=lvar2 SEEDS=5 ARMS="perutt lvar0.1 lvar0.1+lvartarget0.7 lvar1" SUBMIT=1 ...  (row curves)
+#   ROUND=lvar3 SEEDS=5 ARMS="pertoken lvar0.1+lvartarget0.7 lvar0.3+lvartarget0.7 lvar1" SUBMIT=1 ...
 # Regularisation screen:
 #   ROUND=reg1 ARMS="control drop0.2 mask mask+drop0.2 adrop0.2 adroplin0.4" SUBMIT=1 ...
 # Round 2, the winners combined, e.g. with sigma 0.5 and floor 0.3 winning:
@@ -138,8 +142,9 @@ knob_override() {
         adroplin*) echo "train.audio_dropout={\"p\":${1#adroplin},\"schedule\":\"linear\"}" ;;
         adrop*)  echo "train.audio_dropout={\"p\":${1#adrop},\"schedule\":\"constant\"}" ;;
         lvartarget*) echo "flow.learned_noise.target_scale=${1#lvartarget}" ;;
-        lvar*)   echo "flow.learned_noise={\"kl_weight\":${1#lvar},\"target_scale\":0.4} schedule.per_utterance=true schedule.uniform_floor=0.01" ;;
-        perutt)  echo "schedule.per_utterance=true schedule.uniform_floor=0.01" ;;
+        lvar*)   echo "flow.learned_noise={\"kl_weight\":${1#lvar},\"target_scale\":0.4} schedule.time_curve=token schedule.uniform_floor=0.01" ;;
+        perutt)  echo "schedule.time_curve=row schedule.uniform_floor=0.01" ;;
+        pertoken) echo "schedule.time_curve=token schedule.uniform_floor=0.01" ;;
         mask)    echo "train.audio_mask={\"time_masks\":2,\"time_width\":0.1,\"feature_masks\":2,\"feature_width\":0.1}" ;;
         *) echo "unknown knob: $1" >&2; exit 1 ;;
     esac

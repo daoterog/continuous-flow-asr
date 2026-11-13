@@ -72,13 +72,17 @@ def drift(
 def _times(grid: np.ndarray | list[float] | torch.Tensor) -> list:
     """The grid's points: floats for a shared 1-D grid, (B, 1, 1) tensors for a per-row one.
 
-    A (B, N+1) tensor grid gives every row its own flow times (`src.flow.tau_table`).
+    A (B, N+1) tensor grid gives every row its own flow times, and a (B, L, N+1) one every
+    token (`src.flow.tau_table`).
     Shaped (B, 1, 1), each point broadcasts through the coefficient functions, the noise
     scale and the state exactly as a float does, so the samplers' arithmetic is unchanged
     and a 1-D grid keeps its float path bit for bit.
     """
     if torch.is_tensor(grid) and grid.dim() == 2:
         return [grid[:, k].float().view(-1, 1, 1) for k in range(grid.size(1))]
+    if torch.is_tensor(grid) and grid.dim() == 3:
+        # (B, L, N+1): a flow time per token (`schedule.time_curve: token`), (B, L, 1) each.
+        return [grid[..., k].float().unsqueeze(-1) for k in range(grid.size(-1))]
     return [float(t) for t in grid]
 
 
