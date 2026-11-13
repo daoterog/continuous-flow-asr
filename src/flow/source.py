@@ -55,15 +55,19 @@ class SourceNoise:
             return
         self.scales = tuple(float(s) for s in (spec.get("scales") or DEFAULT_SCALES))
         self.sigma0 = float(spec.get("target_scale", 0.4))
-        if self.sigma0 not in self.scales:
+        if list(self.scales) != sorted(set(self.scales)) or self.scales[0] <= 0.0:
+            raise ValueError(f"flow.learned_noise.scales must be positive and increasing, got "
+                             f"{list(self.scales)}")
+        # Matched to a relative 1e-6: a grid written from a formula (2^(k/4) steps) carries
+        # its values rounded, and 0.4 must still find 0.4.
+        near = [i for i, s in enumerate(self.scales) if abs(s - self.sigma0) <= 1e-6 * self.sigma0]
+        if not near:
             raise ValueError(
                 f"flow.learned_noise.target_scale {self.sigma0} must be one of the scales "
                 f"{list(self.scales)}: the run starts on it"
             )
-        if list(self.scales) != sorted(set(self.scales)) or self.scales[0] <= 0.0:
-            raise ValueError(f"flow.learned_noise.scales must be positive and increasing, got "
-                             f"{list(self.scales)}")
-        self.init_index = self.scales.index(self.sigma0)
+        self.init_index = near[0]
+        self.sigma0 = self.scales[self.init_index]
         self.kl_weight = float(spec.get("kl_weight", 0.1))
         self.temperature = float(spec.get("temperature", 1.0))
         ratio2 = torch.tensor(self.scales).div(self.sigma0).square()

@@ -1,5 +1,7 @@
 """mu_psi: the audio-only token decoder that gives the interpolant its third term."""
 
+import math
+
 from src.constants import WHISPER_DIM
 
 import torch
@@ -81,15 +83,16 @@ class AudioDecoder(nn.Module):
         self.head = nn.Linear(hidden, vocab_size)
         self.noise_head = None
         if noise_presets:
-            # Every position starts on `noise_init` with probability ~0.97 (at K = 5), so the
-            # run starts as the fixed-sigma one. Only this last layer is set: its weight's
-            # gradient is the error times the trunk's features, which are not zero, so it
-            # learns from the first step.
+            # Every position starts on `noise_init` with probability ~0.993 whatever K is —
+            # a bias of 5 + log(K - 1) against K - 1 zero rivals — so the run starts as the
+            # fixed-sigma one at any number of presets. Only this last layer is set: its
+            # weight's gradient is the error times the trunk's features, which are not zero,
+            # so it learns from the first step.
             self.noise_head = nn.Linear(hidden, noise_presets)
             nn.init.zeros_(self.noise_head.weight)
             with torch.no_grad():
                 self.noise_head.bias.zero_()
-                self.noise_head.bias[noise_init] = 5.0
+                self.noise_head.bias[noise_init] = 5.0 + math.log(max(noise_presets - 1, 1))
 
     def forward(
         self, audio: torch.Tensor, with_noise: bool = False
