@@ -230,24 +230,22 @@ class MetricReporting:
 
         `noise` is the flow step's record under `flow.learned_noise`, over real positions
         only (pads carry no target):
-          * `noise_preset_<s>` the share of positions on preset s — how the choice spreads;
           * `noise_sigma_mean` the mean sigma they chose;
           * `noise_entropy` the head's mean entropy, in nats: near 0 a settled choice, near
             log K one it has not made;
           * `noise_kl` the expected KL that holds the choice to sigma_0.
-        Nothing here reads back to the host: every value stays a tensor until the epoch end.
+        How the choice spreads over the presets is the binned metric `noise_preset`
+        (`metrics.preset.BinnedShare`): one histogram per epoch over the preset sigmas,
+        logged with the others. Nothing reads back to the host before the epoch end.
         """
         real = noise["real"]
-        n = real.float().sum().clamp_min(1.0)
         probs = noise["probs"][real]
         stats = {
             "kl": noise["kl"],
             "sigma_mean": noise["sigma"].squeeze(-1)[real].float().mean(),
             "entropy": -(probs * probs.clamp_min(1e-12).log()).sum(dim=-1).mean(),
         }
-        chosen = noise["preset"][real]
-        for k, scale in enumerate(self.source.scales):
-            stats[f"preset_{scale:g}"] = (chosen == k).float().sum() / n
+        self.metrics[f"{split}_noise_preset"].update(noise["sigma"].squeeze(-1)[real])
         for key, value in stats.items():
             self.log(f"noise_{key}/{split}", value, on_step=False, on_epoch=True,
                      batch_size=batch_size)

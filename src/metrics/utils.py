@@ -1,6 +1,7 @@
 """Building and inspecting the metric bank: construction, naming, validation."""
 
 import warnings
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import torch
@@ -8,6 +9,7 @@ from torch import nn
 
 from .base import TimeBinnedMetric
 from .loss import BinnedLoss
+from .preset import BinnedShare, preset_edges
 from .token_error import BinnedTokenError
 from .wer import BinnedWER
 
@@ -61,6 +63,7 @@ def make_metrics(
     input_perr_bins: int = 0,
     time_reparam: "TimeReparametrization | None" = None,
     axes: dict[str, str] | None = None,
+    preset_scales: Sequence[float] | None = None,
 ) -> nn.ModuleDict:
     """Build the `{split}_{group}_{metric}` ModuleDict the reporting mixin drives.
 
@@ -73,6 +76,10 @@ def make_metrics(
     from here, so a gap is never reported under a key that says `t`. It also decides which
     groups `time_reparam` reaches: its edges are quantiles OF t, so they mean nothing on
     any other axis, and an axis that is already uniform keeps its equal-width bins.
+
+    `preset_scales`, under a learned source (`flow.source.SourceNoise`), adds
+    `noise_preset`: the share of positions on each preset, binned on sigma with one bin
+    per preset (`preset.BinnedShare`).
 
     A ModuleDict keyed by split gives each split its own instances; sharing one would
     pool train and val into the same bins.
@@ -117,6 +124,10 @@ def make_metrics(
                     tokenizer, pad_id, vocab_map, num_bins=n,
                     edges=edges_for(n, axis) if binned else None, axis=axis,
                 )
+        if preset_scales:
+            metrics[f"{split}_noise_preset"] = BinnedShare(
+                edges=preset_edges(preset_scales), axis="sigma"
+            )
     return metrics
 
 

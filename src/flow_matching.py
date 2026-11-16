@@ -240,6 +240,7 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
             perr_bins=cfg.metrics.get("perr_bins", 10),
             wer_bins=OmegaConf.to_container(cfg.metrics.get("wer_bins", {})) or None,
             input_perr_bins=cfg.metrics.get("input_perr_bins", 10),
+            preset_scales=self.source.scales if self.source.learned else None,
         )
 
     @property
@@ -353,7 +354,9 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
             if new is not None:
                 self.time_reparam = new
                 for metric in self.metrics.values():
-                    if is_binned(metric):
+                    # Only the flow-time bins follow the curve; the preset share keeps its
+                    # sigma edges.
+                    if is_binned(metric) and metric.axis == "t":
                         metric.set_edges(new.bin_edges(metric.num_bins))
                 self.log("tau/t0", new.t_start)
                 self.log_tau_shape(new)
