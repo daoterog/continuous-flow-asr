@@ -179,6 +179,16 @@ NOW_TRIALS: list[tuple[str, list[str]]] = [
     ("now: batch 256", [*LEARNED, "data.batch_size=256"]),
 ]
 
+# Whether the direct reader (src/data/direct.py) lifts the staged run to the GPU's ceiling
+# (867 utts/s in the `now` suite), and how many read threads it wants.
+DIRECT_TRIALS: list[tuple[str, list[str]]] = [
+    ("direct: DataLoader (today)", LEARNED),
+    ("direct: direct reader, 8 threads",
+     [*LEARNED, "data.direct_read=true", "data.read_threads=8"]),
+    ("direct: direct reader, 16 threads",
+     [*LEARNED, "data.direct_read=true", "data.read_threads=16"]),
+]
+
 SUITES = {
     "laptop": (TRIALS, "configs/linear.yaml"),
     # The recipe, not configs/audio_cond.yaml: it is what cluster runs train (small + micro)
@@ -187,6 +197,7 @@ SUITES = {
     "gpu": (None, "configs/recipes/fulldata.yaml"),
     "tune": (TUNE_TRIALS, "configs/recipes/fulldata.yaml"),  # built by gpu_trials(--at-batch, --batches)
     "now": (NOW_TRIALS, "configs/recipes/fulldata.yaml"),
+    "direct": (DIRECT_TRIALS, "configs/recipes/fulldata.yaml"),
     # The recipe, not configs/flow_mapping.yaml directly: `--env snellius` goes through the
     # recipe guard in build_config, and the recipe adds nothing but its own name.
     "distill": (DISTILL_TRIALS, "configs/recipes/distill.yaml"),
@@ -537,8 +548,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"device: {torch.cuda.get_device_name(0)}   data root: {args.env}")
         r = time_eval(args.config, args)
         print(f"\neval at batch {args.at_batch} under the profile, {r['n_val']} val utts:")
-        print(f"  validation pass : {r['val_s'][1]:6.1f} s   (first, with compile: {r['val_s'][0]:.1f} s)")
-        print(f"  sampling probe  : {r['probe_s'][1]:6.1f} s   ({r['steps']} steps; first: {r['probe_s'][0]:.1f} s)")
+        val, probe = r["val_s"], r["probe_s"]
+        print(f"  validation pass : {val[1]:6.1f} s   (first, with compile: {val[0]:.1f} s)")
+        print(f"  sampling probe  : {probe[1]:6.1f} s   "
+              f"({r['steps']} steps; first: {probe[0]:.1f} s)")
         return 0
     trials = suite
     if args.only:

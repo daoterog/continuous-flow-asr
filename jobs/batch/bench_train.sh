@@ -108,6 +108,17 @@ if [[ "${SUITE:-gpu}" == "now" ]]; then
     exit $?
 fi
 
+# SUITE=direct: the DataLoader against the direct reader at 8 and 16 threads, staged as
+# above, no eval timing.
+if [[ "${SUITE:-gpu}" == "direct" ]]; then
+    # shellcheck source=_stage.sh
+    source "${REPO_HOME:-$HOME/continuous-flow-asr}/jobs/batch/_stage.sh"
+    stage_features configs/recipes/fulldata.yaml --where snellius
+    python -m scripts.diagnostics.bench_train --suite direct --env snellius --no-warm \
+        --steps "${STEPS}" --n-utts "${N_UTTS}" --set "data.data_root=${STAGED_ROOT}"
+    exit $?
+fi
+
 if [[ "${SUITE:-gpu}" == "prod" ]]; then
     python -m scripts.diagnostics.bench_train --suite prod --env snellius \
         --steps "${STEPS}" --n-utts "${N_UTTS}"

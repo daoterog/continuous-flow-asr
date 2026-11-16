@@ -6,6 +6,7 @@
 #   SUITE=prefetch ./jobs/submit/bench_train.sh           # data.gpu_prefetch vs plain, ~15 min
 #   SUITE=tune ./jobs/submit/bench_train.sh               # matmul high, prefetch_factor, workers
 #   SUITE=now ./jobs/submit/bench_train.sh                # today's recipe on one staged slice
+#   SUITE=direct ./jobs/submit/bench_train.sh             # DataLoader vs direct reader, staged
 #
 # Expected ~30 min on 2 GPUs: the batch ladder on one, the compute knobs and the eval
 # timing on the other. 2 GPUs is what any job needing 160G is billed for anyway.
@@ -24,13 +25,15 @@ if [[ "${SUITE:-gpu}" == "prefetch" || "${SUITE:-gpu}" == "tune" ]]; then
     EXPECTED_S="${EXPECTED_S:-1200}"
 elif [[ "${SUITE:-gpu}" == "now" ]]; then
     EXPECTED_S="${EXPECTED_S:-2700}"
+elif [[ "${SUITE:-gpu}" == "direct" ]]; then
+    EXPECTED_S="${EXPECTED_S:-1200}"
 else
     EXPECTED_S="${EXPECTED_S:-1800}"
 fi
-# SUITE=now runs on one slice like a training job: 1 GPU, 18 cores, 120G, the features
+# SUITE=now and SUITE=direct run on one slice like a training job: 1 GPU, 18 cores, 120G, the features
 # staged on node-local NVMe (~10 min for train.100's 121 GiB) before ~8 trials and an eval.
 CONSTRAINT=()
-if [[ "${SUITE:-gpu}" == "now" ]]; then
+if [[ "${SUITE:-gpu}" == "now" || "${SUITE:-gpu}" == "direct" ]]; then
     read -r GPUS CPUS MEM_G <<< "$(STAGED=1 job_resources 1)"
     EST="$(STAGED=1 job_sbu "${EXPECTED_S}" 1)"
     CONSTRAINT=(--constraint=scratch-node)
