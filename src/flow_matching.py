@@ -32,6 +32,8 @@ from src.reporting import MetricReporting
 SAMPLERS = {"interpolant": sample_tokens, "euler": sample_tokens_euler}
 TIME_INPUTS = ("reparametrized", "uniform")
 TIME_CURVES = ("global", "row", "token")
+# The smallest `schedule.uniform_floor` a learned sigma or per-utterance curve may run at.
+MIN_UNIFORM_FLOOR = 1e-3
 LOSS_REDUCTIONS = ("sequence", "token")
 
 
@@ -209,12 +211,19 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
         # (configs/base.yaml, `allow_degenerate_tau`), and the source state stops being
         # trained. A learned sigma can pick the smallest preset, and a per-utterance curve
         # can be any row's; mixing in a uniform floor restarts the draw at 0 either way.
-        if (self.source.learned or self.per_utterance) and cfg.schedule.enabled \
-                and self.floor <= 0.0:
+        # `schedule.enabled` only switches the global curve to the identity (uniform t). A
+        # row or token curve comes off the tau table whatever it says, so it is never
+        # exempt from the floor.
+        needs_floor = self.per_utterance or (self.source.learned and cfg.schedule.enabled)
+        # Positive is not enough: at 1e-6 t = 0 is reachable but a small-sigma curve puts
+        # next to no draws in its dead zone, which trains the source state no better.
+        if needs_floor and self.floor < MIN_UNIFORM_FLOOR:
             raise ValueError(
-                "flow.learned_noise and a row or token time curve need schedule.uniform_floor "
-                "> 0 (0.01 is enough): a curve at a small sigma would otherwise start above "
-                "t = 0 and the source state would stop being trained"
+                f"flow.learned_noise and a row or token time curve need "
+                f"schedule.uniform_floor >= {MIN_UNIFORM_FLOOR} (0.01 is enough), got "
+                f"{self.floor}: a curve at a small sigma would otherwise start above t = 0, or "
+                f"leave its dead zone next to no draws, and the source state would stop being "
+                f"trained"
             )
 
         if cfg.train.get("compile"):
