@@ -22,6 +22,7 @@ from src.data import VocabMap
 from src.flow.sampling_probe import SamplingProbe
 from src.flow.schedule import TimeReparametrization
 from src.flow.source import SourceNoise
+from src.flow.tau_table import TauTable
 from src.flow.tau_base import TauScheduler
 from src.metrics.base import TimeBinnedMetric
 from src.metrics.utils import (
@@ -53,6 +54,10 @@ class MetricReporting:
     tau_scheduler: TauScheduler
     source: SourceNoise
     noise_tau_sigma: float
+    tau_table: TauTable | None
+    time_reparam: TimeReparametrization
+    floor: float
+    time_curve: str
 
     def init_metrics(
         self,
@@ -231,6 +236,9 @@ class MetricReporting:
         `noise` is the flow step's record under `flow.learned_noise`, over real positions
         only (pads carry no target):
           * `noise_sigma_mean` the mean sigma they chose;
+          * `noise_sigma_std_{level}` its spread at the level the time curve works at
+            (`schedule.time_curve`): over real tokens under `token`, over each row's mean
+            sigma under `row` and `global`. Near 0 means the head picks one sigma for all;
           * `noise_entropy` the head's mean entropy, in nats: near 0 a settled choice, near
             log K one it has not made;
           * `noise_kl` the expected KL that holds the choice to sigma_0.
@@ -240,14 +248,25 @@ class MetricReporting:
         """
         real = noise["real"]
         probs = noise["probs"][real]
+        sigma = noise["sigma"].squeeze(-1).float()
+        if self.time_curve == "token":
+            level, spread = "token", sigma[real]
+        else:
+            mask = real.float()
+            level = "row"
+            spread = (sigma * mask).sum(1) / mask.sum(1).clamp_min(1.0)
         stats = {
             "kl": noise["kl"],
-            "sigma_mean": noise["sigma"].squeeze(-1)[real].float().mean(),
+            "sigma_mean": sigma[real].mean(),
+            f"sigma_std_{level}": spread.std(),
             "entropy": -(probs * probs.clamp_min(1e-12).log()).sum(dim=-1).mean(),
         }
         self.metrics[f"{split}_noise_preset"].update(noise["sigma"].squeeze(-1)[real])
         for key, value in stats.items():
             self.log(f"noise_{key}/{split}", value, on_step=False, on_epoch=True,
+                     batch_size=batch_size)
+        for scale, t0 in zip(self.source.scales, self.preset_starts()):
+            self.log(f"noise_t0/{split}_sigma{scale:g}", t0, on_step=False, on_epoch=True,
                      batch_size=batch_size)
         # A tensor, not a float: reading it back every step would stall the GPU on a sync.
         return stats["sigma_mean"]
@@ -277,6 +296,19 @@ class MetricReporting:
         for key, value in stats.items():
             self.log(f"tau/{key}_{split}", value, on_step=False, on_epoch=True,
                      batch_size=batch_size)
+
+    def preset_starts(self) -> torch.Tensor:
+        """(K,) the t a draw of u = 0 lands on, per preset, at mu confidence 0.
+
+        Read off the same floored curves and inversion the step uses, so it is 0 whenever
+        the floor holds. Without a table (the global curve) every preset shares one curve.
+        """
+        if self.tau_table is None:
+            t0 = float(self.time_reparam.t_of(0.0))
+            return torch.full((self.source.num_presets,), t0, device=self.device)
+        table = self.tau_table.to(self.device)
+        curves = table.curves(table.table[:, 0], self.floor)
+        return table.invert(curves, torch.zeros(len(curves), device=self.device))
 
     def log_noise_tau_sigma(self) -> None:
         """The sigma the next simulated tau is built at: the last epoch's mean."""
