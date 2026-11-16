@@ -22,8 +22,8 @@ from src.data import VocabMap
 from src.flow.sampling_probe import SamplingProbe
 from src.flow.schedule import TimeReparametrization
 from src.flow.source import SourceNoise
-from src.flow.tau_table import TauTable
 from src.flow.tau_base import TauScheduler
+from src.flow.tau_table import TauTable
 from src.metrics.base import TimeBinnedMetric
 from src.metrics.utils import (
     bins_key,
@@ -265,7 +265,7 @@ class MetricReporting:
         for key, value in stats.items():
             self.log(f"noise_{key}/{split}", value, on_step=False, on_epoch=True,
                      batch_size=batch_size)
-        for scale, t0 in zip(self.source.scales, self.preset_starts()):
+        for scale, t0 in zip(self.source.scales, self.preset_starts(), strict=True):
             self.log(f"noise_t0/{split}_sigma{scale:g}", t0, on_step=False, on_epoch=True,
                      batch_size=batch_size)
         # A tensor, not a float: reading it back every step would stall the GPU on a sync.
@@ -402,6 +402,33 @@ class MetricReporting:
             },
             commit=False,
         )
+
+    def log_noise_levels(self) -> None:
+        """Put the learned source's preset grid into the run, once.
+
+        `levels<K>` builds the grid around the target, so it differs from run to run;
+        logged it is explicit. Three forms: the list in the run's config (filterable
+        across runs), a table of index / sigma / KL to the target / is-target, and a
+        scatter of sigma against index drawn from it (`noise/levels`).
+        """
+        if not self.source.learned or not isinstance(self.logger, WandbLogger):
+            return
+        scales = list(self.source.scales)
+        run = self.logger.experiment
+        run.config.update({"noise_levels": scales, "noise_target": self.source.sigma0},
+                          allow_val_change=True)
+        kl = self.source._preset_kl.tolist()
+        table = wandb.Table(
+            columns=["index", "sigma", "kl_to_target", "is_target"],
+            data=[[i, s, kl[i], i == self.source.init_index] for i, s in enumerate(scales)],
+        )
+        run.log({
+            "noise/levels_table": table,
+            "noise/levels": wandb.plot.scatter(
+                table, "index", "sigma",
+                title=f"sigma levels (K={len(scales)}, target {self.source.sigma0:g})",
+            ),
+        })
 
     def _define_bin_metrics(self) -> None:
         """Plot the histogram panels against the epoch, not the global step.

@@ -327,9 +327,10 @@ class FlowMatching(MetricReporting, EMAWeights, pl.LightningModule):
         return self.source.coefficient(self.noise_tau_sigma)
 
     def on_fit_start(self) -> None:
-        """Declare the histogram panels' step metric before anything is logged."""
+        """Declare the histogram panels' step metric, and log the noise levels, once."""
         super().on_fit_start()
         self._define_bin_metrics()
+        self.log_noise_levels()
 
     def on_train_epoch_start(self) -> None:
         """Re-derive the schedule if it is due, then clear the train accumulators.

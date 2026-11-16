@@ -62,10 +62,10 @@
 #                                           learned sigma needs: one run-wide curve cannot
 #                                           match a mix of presets (lvar1, 2026-11)
 #   lvartarget<x>                           that sigma_0, one of the presets; after lvar<l>
-#   levels<K>  learned_noise.scales         K presets, geometric over [0.1, 1.6]: 0.1 * 16^(i/(K-1)).
-#                                           K = 5, 9, 17, 33 nest (ratio 2, sqrt 2, 2^(1/4),
-#                                           2^(1/8)) and all hold 0.4, so finer only adds
-#                                           levels between the coarser ones. After lvar<l>
+#   levels<K>  learned_noise.levels         K presets, geometric at ratio 16^(1/(K-1)) over about
+#                                           [0.1, 1.6], built around the target so it is one of
+#                                           them (src/flow/source.levels_around). At target 0.4,
+#                                           K = 5, 9, 17, 33 nest. After lvar<l>
 #   perutt     schedule.time_curve=row      each utterance draws its t off its own curve,
 #                                           from its presets and mu's confidence
 #                                           (src/flow/tau_table.py), in sampling too. With
@@ -83,6 +83,8 @@
 #   ROUND=lvar3 SEEDS=5 ARMS="pertoken lvar0.1+lvartarget0.7 lvar0.3+lvartarget0.7 lvar1" SUBMIT=1 ...
 # Granularity of the presets (lvar3's lvar1, seed 6, is the K = 5 point):
 #   ROUND=levels1 SEEDS=6 ARMS="pertoken lvar1+levels9 lvar1+levels17 lvar1+levels33" SUBMIT=1 ...
+# Free vs held, and where it starts, at K = 33:
+#   ROUND=lvar4 SEEDS=7 ARMS="lvar0+levels33 lvar0.3+levels33 lvar0.3+lvartarget0.7+levels33 lvar0.3+lvartarget1.0+levels33" SUBMIT=1 ...
 # Regularisation screen:
 #   ROUND=reg1 ARMS="control drop0.2 mask mask+drop0.2 adrop0.2 adroplin0.4" SUBMIT=1 ...
 # Round 2, the winners combined, e.g. with sigma 0.5 and floor 0.3 winning:
@@ -150,8 +152,7 @@ knob_override() {
         lvartarget*) echo "flow.learned_noise.target_scale=${1#lvartarget}" ;;
         lvar*)   echo "flow.learned_noise={\"kl_weight\":${1#lvar},\"target_scale\":0.4} schedule.time_curve=token schedule.uniform_floor=0.01" ;;
         perutt)  echo "schedule.time_curve=row schedule.uniform_floor=0.01" ;;
-        levels*) echo "flow.learned_noise.scales=[$(awk -v k="${1#levels}" 'BEGIN {
-                     for (i = 0; i < k; i++) printf "%s%.6g", (i ? "," : ""), 0.1 * 16 ^ (i / (k - 1)) }')]" ;;
+        levels*) echo "flow.learned_noise.levels=${1#levels}" ;;
         pertoken) echo "schedule.time_curve=token schedule.uniform_floor=0.01" ;;
         mask)    echo "train.audio_mask={\"time_masks\":2,\"time_width\":0.1,\"feature_masks\":2,\"feature_width\":0.1}" ;;
         *) echo "unknown knob: $1" >&2; exit 1 ;;

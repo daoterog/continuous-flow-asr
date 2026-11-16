@@ -25,6 +25,7 @@ was folded into alpha. Code that reads the path's noise coefficient as one funct
 (the recovery curve, the simulated tau) gets it from `coefficient`.
 """
 
+import math
 from collections.abc import Callable
 
 import torch
@@ -34,6 +35,24 @@ from omegaconf import DictConfig
 from src.flow.coefficients import as_spec, make_schedule
 
 DEFAULT_SCALES = (0.1, 0.2, 0.4, 0.7, 1.0)
+# `levels` spans this range: K geometric levels at ratio (hi / lo)^(1 / (K - 1)).
+LEVELS_RANGE = (0.1, 1.6)
+
+
+def levels_around(target: float, k: int) -> tuple[float, ...]:
+    """K geometric levels over about `LEVELS_RANGE`, one of them exactly `target`.
+
+    The ratio is the range's, (1.6 / 0.1)^(1 / (K - 1)); the grid is shifted so that
+    `target` sits on it, the level nearest 0.1 at the bottom. For a target already on the
+    range's own grid (0.4 at K = 5, 9, 17, 33) that is the plain grid over [0.1, 1.6], so
+    those K nest; for any other the range moves by less than one step.
+    """
+    if k < 2:
+        return (float(target),)
+    lo, hi = LEVELS_RANGE
+    log_r = math.log(hi / lo) / (k - 1)
+    j = round(math.log(target / lo) / log_r)
+    return tuple(target * math.exp((i - j) * log_r) for i in range(k))
 
 
 class SourceNoise:
@@ -53,8 +72,14 @@ class SourceNoise:
             self.scales = (fixed_sigma,)
             self.init_index = 0
             return
-        self.scales = tuple(float(s) for s in (spec.get("scales") or DEFAULT_SCALES))
         self.sigma0 = float(spec.get("target_scale", 0.4))
+        levels = spec.get("levels")
+        if levels and spec.get("scales"):
+            raise ValueError("flow.learned_noise takes `scales` or `levels`, not both")
+        if levels:
+            self.scales = levels_around(self.sigma0, int(levels))
+        else:
+            self.scales = tuple(float(s) for s in (spec.get("scales") or DEFAULT_SCALES))
         if list(self.scales) != sorted(set(self.scales)) or self.scales[0] <= 0.0:
             raise ValueError(f"flow.learned_noise.scales must be positive and increasing, got "
                              f"{list(self.scales)}")

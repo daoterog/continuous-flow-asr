@@ -82,6 +82,16 @@ def count_flops(module: pl.LightningModule, batch: dict, sample_steps: int) -> d
     return {"train_per_step": float(train), "sample_per_utt": float(sample)}
 
 
+def _summary(trainer: pl.Trainer):  # noqa: ANN202 - wandb's summary, or None
+    """The run's wandb summary, or None without one.
+
+    fast_dev_run's DummyLogger answers any attribute with a method, so this asks for
+    something that takes item assignment, as wandb's summary does.
+    """
+    summary = getattr(getattr(trainer.logger, "experiment", None), "summary", None)
+    return summary if hasattr(summary, "__setitem__") else None
+
+
 class FlopCount(pl.Callback):
     """Count a run's FLOPs on its first batch; log the running training total every epoch.
 
@@ -108,11 +118,11 @@ class FlopCount(pl.Callback):
             f"compute: {self.per_step:.3e} FLOPs per training step, "
             f"{flops['sample_per_utt']:.3e} per utterance sampled at {self.sample_steps} steps"
         )
-        experiment = getattr(trainer.logger, "experiment", None)
-        if experiment is not None and hasattr(experiment, "summary"):
-            experiment.summary["compute/train_flops_per_step"] = self.per_step
-            experiment.summary["compute/sample_flops_per_utt"] = flops["sample_per_utt"]
-            experiment.summary["compute/sample_steps"] = self.sample_steps
+        summary = _summary(trainer)
+        if summary is not None:
+            summary["compute/train_flops_per_step"] = self.per_step
+            summary["compute/sample_flops_per_utt"] = flops["sample_per_utt"]
+            summary["compute/sample_steps"] = self.sample_steps
 
     def on_train_epoch_end(self, trainer: pl.Trainer, module: pl.LightningModule) -> None:
         """Log the training FLOPs spent so far."""
@@ -121,6 +131,6 @@ class FlopCount(pl.Callback):
 
     def on_fit_end(self, trainer: pl.Trainer, module: pl.LightningModule) -> None:
         """Put the run's total into its summary, where a results table can read it."""
-        experiment = getattr(trainer.logger, "experiment", None)
-        if self.per_step is not None and experiment is not None and hasattr(experiment, "summary"):
-            experiment.summary["compute/train_flops"] = self.per_step * trainer.global_step
+        summary = _summary(trainer)
+        if self.per_step is not None and summary is not None:
+            summary["compute/train_flops"] = self.per_step * trainer.global_step
