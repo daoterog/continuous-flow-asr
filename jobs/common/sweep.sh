@@ -9,11 +9,13 @@
 # Tiers. Each picks a run-kind profile (configs/profiles/run/), which owns the epoch
 # count and the eval cadence; explicit EPOCHS / SEEDS / PACK in the environment still win.
 #
-#   screen   --run sweep   100 epochs, 1 seed, 2 runs per job    the default: ranks arms
-#   confirm  --run full    300 epochs, 2 seeds, 2 runs per job   only the screen's winner(s)
+#   screen   --run sweep   100 epochs, 1 seed, 1 run per job     the default: ranks arms
+#   confirm  --run full    300 epochs, 2 seeds, 1 run per job    only the screen's winner(s)
 #
-# A job of PACK runs gives each its own GPU, one whole share each. A run staged on NVMe
-# fits one share; one read off GPFS needs 160G, 2 shares, so it only goes out paired
+# A job of PACK runs gives each its own GPU, one whole share each. One run per job is the
+# default: staged on NVMe, a run fits a single slice (1 GPU, 18 cores, 120G), costs the
+# same SBU as half a pair, and gets the node's disk and cores to itself. PACK=2 still
+# pairs, for runs read off GPFS, which need 160G — 2 shares — and are refused alone
 # (jobs/common/budget.sh, jobs/common/slurm_guard.sh).
 #
 # EPOCHS here only prices the sweep and names its runs. Set it explicitly to change the
@@ -33,8 +35,8 @@ tier_defaults() {
     EPOCH_OVERRIDE=""
     [[ -n "${EPOCHS}" ]] && EPOCH_OVERRIDE="train.num_epochs=${EPOCHS}"
     case "${TIER}" in
-        screen)  TRAIN_RUN=sweep; : "${EPOCHS:=100}" "${SEEDS:=1}" "${PACK:=2}" ;;
-        confirm) TRAIN_RUN=full;  : "${EPOCHS:=300}" "${SEEDS:=0 1}" "${PACK:=2}" ;;
+        screen)  TRAIN_RUN=sweep; : "${EPOCHS:=100}" "${SEEDS:=1}" "${PACK:=1}" ;;
+        confirm) TRAIN_RUN=full;  : "${EPOCHS:=300}" "${SEEDS:=0 1}" "${PACK:=1}" ;;
         *) echo "unknown TIER=${TIER}; expected screen or confirm" >&2; exit 1 ;;
     esac
     export TIER TRAIN_RUN
@@ -58,10 +60,13 @@ flush_runs() {
     for ((i = 0; i < n; i += PACK)); do groups+=("${i}"); done
 
     echo "tier      : ${TIER} (--run ${TRAIN_RUN})  epochs ${EPOCHS}  seeds '${SEEDS}'  ${PACK} run(s) per job, one GPU each"
+    # Priced as staged — one share per run — which is what jobs/submit/train.sh does
+    # whenever the features fit the job's NVMe slice (train.100 and train.960 both do). A
+    # run that is not staged is priced again, at its own resources, when it is submitted.
     for i in "${groups[@]}"; do
         size=$((n - i < PACK ? n - i : PACK))
         job_s="$(est_job_seconds "${EPOCHS}")"
-        total=$((total + $(job_sbu "${job_s}" "${size}")))
+        total=$((total + $(STAGED=1 job_sbu "${job_s}" "${size}")))
         jobs=$((jobs + 1))
     done
     echo "plan      : ${n} runs in ${jobs} GPU jobs, expected ${total} SBU"

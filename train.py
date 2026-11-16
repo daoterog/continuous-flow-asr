@@ -344,6 +344,26 @@ def setup_reproducibility(cfg: DictConfig) -> None:
     pl.seed_everything(cfg.seed, workers=True)
 
 
+# The eval loaders hold a whole eval batch per worker — 512 full-length utterances, ~2 GB —
+# so `auto` stops there: at 17 eval workers a run's main process reached ~53 GB and was
+# OOM-killed (configs/profiles/where/snellius.yaml).
+EVAL_WORKERS_CAP = 8
+
+
+def resolve_workers(value: int | str | None, cap: int | None = None) -> int | None:
+    """A worker count from the config: a number as given, or `auto` from the job's cores.
+
+    `auto` is the cores this process may use, less one for the main process that runs the
+    training step: SLURM_CPUS_PER_TASK under Slurm, the CPU affinity otherwise, so a job
+    that asks for a different slice uses all of it without a config change.
+    """
+    if value != "auto":
+        return value
+    cores = int(os.environ.get("SLURM_CPUS_PER_TASK") or len(os.sched_getaffinity(0)))
+    n = max(1, cores - 1)
+    return min(n, cap) if cap is not None else n
+
+
 def build_datamodule(cfg: DictConfig) -> AudioFeatureDataModule:
     """Tokenizer plus the three roles, set up so the measured sizes are available."""
     tokenizer = WhisperTokenizerFast.from_pretrained(
@@ -361,13 +381,13 @@ def build_datamodule(cfg: DictConfig) -> AudioFeatureDataModule:
         audio_stride=cfg.data.audio_stride,
         compact_vocab=cfg.data.compact_vocab,
         subset_n=subset_n,
-        num_workers=cfg.data.num_workers,
+        num_workers=resolve_workers(cfg.data.num_workers),
         seed=cfg.seed,
         pin_memory=torch.cuda.is_available(),
         steps_per_epoch=cfg.data.get("steps_per_epoch"),
         gpu_prefetch=bool(cfg.data.get("gpu_prefetch", False)),
         prefetch_factor=cfg.data.get("prefetch_factor"),
-        eval_num_workers=cfg.data.get("eval_num_workers"),
+        eval_num_workers=resolve_workers(cfg.data.get("eval_num_workers"), EVAL_WORKERS_CAP),
         read_threads=int(cfg.data.get("read_threads", 1)),
         direct_read=bool(cfg.data.get("direct_read", False)),
     ).prepare()

@@ -89,6 +89,25 @@ if [[ "${SUITE:-gpu}" == "prefetch" ]]; then
     exit "${failed}"
 fi
 
+# SUITE=now: where a run's time goes today, on one slice (1 GPU, 18 cores, 120G) with the
+# features staged on node-local NVMe exactly as a training job stages them. The `now` trials
+# (scripts/diagnostics/bench_train.py, NOW_TRIALS), then one validation pass and one sampling
+# probe with the learned source and per-token curves: the cost of an evaluation epoch.
+# Submit with SUITE=now ./jobs/submit/bench_train.sh, which asks for --constraint=scratch-node.
+if [[ "${SUITE:-gpu}" == "now" ]]; then
+    # shellcheck source=_stage.sh
+    source "${REPO_HOME:-$HOME/continuous-flow-asr}/jobs/batch/_stage.sh"
+    stage_features configs/recipes/fulldata.yaml --where snellius
+    echo "cores     : ${SLURM_CPUS_PER_TASK:-?} (workers auto: $((${SLURM_CPUS_PER_TASK:-18} - 1)))"
+    python -m scripts.diagnostics.bench_train --suite now --env snellius --no-warm \
+        --steps "${STEPS}" --n-utts "${N_UTTS}" --set "data.data_root=${STAGED_ROOT}"
+    python -m scripts.diagnostics.bench_train --suite now --env snellius --no-warm \
+        --eval-timing --at-batch "${AT_BATCH}" --set "data.data_root=${STAGED_ROOT}" \
+        'flow.learned_noise={"kl_weight":1,"target_scale":0.4}' \
+        schedule.time_curve=token schedule.uniform_floor=0.01
+    exit $?
+fi
+
 if [[ "${SUITE:-gpu}" == "prod" ]]; then
     python -m scripts.diagnostics.bench_train --suite prod --env snellius \
         --steps "${STEPS}" --n-utts "${N_UTTS}"

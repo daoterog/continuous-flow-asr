@@ -158,6 +158,27 @@ TUNE_TRIALS: list[tuple[str, list[str]]] = [
     ("tune: workers 17", ["data.num_workers=17"]),
 ]
 
+# Where a run's time goes today: the fulldata recipe with the learned preset source and
+# per-token time curves (lvar3's winner), features staged on node-local NVMe as a training
+# job stages them (jobs/batch/bench_train.sh, SUITE=now), one change per row. Against
+# `replay` (one batch kept on the GPU: no loader) and `loader` (the data path alone), the
+# `learned` row says whether the host or the GPU step keeps utilisation off the roof, and
+# the rest which knob lifts it. `fixed sigma` is the cost of the new machinery itself.
+LEARNED = ['flow.learned_noise={"kl_weight":1,"target_scale":0.4}',
+           "schedule.time_curve=token", "schedule.uniform_floor=0.01"]
+NOW_TRIALS: list[tuple[str, list[str]]] = [
+    ("now: learned, per-token", LEARNED),
+    ("now: replay (no loader)", [*LEARNED, REPLAY]),
+    ("now: loader only", [LOADER]),
+    ("now: fixed sigma, global curve", []),
+    ("now: workers 8", [*LEARNED, "data.num_workers=8"]),
+    ("now: max-autotune, no cudagraphs",
+     [*LEARNED, "train.compile_mode=max-autotune-no-cudagraphs"]),
+    ("now: input metric off", [*LEARNED, "metrics.input_perr_bins=0"]),
+    # Headroom only: a larger batch changes the optimisation, so it is not a free knob.
+    ("now: batch 256", [*LEARNED, "data.batch_size=256"]),
+]
+
 SUITES = {
     "laptop": (TRIALS, "configs/linear.yaml"),
     # The recipe, not configs/audio_cond.yaml: it is what cluster runs train (small + micro)
@@ -165,6 +186,7 @@ SUITES = {
     "prod": (PROD_TRIALS, "configs/recipes/fulldata.yaml"),
     "gpu": (None, "configs/recipes/fulldata.yaml"),
     "tune": (TUNE_TRIALS, "configs/recipes/fulldata.yaml"),  # built by gpu_trials(--at-batch, --batches)
+    "now": (NOW_TRIALS, "configs/recipes/fulldata.yaml"),
     # The recipe, not configs/flow_mapping.yaml directly: `--env snellius` goes through the
     # recipe guard in build_config, and the recipe adds nothing but its own name.
     "distill": (DISTILL_TRIALS, "configs/recipes/distill.yaml"),

@@ -19,10 +19,10 @@ data:
   # CudaPrefetcher). A100, batch 128, 2026-10-11: plain 643 utts/s, prefetch 736 (1.14x),
   # the same batch held on the GPU 916. Batches are bit-identical either way.
   gpu_prefetch: true
-  # Every run has its own 18 cores (jobs/batch/train.sh), so 17 workers leaves exactly the
-  # main process's core. A100, batch 128 + prefetch, 2026-10-11: 16 workers 711 utts/s,
-  # 17 workers 798 (+12%); a deeper prefetch_factor (4) changed nothing (712).
-  num_workers: 17
+  # `auto`: the job's cores less the main process's (train.resolve_workers) — 17 on an A100
+  # slice's 18, 15 on an H100's 16. A100, batch 128 + prefetch, 2026-10-11: 16 workers 711
+  # utts/s, 17 workers 798 (+12%); a deeper prefetch_factor (4) changed nothing (712).
+  num_workers: auto
   # One ready batch per worker instead of DataLoader's 2. At full latents a batch is ~490 MB,
   # so 17 workers x 2 kept ~17 GB in flight per run, and with two runs plus the feature cache
   # a job outgrew its 240G (a stage-1 run was OOM-killed). Speed is unchanged: depth 4 vs 2
@@ -30,8 +30,9 @@ data:
   prefetch_factor: 1
   # Val and test loaders keep their own persistent workers alive between passes; at 17 each
   # a run held ~34 worker processes and its main process reached ~53 GB, and a stage-2 run
-  # was still OOM-killed with prefetch_factor 1. A val pass every 10 epochs needs few.
-  eval_num_workers: 4
+  # was still OOM-killed with prefetch_factor 1. A val pass every 10 epochs needs few:
+  # `auto` is the cores less one, capped at train.EVAL_WORKERS_CAP (8).
+  eval_num_workers: auto
   # Val, test and the tau probe run under no_grad: 0.645 ms/utt at 512 against 0.836 at 32.
   eval_batch_size: 512
 schedule:
