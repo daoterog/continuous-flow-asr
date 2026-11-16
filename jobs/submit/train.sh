@@ -119,10 +119,18 @@ fi
 # lone run fits one GPU share instead of paying for two. SCRATCH_NODE=1 forces it, =0 opts
 # out. The size is the files `train.py --print-data-dirs` lists, the ones the job copies.
 features_bytes() {
-    local listing
+    local listing err
+    err="$(mktemp)"
     # shellcheck disable=SC2086
-    listing="$(cd "${REPO_DIR}" && python train.py --config "${CONFIG}" --where snellius \
-        --run "${TRAIN_RUN:-full}" ${OVERRIDES} --print-data-dirs 2>/dev/null)" || return 0
+    if ! listing="$(cd "${REPO_DIR}" && python train.py --config "${CONFIG}" --where snellius \
+        --run "${TRAIN_RUN:-full}" ${OVERRIDES} --print-data-dirs 2>"${err}")"; then
+        # Said out loud: a silent failure here means no staging, 160G, and a 2-GPU bill.
+        echo "WARNING: train.py --print-data-dirs failed, so staging cannot be sized:" >&2
+        tail -3 "${err}" | sed 's/^/    /' >&2
+        rm -f "${err}"
+        return 0
+    fi
+    rm -f "${err}"
     mapfile -t dirs < <(awk '$1 == "dir" {print $2}' <<< "${listing}")
     ((${#dirs[@]})) || return 0
     find "${dirs[@]}" -maxdepth 1 -type f -printf "%s\n" 2>/dev/null | awk '{s += $1} END {if (s) print s}'

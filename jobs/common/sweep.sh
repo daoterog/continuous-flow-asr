@@ -60,9 +60,11 @@ flush_runs() {
     for ((i = 0; i < n; i += PACK)); do groups+=("${i}"); done
 
     echo "tier      : ${TIER} (--run ${TRAIN_RUN})  epochs ${EPOCHS}  seeds '${SEEDS}'  ${PACK} run(s) per job, one GPU each"
-    # Priced as staged — one share per run — which is what jobs/submit/train.sh does
-    # whenever the features fit the job's NVMe slice (train.100 and train.960 both do). A
-    # run that is not staged is priced again, at its own resources, when it is submitted.
+    # Priced as staged — one share per run — and submitted staged (SCRATCH_NODE=1 below):
+    # train.100 and train.960 both fit a run's NVMe slice, and the batch job refuses to
+    # start if they do not. Left to jobs/submit/train.sh's own size probe, which runs
+    # train.py on the login node, a probe failure silently meant unstaged, 160G, and a
+    # lone run refused as a 2-GPU bill. SCRATCH_NODE=0 in the environment still opts out.
     for i in "${groups[@]}"; do
         size=$((n - i < PACK ? n - i : PACK))
         job_s="$(est_job_seconds "${EPOCHS}")"
@@ -93,10 +95,10 @@ flush_runs() {
         done
         echo "=== ${label}"
         if [[ -n "${SUBMIT}" ]]; then
-            WALLTIME="${wall}" EXPECTED_S="${job_s}" EPOCHS="${EPOCHS}" BUDGET_GATED=1 \
-                ./jobs/submit/train.sh "${CONFIG}" "${args[@]}"
+            SCRATCH_NODE="${SCRATCH_NODE:-1}" WALLTIME="${wall}" EXPECTED_S="${job_s}" \
+                EPOCHS="${EPOCHS}" BUDGET_GATED=1 ./jobs/submit/train.sh "${CONFIG}" "${args[@]}"
         else
-            echo "    TRAIN_RUN=${TRAIN_RUN} WALLTIME=${wall} ./jobs/submit/train.sh ${CONFIG} ${args[*]}"
+            echo "    TRAIN_RUN=${TRAIN_RUN} SCRATCH_NODE=${SCRATCH_NODE:-1} WALLTIME=${wall} ./jobs/submit/train.sh ${CONFIG} ${args[*]}"
         fi
     done
 
