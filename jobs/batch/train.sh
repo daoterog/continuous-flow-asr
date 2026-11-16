@@ -97,8 +97,9 @@ if [[ -n "${STAGE_DATA}" ]]; then
     # Every run in this job reads the staged copy, and trains through the direct reader
     # (src/data/direct.py): from local disk the DataLoader's serial pinning of each ~490 MB
     # batch is the limit, not its workers (A100 slice, 2026-11-16: loader alone 831 utts/s,
-    # GPU alone 867, together 747; 8 workers and 17 the same). Validation keeps the
-    # DataLoader. The direct reader only makes sense on local disk, which is known here.
+    # GPU alone 867, together 747; 8 workers and 17 the same). The direct reader reaches
+    # 852 utts/s at 98% GPU with 8 threads, 836 with 16 (job 29307524), so 8 is the default.
+    # Validation keeps the DataLoader. It only makes sense on local disk, known here.
     for ((i = 0; i < ${TRAIN_N:-1}; i++)); do
         var="TRAIN_OVERRIDES_${i}"
         printf -v "${var}" '%s' "${!var} data.data_root=${STAGED_ROOT} data.direct_read=true data.read_threads=${READ_THREADS:-8}"
